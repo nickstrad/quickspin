@@ -39,7 +39,7 @@ containerd behind the CRI.
 
 ## What you'll learn
 
-- The Docker Engine API from Go (`github.com/docker/docker/client`) — what `docker run`
+- The Docker Engine API from Go (`github.com/moby/moby/client`) — what `docker run`
   actually does (create + start are separate calls).
 - Designing a Go interface for a resource lifecycle: constructors, contexts everywhere,
   error taxonomy with `errors.Is`.
@@ -252,7 +252,7 @@ Decisions the plan commits to:
     title="Prove the socket works before writing lifecycle code"
     check="A throwaway main or test prints the daemon version through the Go SDK."
   >
-    Construct the client with `client.NewClientWithOpts(client.FromEnv,
+    Construct the client with `client.New(client.FromEnv,
     client.WithAPIVersionNegotiation())` and call `Ping` or `ServerVersion`. If this
     fails, the problem is plan 01's `DOCKER_HOST`/socket setup, not your code — debug
     there, not here.
@@ -283,16 +283,18 @@ Decisions the plan commits to:
   >
     Destroy resolves the label to a container, then removes it with force. Two
     "absent" cases must both return nil: the label lookup finds nothing, and the
-    remove call races with someone else's remove (the SDK exposes
-    `errdefs.IsNotFound`). Any other error is real and must surface.
+    remove call races with someone else's remove (classify with
+    `github.com/containerd/errdefs`'s `IsNotFound`). Any other error is real and must
+    surface.
   </Hint>
   <Hint
     title="Map SDK failures to your sentinels at the boundary, nowhere else"
     check="Creating from an image you have not pulled returns an error where errors.Is(err, ErrImageMissing) is true, and the CLI prints a one-line message rather than a Docker stack."
   >
-    The Docker SDK's `errdefs` package classifies daemon errors (`IsNotFound`,
-    `IsConflict`). Translate them to your sentinels inside `dockerRuntime` methods —
-    if callers ever import `errdefs`, the backend has leaked. `ErrImageMissing` comes
+    The `github.com/containerd/errdefs` package classifies daemon errors (`IsNotFound`,
+    `IsConflict`) — the moby client returns errors it recognizes. Translate them to your
+    sentinels inside `dockerRuntime` methods — if callers ever import `errdefs`, the
+    backend has leaked. `ErrImageMissing` comes
     from the create call failing with a "No such image" not-found.
   </Hint>
   <Hint
@@ -354,8 +356,8 @@ one create equals one cold container, measured honestly, until plan 11.
   </Resource>
   <Resource
     kind="docs"
-    title="package client — github.com/docker/docker/client"
-    href="https://pkg.go.dev/github.com/docker/docker/client"
+    title="package client — github.com/moby/moby/client"
+    href="https://pkg.go.dev/github.com/moby/moby/client"
   >
     The API reference you will actually live in; note how every method takes a
     context, the pattern your interface copies.

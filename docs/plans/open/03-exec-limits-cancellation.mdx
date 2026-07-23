@@ -209,7 +209,7 @@ plan (07) so it is built once, in the right place.
     title="Demultiplex with stdcopy, never a raw io.Copy"
     check="Stdout and Stderr come back byte-exact with no stray 8-byte headers, and TestExecSeparatesStreamsAndExitCode passes."
   >
-    `github.com/docker/docker/pkg/stdcopy.StdCopy(stdoutW, stderrW, resp.Reader)`
+    `github.com/moby/moby/api/pkg/stdcopy.StdCopy(stdoutW, stderrW, resp.Reader)`
     decodes the frame format. If output contains occasional unprintable bytes, you
     copied the raw multiplexed stream. For the cap, wrap each destination in a small
     writer that counts bytes, discards past the limit, and sets a truncated flag —
@@ -338,8 +338,8 @@ bandwidth — that nuance is deferred to the isolation capstones.
   </Resource>
   <Resource
     kind="docs"
-    title="package stdcopy — github.com/docker/docker/pkg/stdcopy"
-    href="https://pkg.go.dev/github.com/docker/docker/pkg/stdcopy"
+    title="package stdcopy — github.com/moby/moby/api/pkg/stdcopy"
+    href="https://pkg.go.dev/github.com/moby/moby/api/pkg/stdcopy"
   >
     The demultiplexer this plan leans on, with the frame-header format documented —
     the spec you will reimplement natively in plan 07.
