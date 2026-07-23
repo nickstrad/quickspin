@@ -8,6 +8,13 @@ The path begins with a single local sandbox and progressively exposes lifecycle,
 control-plane, scheduling, performance, and isolation concerns. Each stage should answer
 its own questions before the next stage adds complexity.
 
+The stages are now instantiated as concrete plans (`docs/plans/open/01`–`18`); where the
+two disagree, the plans are authoritative. Rough mapping: stage 1 → plans 01–04, stage 2
+→ plans 05–08, stage 3 → plans 09–10 (plus Python), stage 4 → plan 17 (which deliberately
+defers this stage's ownership leases — see that plan's known-gaps note), stage 5 → plan
+11, stage 6 → plans 13–14, stage 7 → plans 16 and 18. Refer to stages by plan number in
+other documents; bare stage numbers have already been mistaken for plan numbers once.
+
 ## 1. Run one isolated sandbox locally
 
 Build a Go runtime that manages a local Docker container through a small lifecycle:
