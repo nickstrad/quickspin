@@ -1,0 +1,329 @@
+# 12 — Capstone: agent harness on Quickspin
+
+Depends on: 09 (or 10), 11 recommended.
+
+## Summary
+
+The end-to-end goal from the project's founding description: a **separate repo**
+(`quickspin-demo` or similar) that imports your SDK, onboards to the platform with an
+API key, and runs an LLM agent loop that develops working code inside a Quickspin
+sandbox — writing files, running tests, reading failures, iterating until green, and
+handing back the result. This plan is mostly integration and dogfooding; the code you
+write is a small tool-loop harness, and every rough edge you hit is filed against
+earlier components.
+
+<KeyPoint label="The harness is the customer">
+  Nothing in this plan extends the platform. Its value is the friction log: onboarding
+  steps that annoyed you, SDK calls that were awkward, latency that made the agent
+  feel slow. Each item lands as a note against the plan that owns it.
+</KeyPoint>
+
+## Industry context
+
+This is the customer's-eyes view: it is exactly what E2B's "code interpreter" quickstart
+and Anthropic's tool-use loops do — the LLM never touches the host; every `write_file`
+/ `run_command` tool call becomes an SDK call into an isolated sandbox. Platforms live
+or die on how this loop feels: sandbox startup latency shows up as user-visible agent
+latency (your plan 11 snapshots exist for exactly this), TTLs protect you from crashed
+harnesses (plan 06), and typed SDK errors decide whether the agent can recover or just
+dies (plans 09/10). Dogfooding the platform through a real agent is how every platform
+team finds its actual API gaps.
+
+## What you'll learn
+
+- The consumer's view of your own API: what's awkward, what's missing, what's slow.
+- A minimal agent tool loop with the Anthropic API: tool definitions
+  (`write_file`, `run_command`, `read_file`, `task_done`), executing tool calls against
+  the SDK, feeding results back.
+- Failure handling at the harness level: sandbox died mid-task, quota hit, exec
+  timeout — mapping typed SDK errors to agent-visible outcomes.
+- Latency budgeting: where the seconds go in one agent step.
+
+### Concept: the tool loop is a stop-reason state machine
+
+The Anthropic Messages API is stateless; the "agent" is a loop your harness runs. Each
+turn, the harness sends the full conversation plus the tool definitions; the model
+either answers (`stop_reason: "end_turn"`) or asks for tools (`stop_reason:
+"tool_use"`, with one or more `tool_use` content blocks carrying a name, typed input,
+and an id). The harness executes each call against the SDK and appends **all** results
+as `tool_result` blocks — each echoing its `tool_use_id` — in a **single** user
+message, then calls the API again. Two rules keep the loop honest: a failed tool
+returns a `tool_result` with `is_error: true` rather than being dropped (the model
+recovers from errors it can see, and silently missing results break the turn), and the
+loop needs a hard iteration cap so a confused model cannot burn tokens forever. The
+`task_done` tool is the model's way of ending the loop deliberately — the harness
+treats it as a claim to verify, not a verdict.
+
+<Figure caption="One agent step: the model plans against the transcript, the harness translates tool calls into SDK calls, the sandbox does the work, and results flow back as the next user message.">
+  <svg viewBox="0 0 640 200" role="img" aria-label="Loop between the Anthropic API, the harness, the quickspin SDK, and the sandbox">
+    <defs>
+      <marker id="arrow12" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+    </defs>
+    <rect x="15" y="55" width="150" height="52" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="90" y="77" textAnchor="middle" fontSize="12" fill="#18231f">Claude (Messages API)</text>
+    <text x="90" y="93" textAnchor="middle" fontSize="10" fill="#405049">tools + transcript in</text>
+    <rect x="245" y="55" width="150" height="52" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="320" y="77" textAnchor="middle" fontSize="12" fill="#18231f">harness.ts</text>
+    <text x="320" y="93" textAnchor="middle" fontSize="10" fill="#405049">dispatch + error mapping</text>
+    <rect x="475" y="55" width="150" height="52" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="550" y="77" textAnchor="middle" fontSize="12" fill="#18231f">sandbox</text>
+    <text x="550" y="93" textAnchor="middle" fontSize="10" fill="#405049">via @quickspin/sdk</text>
+    <path d="M 165 68 L 243 68" fill="none" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow12)" />
+    <text x="204" y="58" textAnchor="middle" fontSize="10" fill="#8f3423">tool_use blocks</text>
+    <path d="M 243 96 L 165 96" fill="none" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow12)" />
+    <text x="204" y="122" textAnchor="middle" fontSize="10" fill="#8f3423">tool_result (one user msg)</text>
+    <path d="M 395 68 L 473 68" fill="none" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow12)" />
+    <text x="434" y="58" textAnchor="middle" fontSize="10" fill="#8f3423">exec / files.write</text>
+    <path d="M 473 96 L 395 96" fill="none" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow12)" />
+    <text x="434" y="122" textAnchor="middle" fontSize="10" fill="#8f3423">exit code, stdout, stderr</text>
+    <path d="M 320 107 C 320 165 90 165 90 107" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow12)" />
+    <text x="205" y="172" textAnchor="middle" fontSize="10" fill="#7f5d43">repeat until task_done, iteration cap, or typed failure</text>
+  </svg>
+</Figure>
+
+### Concept: verification lives in the environment, not the model
+
+A model's "the tests pass now" is a prediction, not evidence — models report success
+they haven't earned, especially near the end of a long loop. This harness's design
+answer is that every task carries a machine-checkable success command, and the
+harness's verdict is exactly one bit: did that command exit 0 *inside the sandbox*
+when the harness ran it after the loop ended. The model is encouraged to run tests
+itself mid-loop (that is how it iterates), but its self-reports never decide the
+outcome. This is the same principle the whole platform is built on — trust the
+environment's observations over any participant's claims — showing up one layer higher.
+
+### Concept: typed errors are what separate outcomes from stack traces
+
+Mid-task, the sandbox can vanish (TTL fired, chaos kill, host issue), the tenant can
+hit quota, or a command can time out. To the harness these must be *different*
+outcomes: `SandboxNotFoundError` during a tool call means the task is unrecoverable
+and should end with a clean "sandbox lost" verdict; an exec timeout is just a failed
+tool call the model should hear about via `is_error: true` and route around; a network
+blip against the plane is retryable. This mapping — which typed error becomes an
+agent-visible tool error, which aborts the task, which retries — is the harness's
+actual design content, and it only works because plans 09/10 made the errors types
+instead of message strings. The `--chaos` flag exists to prove the mapping under fire.
+
+<Callout tone="warning" title="All results in one message, or the loop silently degrades">
+  When the model emits several tool_use blocks in one turn, return every tool_result
+  in a single user message. Splitting them across messages (or dropping a failed one)
+  malforms the transcript — the API rejects unmatched tool_use ids, and partial
+  results teach the model to stop parallelizing.
+</Callout>
+
+## Design and interfaces
+
+Demo repo shape (TypeScript, matching your strongest language; the harness is ~200
+lines and not the learning focus):
+
+```text
+quickspin-demo/
+  harness.ts        agent loop: task in, Anthropic tool loop against one sandbox
+  tools.ts          tool schemas + dispatch to @quickspin/sdk
+  tasks/            2–3 task prompts of increasing difficulty (see DoD)
+  run.ts            CLI: create sandbox (from a deps snapshot), run task, print
+                    transcript + verdict, kill sandbox in finally
+```
+
+Committed decisions: the harness restores from a pre-built snapshot (language
+toolchain + test runner preinstalled) so agent steps aren't dominated by installs; the
+sandbox is created per-task and killed in a `finally`; TTL + keepalive is the crash
+safety net; the model verifies its own work by running tests in the sandbox — the
+harness's verdict is only "did the task's check command exit 0".
+
+## Tasks
+
+<TaskList>
+  <Task title="Scaffold the demo repo and onboard">
+    Separate repo; import the SDK as a path/git dependency; onboard with a freshly
+    minted key — and record the onboarding steps, because that friction list is a
+    deliverable.
+  </Task>
+  <Task title="Build the base snapshot">
+    A small `setup.ts` using the SDK builds the snapshot the harness restores from.
+    Make the starting point a config switch — snapshot name or plain image — because
+    plan 16 runs this same harness against Firecracker-backed prod, where snapshots
+    are unsupported and the harness must fall back to image-based creates.
+  </Task>
+  <Task title="Implement the tool loop">
+    `harness.ts` + `tools.ts`: tool schemas, the stop-reason loop, dispatch into the
+    SDK, error mapping, iteration cap.
+  </Task>
+  <Task title="Author three machine-checkable tasks">
+    (a) "make this failing test pass" (repo pre-seeded in the snapshot), (b)
+    "implement a CLI that does X, with tests" from an empty dir, (c) one task that
+    intentionally tempts long-running commands (exercises timeouts). Each with a
+    success command.
+  </Task>
+  <Task title="Run everything and keep the friction log">
+    Run all tasks; file each friction item as a note against its plan.
+  </Task>
+  <Task title="Write the latency reference">
+    `docs/reference/demo-latency.mdx`: per-step timing for one full task run.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Onboard exactly as a stranger would, and write it down"
+    check="A fresh directory with npm init, the SDK as a file: dependency, ANTHROPIC_API_KEY and QUICKSPIN_API_KEY set, can run a five-line script that creates a sandbox, execs echo, and kills it."
+  >
+    Resist reaching into platform-repo knowledge: mint a key with the admin CLI, add
+    `"@quickspin/sdk": "file:../quickspin/sdk/typescript"` (or a git URL), and follow
+    only your own README. Every step where you needed insider knowledge goes in the
+    friction log verbatim — that smoke script is also your latency baseline later.
+  </Hint>
+  <Hint
+    title="Build the snapshot with a setup script, and make the start point a switch"
+    check="setup.ts prints a snapshot name; run.ts started with a config for either that snapshot or a plain image creates a working sandbox both ways."
+  >
+    `setup.ts`: create from the base image, exec the installs (toolchain, test
+    runner, and task (a)'s pre-seeded repo), call `sbx.save(name)`. Read the start
+    point from config (env var or a small JSON) into one function that returns create
+    options — that seam is what plan 16 flips when snapshots are unavailable. Rebuild
+    is rerun-the-script; snapshots are cattle.
+  </Hint>
+  <Hint
+    title="Define the four tools with prescriptive descriptions"
+    check="A one-turn probe run shows the model choosing run_command with sensible input for a prompt like list the files in /app."
+  >
+    In `tools.ts`, each tool is a JSON-schema entry (`name`, `description`,
+    `input_schema`) plus a dispatch function into the SDK: `write_file` →
+    `sbx.files.write`, `read_file` → `sbx.files.read`, `run_command` → `sbx.exec`
+    with a timeout, `task_done` → loop exit. Descriptions should say *when* to use
+    each tool, not just what it does, and `run_command`'s should state the timeout so
+    the model plans around it. Use the SDK's types (`Anthropic.Tool`) rather than
+    hand-rolling shapes.
+  </Hint>
+  <Hint
+    title="Write the loop against stop_reason, and cap it"
+    check="Task (a) runs end to end: the transcript shows alternating assistant tool calls and tool results, and the loop exits via task_done rather than the iteration cap."
+  >
+    The skeleton: build `messages`, call `client.messages.create` with `tools`, and
+    loop while `response.stop_reason === "tool_use"` — push the assistant's full
+    `response.content`, execute every `tool_use` block, push one user message
+    containing all `tool_result` blocks (each with its `tool_use_id`; failures get
+    `is_error: true`), repeat. Cap iterations (~30) and treat hitting the cap as a
+    failed task. Keep the transcript printer separate from the loop so `run.ts` can
+    show it either way.
+  </Hint>
+  <Hint
+    title="Map SDK errors to outcomes in one place"
+    check="Killing the sandbox out-of-band mid-task (quickspin sandbox destroy) ends the run within one step with a sandbox-lost verdict and exit code, not a stack trace."
+  >
+    Wrap the dispatch call: exec timeout or a command failure → `tool_result` with
+    `is_error: true` (the model should hear about it); `instanceof
+    SandboxNotFoundError` or `QuotaExceededError` → throw a harness-level
+    `TaskAborted` carrying the outcome name, caught in `run.ts`. The `finally` in
+    `run.ts` calls `sbx.kill()` unconditionally — idempotent kill means the abort
+    path and the success path share it.
+  </Hint>
+  <Hint
+    title="Verify with the check command, then instrument the run"
+    check="npm run demo -- tasks/a exits 0, and the printed timing table accounts for sandbox create, each model call, and each tool execution."
+  >
+    After the loop ends — however it ends — run the task's check command via
+    `sbx.exec` and let its exit code be the process exit code. For timing, wrap the
+    two await points (model call, tool dispatch) with `performance.now()` and tag
+    each with step number and tool name; dump a table at the end. That table is the
+    raw material for `docs/reference/demo-latency.mdx` — expect model calls and
+    sandbox create to dominate, and say so with numbers.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: the chaos run hangs or leaks"
+    check="npm run demo -- tasks/a --chaos exits promptly with the sandbox-lost outcome, and quickspin sandbox list for the demo tenant is empty afterwards — also after a Ctrl-C mid-run."
+  >
+    `--chaos` schedules an out-of-band kill (admin CLI via `child_process`, a few
+    steps in). If the run *hangs*, some SDK call is waiting without a timeout —
+    usually a streamed exec whose sandbox died; ensure exec paths carry `timeoutMs`
+    and the SDK surfaces the 404 as `SandboxNotFoundError` (if it surfaces something
+    untyped, that is a plan 09 bug — file it, don't work around it). If a sandbox
+    *leaks* after Ctrl-C, note that `finally` does not run on SIGINT by default —
+    either handle SIGINT to trigger cleanup or verify the TTL reaps it (watch
+    `quickspin sandbox list` until it disappears) and record which mechanism covered
+    which case; the DoD asks for both.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+This plan's validation is the demo itself, scripted:
+
+- `npm run demo -- tasks/a` (and b, c) each: creates a sandbox from snapshot, runs the
+  agent loop, and exits 0 **iff** the task's check command passed inside the sandbox.
+- A `--chaos` flag on one run kills the sandbox mid-task (via the admin API/CLI) and
+  the harness surfaces a clean typed-error outcome, not a hang or stack trace.
+- After any demo run (success or failure), `quickspin sandbox list` for the demo tenant
+  is empty — nothing leaks even when the harness is killed with Ctrl-C (TTL covers the
+  worst case; assert the `finally` covers the normal case).
+- The friction log exists with at least the honest contents (an empty friction log
+  fails review by definition).
+
+Deliberately untested: multi-sandbox parallel agents, cost accounting of model tokens,
+non-Anthropic model providers.
+
+## Solo-developer tradeoffs
+
+A commercial demo would be a hosted playground with streaming UI; yours is a CLI that
+prints a transcript — right-sized, and closer to how platform engineers actually smoke-
+test. Using your own harness rather than adopting a framework (LangChain etc.) keeps
+the dependency surface tiny and makes the demo legible in an interview: every line
+between "LLM decided" and "sandbox executed" is code you can explain. This plan is also
+the natural stopping point for the résumé artifact — 13 and 14 are depth, not breadth.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="Tool use with Claude"
+    href="https://docs.claude.com/en/docs/agents-and-tools/tool-use/overview"
+    by="Claude Platform Docs"
+  >
+    The official contract the loop implements — tool definitions, `stop_reason`
+    handling, `tool_result` matching, and `is_error` — with the edge cases the
+    all-results-in-one-message callout summarizes.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Messages API reference"
+    href="https://docs.claude.com/en/api/messages"
+    by="Claude API Reference"
+  >
+    The exact wire shapes of content blocks, stop reasons, and tool schemas — the
+    thing to check when the API rejects a transcript your loop built.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Building Effective AI Agents"
+    href="https://www.anthropic.com/engineering/building-effective-agents"
+    by="Anthropic"
+  >
+    Anthropic's argument for exactly this plan's stance: simple, legible loops over
+    frameworks, and when an agent (vs a fixed workflow) is actually warranted.
+  </Resource>
+  <Resource
+    kind="paper"
+    title="ReAct: Synergizing Reasoning and Acting in Language Models"
+    href="https://arxiv.org/abs/2210.03629"
+    by="Yao et al., 2022"
+  >
+    The research root of the reason-act-observe loop the harness runs — useful for
+    seeing which parts of today's tool-use pattern are fundamental and which are API
+    packaging.
+  </Resource>
+  <Resource
+    kind="paper"
+    title="SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering"
+    href="https://arxiv.org/abs/2405.15793"
+    by="Yang et al., 2024"
+  >
+    Evidence that tool ergonomics — how commands, files, and errors are surfaced to
+    the model — measurably change agent success, which is the friction log's thesis
+    with data behind it.
+  </Resource>
+</Resources>

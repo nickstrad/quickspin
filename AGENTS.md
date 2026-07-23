@@ -72,17 +72,22 @@ package manager until the repository chooses one.
 ## Documentation
 
 All project documentation lives in [`docs/`](docs/). Start at
-[`docs/index.md`](docs/index.md), which describes the documentation layout and links to
+[`docs/index.mdx`](docs/index.mdx), which describes the documentation layout and links to
 the current reference material.
 
-- `docs/plans/open/` contains plans that are proposed or still in progress. Do not
+- `docs/plans/open/` contains MDX plans that are proposed or still in progress. Do not
   implement a plan merely because it exists; wait for the user to ask.
-- `docs/plans/closed/` contains completed plans retained as historical context. They may
+- `docs/plans/closed/` contains completed MDX plans retained as historical context. They may
   explain why something changed, but the current code remains authoritative.
 - `docs/reference/` contains forward-looking learning and architecture material. It is
   not a specification for current behavior and should not be implemented unless asked.
 
-Keep `docs/index.md` current when adding, moving, or removing documentation.
+Keep `docs/index.mdx` current when adding, moving, or removing documentation.
+
+The local reader lives in `docs/`. Use `make docs` to start it and `make docs-build` to
+type-check and produce a static build. Documentation content uses `.mdx`; keep
+`docs/plans/AGENTS.md` as Markdown because its exact filename activates scoped agent
+instructions.
 
 ## Git
 

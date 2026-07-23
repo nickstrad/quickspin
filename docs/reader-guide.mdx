@@ -1,0 +1,264 @@
+# Reader and MDX component guide
+
+The documentation reader treats every `.mdx` file in the docs root, `plans/open/`,
+`plans/closed/`, and `reference/` as a navigable document. Ordinary Markdown works
+unchanged. MDX components are available when a concept benefits from more structure or
+progressive disclosure.
+
+The reader is a TypeScript React application. Its own components and every generated
+shadcn/ui component use `.tsx`, and `make docs-build` runs the TypeScript compiler before
+building the site.
+
+Start the reader from the repository root:
+
+```sh
+make docs
+```
+
+The Make target installs the locked npm dependencies automatically when they are missing.
+Use `make docs-install` to force a clean dependency install.
+
+Press `/` to focus full-text search. Use the left rail to move between plans and the
+right outline to jump within the current document.
+
+<Callout tone="idea" title="A useful constraint">
+  Use components to make information easier to understand, compare, or reveal. A normal
+  paragraph is still the best tool for normal prose.
+</Callout>
+
+## Callouts
+
+Use `Callout` for information that needs a distinct role in the surrounding explanation.
+
+```mdx
+<Callout tone="warning" title="Cleanup is part of correctness">
+  A timed-out command is not finished until its process tree and container resources are
+  gone.
+</Callout>
+```
+
+The supported tones are `note`, `idea`, `warning`, and `system`.
+
+<Callout tone="warning" title="Cleanup is part of correctness">
+  A timed-out command is not finished until its process tree and container resources are
+  gone.
+</Callout>
+
+## Progressive hints and self-checks
+
+`StudyPrompt` keeps help collapsed until the reader chooses to reveal it. It is the
+preferred component for the required Hint steps in a plan.
+
+```mdx
+<StudyPrompt question="Where should sandbox identity be allocated?">
+  Start by deciding which identity must survive a runtime restart. That identity belongs
+  to the control plane; the Docker container ID can remain a backend reference.
+</StudyPrompt>
+```
+
+<StudyPrompt question="Where should sandbox identity be allocated?">
+  Start by deciding which identity must survive a runtime restart. That identity belongs
+  to the control plane; the Docker container ID can remain a backend reference.
+</StudyPrompt>
+
+Hints should progress from a question, to the relevant mechanism, to a rough code shape.
+They should never contain the complete implementation.
+
+## Key points
+
+Use `KeyPoint` for one invariant or conclusion that the reader should retain.
+
+```mdx
+<KeyPoint label="Invariant">
+  Destroying a sandbox that is already absent must succeed.
+</KeyPoint>
+```
+
+<KeyPoint label="Invariant">
+  Destroying a sandbox that is already absent must succeed.
+</KeyPoint>
+
+## Process steps
+
+Use `Steps` and `Step` when a sequence is materially easier to follow as a flow than as a
+normal task list.
+
+```mdx
+<Steps>
+  <Step title="Record intent">Persist the desired sandbox before touching Docker.</Step>
+  <Step title="Apply intent">Ask the runtime to create the corresponding container.</Step>
+  <Step title="Observe">Inspect actual state and update the durable record.</Step>
+</Steps>
+```
+
+<Steps>
+  <Step title="Record intent">Persist the desired sandbox before touching Docker.</Step>
+  <Step title="Apply intent">Ask the runtime to create the corresponding container.</Step>
+  <Step title="Observe">Inspect actual state and update the durable record.</Step>
+</Steps>
+
+## Comparisons
+
+Use `Compare` and `CompareItem` for two or more approaches whose differences matter.
+
+```mdx
+<Compare>
+  <CompareItem eyebrow="Local first" title="Docker backend">
+    Faster to implement and exposes the container lifecycle through a familiar API.
+  </CompareItem>
+  <CompareItem eyebrow="Deep dive" title="OCI runtime">
+    Exposes bundles, snapshots, shims, and lower-level runtime state.
+  </CompareItem>
+</Compare>
+```
+
+<Compare>
+  <CompareItem eyebrow="Local first" title="Docker backend">
+    Faster to implement and exposes the container lifecycle through a familiar API.
+  </CompareItem>
+  <CompareItem eyebrow="Deep dive" title="OCI runtime">
+    Exposes bundles, snapshots, shims, and lower-level runtime state.
+  </CompareItem>
+</Compare>
+
+## Interactive task checklists
+
+Use `TaskList` and `Task` for a plan's `## Tasks` section. Checkbox state persists in
+the browser (per plan), the list shows a progress bar, and the sidebar shows each
+plan's completion count so progress is visible across the whole learning path.
+
+```mdx
+<TaskList>
+  <Task title="Define the interface">
+    Define `Runtime`, its types, and the sentinel errors in `internal/runtime`.
+  </Task>
+  <Task title="Implement the Docker backend">
+    Implement `dockerRuntime` against the Lima Docker socket.
+  </Task>
+</TaskList>
+```
+
+<TaskList>
+  <Task title="Define the interface">
+    Define `Runtime`, its types, and the sentinel errors in `internal/runtime`.
+  </Task>
+  <Task title="Implement the Docker backend">
+    Implement `dockerRuntime` against the Lima Docker socket.
+  </Task>
+</TaskList>
+
+Task titles double as storage keys, so keep them stable once a plan is in progress.
+Pass an explicit `id` if a title must change without losing the checkbox state.
+
+## Sequential hint reveal
+
+Use `HintSteps` and `Hint` for the required `## Hint steps` section. Hints unlock one
+at a time, in order, so a later hint cannot spoil the task the reader is still on.
+Locked hints show only their title. The optional `check` prop states the observable
+result that confirms the reader is back on track.
+
+```mdx
+<HintSteps>
+  <Hint
+    title="Start from the identity question"
+    check="You can say which ID survives a daemon restart and which does not."
+  >
+    Decide which identity must survive a runtime restart before writing any code.
+    Read how Docker labels work: `docker run --label`, then `docker ps --filter label=`.
+  </Hint>
+  <Hint title="Map create to the two Docker calls">
+    `docker run` is `ContainerCreate` followed by `ContainerStart`. Sketch what happens
+    if the second call fails — that gap is where cleanup logic lives.
+  </Hint>
+</HintSteps>
+```
+
+<HintSteps>
+  <Hint
+    title="Start from the identity question"
+    check="You can say which ID survives a daemon restart and which does not."
+  >
+    Decide which identity must survive a runtime restart before writing any code.
+    Read how Docker labels work: `docker run --label`, then `docker ps --filter label=`.
+  </Hint>
+  <Hint title="Map create to the two Docker calls">
+    `docker run` is `ContainerCreate` followed by `ContainerStart`. Sketch what happens
+    if the second call fails — that gap is where cleanup logic lives.
+  </Hint>
+</HintSteps>
+
+## External resources
+
+Use `Resources` and `Resource` for a plan's `## Go deeper` section. The `kind` prop
+(`docs`, `article`, `book`, `video`, `paper`) renders a type badge; `href` is optional
+so unlinkable resources (books, conference talks) can be cited by title and author.
+
+```mdx
+<Resources>
+  <Resource kind="docs" title="Docker Engine SDK for Go" href="https://docs.docker.com/reference/api/engine/sdk/">
+    The canonical reference for the client used throughout this plan.
+  </Resource>
+  <Resource kind="video" title="Containers from Scratch" by="Liz Rice, GOTO 2018">
+    Builds a container in ~60 lines of Go, live.
+  </Resource>
+</Resources>
+```
+
+<Resources>
+  <Resource kind="docs" title="Docker Engine SDK for Go" href="https://docs.docker.com/reference/api/engine/sdk/">
+    The canonical reference for the client used throughout this plan.
+  </Resource>
+  <Resource kind="video" title="Containers from Scratch" by="Liz Rice, GOTO 2018">
+    Builds a container in ~60 lines of Go, live.
+  </Resource>
+</Resources>
+
+Only include an `href` that is verified to resolve; cite anything else without a link.
+
+## Diagrams
+
+Use fenced text diagrams when monospace layout communicates the idea clearly:
+
+```text
+desired record ──> reconciler ──> runtime operation
+      ^                                  │
+      └──────── observed state ──────────┘
+```
+
+For richer diagrams, write inline SVG wrapped in `Figure`, which provides the framed
+canvas, horizontal scrolling, and an optional caption. MDX accepts JSX directly, so no
+imports are needed:
+
+```mdx
+<Figure caption="The reconciler closes the loop between desired and observed state.">
+  <svg viewBox="0 0 520 120" role="img" aria-label="Reconcile loop">
+    <rect x="10" y="40" width="140" height="40" fill="none" stroke="#18231f" />
+    <text x="80" y="64" textAnchor="middle" fontSize="12">desired record</text>
+    <line x1="150" y1="60" x2="230" y2="60" stroke="#cf5436" markerEnd="url(#arrow)" />
+    {/* ... */}
+  </svg>
+</Figure>
+```
+
+Style conventions for SVG diagrams: ink `#18231f` for boxes and labels, accent
+`#cf5436` for the arrows or transitions the diagram is really about, gold `#caa552`
+for secondary annotations, and no fills that rely on color alone to carry meaning.
+Use SVG attribute casing (`textAnchor`, `strokeWidth`, `markerEnd`) since this is JSX.
+
+A diagram should explain a lifecycle, hierarchy, request path, state transition, or
+ownership boundary—not decorate a section that prose already explains. Fenced text
+diagrams remain fine when monospace layout is already clear.
+
+## Authoring rules
+
+- Keep plan filenames in the `NN-short-slug.mdx` form.
+- Link between documents with relative `.mdx` links; the reader handles navigation.
+- Code fences are syntax highlighted automatically.
+- Headings at levels two and three appear in the current-document outline.
+- Avoid imports from the reader internals in plan documents. Shared study components are
+  injected globally so plans remain portable and easy for another agent to edit.
+- The complete shadcn/ui component set is available under `src/components/ui/` for new
+  reader features and richer shared study components. Plans should still consume shared
+  MDX components rather than importing application internals directly.
+- `plans/AGENTS.md` intentionally remains Markdown because its filename activates scoped
+  agent instructions. The reader includes it alongside the MDX documents.

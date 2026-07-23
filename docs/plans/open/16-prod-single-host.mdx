@@ -1,0 +1,371 @@
+# 16 — Production: one live host, Firecracker-backed, public API
+
+Depends on: 14, 15; 12 for the demo-against-prod check in the definition of done.
+
+## Summary
+
+Put Quickspin on the public internet: one Hetzner Cloud host running the control plane
+and the Firecracker backend, state in Neon, TLS on a real domain
+(`api.quickspin.<yourdomain>`), managed by systemd, deployed by a script in the repo.
+The SDKs gain a base-URL knob so the plan 12 demo harness runs unchanged against prod
+— an agent on your Mac driving a microVM in a datacenter. Local Lima remains the dev
+environment; this plan adds prod beside it, not instead of it.
+
+<KeyPoint label="What changes and what doesn't">
+  Nothing in the plane's code becomes "prod-only". The same binary runs in Lima and on
+  Hetzner; only the environment differs. If a behavior needs an `if prod` branch,
+  something upstream is mis-designed.
+</KeyPoint>
+
+## Industry context
+
+This is a platform's minimum viable production shape, and it is deliberately boring:
+binary + systemd + Caddy + managed Postgres is how many real single-team services run
+before Kubernetes is justified. The Firecracker requirement drives the one non-obvious
+choice: most cloud VMs don't expose `/dev/kvm`, so the industry runs bare metal (E2B,
+Fly) or nitro `.metal` (AWS). Hetzner Cloud is the solo-scale loophole — ordinary
+cheap VMs with KVM enabled — which is why it hosts half the indie Firecracker projects
+on the internet. Everything else here (TLS termination in front of the plane, secrets
+in an env file with tight permissions, deploy-by-artifact) is standard practice scaled
+down to one machine.
+
+## What you'll learn
+
+- Linux server operation for real: systemd units (`Restart=`, `After=`, journal
+  logging), ufw firewalling (443 + SSH only — guest ports and the plane's plaintext
+  port must not be public), unattended-upgrades.
+- TLS and DNS in practice: an A record, Caddy as reverse proxy with automatic
+  Let's Encrypt, and why the plane itself stays on localhost.
+- Release engineering in miniature: `make release` (cross-compile linux/amd64 — note
+  the arch flip from your arm64 Mac), `hack/deploy.sh` (rsync artifact, migrate via
+  startup, restart unit, health-check, roll back on failure).
+- Environment/config separation: the same binary, different env — `QUICKSPIN_DB`,
+  backend default, base URL — twelve-factor style.
+- Firecracker on x86_64: rebuilding the rootfs/kernel artifacts for amd64 (plan 14's
+  scripts parameterized by arch).
+
+### Concept: the process tree belongs to systemd, not to you
+
+In Lima you start the plane by hand and it dies when your terminal does. On a real
+host something must answer three questions your shell never had to: who starts the
+process at boot, who restarts it when it crashes, and where does its output go when
+nobody is watching? systemd is Linux's answer to all three. A unit file declares the
+answers as configuration — `ExecStart=` for what to run, `Restart=on-failure` for
+crash recovery, `After=network-online.target` for ordering, `EnvironmentFile=` for
+secrets — and the journal captures stdout/stderr with timestamps, queryable later via
+`journalctl -u quickspin`. The failure mode that makes this matter is the reboot you
+didn't schedule: Hetzner migrates a hypervisor, the host comes back, and either your
+API is serving again within a minute with no human involved, or it stays down until
+you happen to look. The reboot-resilience check in the definition of done exists to
+prove which world you're in.
+
+### Concept: TLS terminates at the edge; the plane never learns HTTPS
+
+The plane keeps listening on plaintext `localhost:8080` forever. Caddy binds `:443`,
+holds the certificate, and proxies decrypted requests over loopback. This split is the
+industry default for a reason: certificate acquisition and renewal (ACME challenges
+against Let's Encrypt, 90-day rotation) is a full protocol you should not embed in an
+application binary, and Caddy does the whole thing automatically from a two-line
+Caddyfile once DNS resolves. The corollary is a firewall obligation: the plaintext
+port is only safe because it is unreachable. `ufw` must allow 443 and SSH and nothing
+else — if 8080 is ever exposed, every request bypasses TLS *and*, depending on how
+auth middleware is mounted, possibly your logging and rate paths too. The negative
+probe in the validation script (assert connection refused on 8080 and a guest port
+from the internet) is the regression test for this boundary.
+
+<Figure caption="One host, three trust zones: the internet reaches only Caddy on 443; the plane and guest VMs live behind the firewall; Neon is the only external dependency.">
+  <svg viewBox="0 0 620 250" role="img" aria-label="Single-host production topology: Mac client through Caddy to the plane and Firecracker VMs, with Neon external">
+    <defs>
+      <marker id="arrow16" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+    </defs>
+    <rect x="10" y="88" width="110" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="65" y="108" textAnchor="middle" fontSize="12" fill="#18231f">Mac / SDK</text>
+    <text x="65" y="123" textAnchor="middle" fontSize="10" fill="#405049">plan 12 harness</text>
+    <rect x="180" y="20" width="430" height="180" fill="none" stroke="#405049" strokeWidth="1.5" strokeDasharray="6 4" />
+    <text x="395" y="38" textAnchor="middle" fontSize="10" fill="#405049">Hetzner host — ufw allows 443 + SSH only</text>
+    <rect x="200" y="66" width="110" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="255" y="86" textAnchor="middle" fontSize="12" fill="#18231f">Caddy :443</text>
+    <text x="255" y="101" textAnchor="middle" fontSize="10" fill="#405049">TLS, Let's Encrypt</text>
+    <rect x="370" y="66" width="130" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="435" y="86" textAnchor="middle" fontSize="12" fill="#18231f">quickspin serve</text>
+    <text x="435" y="101" textAnchor="middle" fontSize="10" fill="#405049">localhost:8080</text>
+    <rect x="370" y="140" width="130" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="435" y="160" textAnchor="middle" fontSize="12" fill="#18231f">firecracker VMs</text>
+    <text x="435" y="175" textAnchor="middle" fontSize="10" fill="#405049">children of the plane</text>
+    <line x1="120" y1="88" x2="198" y2="88" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow16)" />
+    <text x="159" y="78" textAnchor="middle" fontSize="10" fill="#8f3423">https://api...</text>
+    <line x1="310" y1="88" x2="368" y2="88" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow16)" />
+    <text x="339" y="78" textAnchor="middle" fontSize="10" fill="#8f3423">plaintext</text>
+    <line x1="435" y1="110" x2="435" y2="138" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow16)" />
+    <rect x="530" y="140" width="70" height="44" fill="none" stroke="#caa552" strokeWidth="1.5" />
+    <text x="565" y="165" textAnchor="middle" fontSize="12" fill="#18231f">systemd</text>
+    <path d="M 530 158 L 505 158" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" />
+    <path d="M 565 140 C 565 88 510 88 502 88" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" />
+    <rect x="250" y="216" width="110" height="28" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" />
+    <text x="305" y="234" textAnchor="middle" fontSize="11" fill="#18231f">Neon Postgres</text>
+    <path d="M 400 110 C 390 170 360 212 362 214" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" />
+    <text x="150" y="232" textAnchor="middle" fontSize="10" fill="#405049">external, managed</text>
+  </svg>
+</Figure>
+
+### Concept: a deploy is a transaction with a rollback branch
+
+Copying a binary and restarting a unit is easy; doing it so a broken build cannot
+take the API down is the actual skill. `hack/deploy.sh` should treat the deploy as
+a sequence with a decision point: keep the previous binary aside, install the new
+one, restart the unit, then *gate* on a health check (`/v1/status` returning the new
+version with `db: ok` within a bounded retry window). Only a green gate finalizes;
+a red gate restores the previous binary, restarts again, and exits nonzero. The
+failure mode this defends against is the one you will actually hit: a
+cross-compilation mistake or a migration that fails at startup, discovered not by a
+customer but by the script that refused to leave the host broken. Note the ordering
+subtlety — migrations run at startup, so the *old* binary must tolerate the *new*
+schema, or rollback after a migration is itself a broken state. For this plan's
+additive migrations that holds; the constraint is worth writing in the script's
+header comment.
+
+<StudyPrompt question="Why cross-compile from the Mac instead of building on the server?">
+  Two reasons compound. First, the artifact you tested is byte-identical to the one
+  you shipped — building on the host inserts an untested compile between validation
+  and production. Second, it keeps the server free of a Go toolchain, which is one
+  less thing to patch and one less way the host becomes a snowflake. Go makes this
+  nearly free: `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build` from any machine
+  emits a static linux/amd64 binary. The arch flip (arm64 Mac to amd64 server) is
+  exactly why `make release` must set both variables explicitly rather than trusting
+  the defaults.
+</StudyPrompt>
+
+## Design and interfaces
+
+```text
+Host: Hetzner CX-class (x86_64, /dev/kvm), Ubuntu LTS.
+Provisioning: hack/cloud-init.yaml checked into the repo — creates a deploy user,
+  installs Caddy + firecracker, writes systemd units, ufw rules. The host must be
+  reproducible from this file alone; no hand-configured snowflake.
+Processes: quickspin serve (localhost:8080) <- Caddy (:443, TLS) ; firecracker VMs
+  as children of the plane as in plan 14.
+Secrets: /etc/quickspin/env (mode 600) — Neon URL, nothing else in the repo.
+SDKs: baseUrl option + QUICKSPIN_BASE_URL env var (default stays localhost).
+New endpoint: GET /v1/status (unauthenticated) — version, uptime, backend, DB ping.
+```
+
+Committed decisions: single host, no HA, no CDN, no container packaging (a static Go
+binary makes Docker-for-deploy pure ceremony); deploys are brief-downtime restarts
+(seconds — acceptable and stated); the Lima path keeps working with SQLite so local
+dev never needs the internet.
+
+<Callout tone="system" title="The host is reproducible from the repo or it doesn't count">
+  Every package installed, unit written, and firewall rule added must originate from
+  `hack/cloud-init.yaml`. If you fix something over SSH, backport it to the file and
+  be prepared to prove it by rebuilding the server from scratch. A snowflake host is
+  unrecoverable exactly when you need to recover it.
+</Callout>
+
+## Tasks
+
+<TaskList>
+  <Task title="Parameterize the amd64 artifacts and add make release">
+    Extend plan 14's kernel/rootfs scripts to take an arch parameter and produce
+    amd64 outputs; `make release` cross-compiles the linux/amd64 binary.
+  </Task>
+  <Task title="Write hack/cloud-init.yaml and create the server">
+    Deploy user, Caddy + firecracker install, systemd units, ufw rules — then create
+    the Hetzner server from that file via console or CLI.
+  </Task>
+  <Task title="DNS record and Caddyfile; confirm TLS">
+    Point `api.quickspin.<yourdomain>` at the host's IP, write the Caddyfile reverse
+    proxy, and verify a valid Let's Encrypt certificate is served.
+  </Task>
+  <Task title="Write hack/deploy.sh with a health-check gate and rollback">
+    Rsync the artifact, restart the unit, poll `/v1/status`, and restore the previous
+    binary automatically on a red gate.
+  </Task>
+  <Task title="Add /v1/status and the SDK base-URL option">
+    The unauthenticated status endpoint on the plane, plus `baseUrl` /
+    `QUICKSPIN_BASE_URL` in both SDKs with localhost as the default.
+  </Task>
+  <Task title="Mint a prod tenant and key">
+    Over SSH with the admin CLI — the only manual step, and it produces a secret that
+    lives on your Mac, not in the repo.
+  </Task>
+  <Task title="Write hack/validate-16.sh and run the demo against prod">
+    The Mac-side validation script from the definition of done, then the plan 12
+    harness with only env-var changes.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Get the amd64 artifacts building before touching any server"
+    check="file bin/quickspin-linux-amd64 reports an x86-64 statically linked ELF, and the amd64 rootfs/kernel artifacts exist locally."
+  >
+    Start where no cloud account is needed. `make release` is
+    `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/...` (CGO off keeps it
+    static — check whether your SQLite driver needs cgo; the prod path uses Neon so
+    the pure-Go build may be fine, but decide explicitly). For the Firecracker
+    artifacts, thread an `ARCH` variable through plan 14's scripts; the kernel config
+    and the rootfs base image both change with it. `file` and `uname -m` are your
+    truth commands throughout this plan.
+  </Hint>
+  <Hint
+    title="Draft cloud-init locally, then create the server from it"
+    check="hcloud server create --user-data-from-file hack/cloud-init.yaml boots a host where systemctl status caddy and ufw status show everything you declared, with zero SSH edits."
+  >
+    Read the cloud-init module docs for `users`, `packages`, `write_files`, and
+    `runcmd` — that's the whole vocabulary you need. Write the systemd unit and ufw
+    rules (`ufw default deny incoming`, `ufw allow 443/tcp`, `ufw allow OpenSSH`,
+    `ufw --force enable`) as `write_files` + `runcmd` entries. Debug a bad boot with
+    `cloud-init status --long` and `/var/log/cloud-init-output.log` on the host. Pick
+    a CX line explicitly and verify `/dev/kvm` exists before going further — it is
+    the whole reason Hetzner was chosen.
+  </Hint>
+  <Hint
+    title="DNS then Caddy, in that order"
+    check="curl https://api.quickspin.yourdomain/v1/status returns JSON over a certificate curl trusts, with no -k flag."
+  >
+    Caddy cannot pass the ACME challenge until the A record resolves to the host, so
+    create the record first and confirm with `dig +short api.quickspin.yourdomain`.
+    The Caddyfile is two lines: the site address and `reverse_proxy localhost:8080`.
+    While DNS propagates you can pre-test the proxy path with
+    `curl --resolve api.quickspin.yourdomain:443:<ip> ...`. If certificates fail,
+    `journalctl -u caddy` names the exact ACME error.
+  </Hint>
+  <Hint
+    title="Write the systemd unit as if crashes are routine"
+    check="kill -9 the plane's PID over SSH; systemctl status shows a new PID within seconds and journalctl -u quickspin has both the death and the restart."
+  >
+    The unit needs `Restart=on-failure`, `After=network-online.target` (plus
+    `Wants=`), `EnvironmentFile=/etc/quickspin/env`, and a non-root `User=`. Secrets
+    live only in that env file at mode 600 — verify with `stat -c %a`. After editing
+    units remember `systemctl daemon-reload`; forgetting it is the classic "my change
+    did nothing" trap. `systemctl enable` is what makes the reboot check pass —
+    without it the unit restarts on crash but not on boot.
+  </Hint>
+  <Hint
+    title="Structure deploy.sh around the gate, not the copy"
+    check="Deploying a real build flips /v1/status to the new version; deploying a binary you deliberately broke (e.g. exit 1 as main) leaves the old version serving and the script exits nonzero."
+  >
+    Shape: `set -euo pipefail`; rsync to `quickspin.new`; `mv` current to
+    `quickspin.prev`; `mv` new into place (mv is atomic on one filesystem, cp is
+    not); `systemctl restart`; then a retry loop of `curl` against `/v1/status`
+    comparing the version field. The rollback branch reverses the two `mv`s and
+    restarts again. Build the broken-binary test *now* — it is the deploy-safety
+    check in the definition of done and the easiest time to write it is while the
+    happy path is fresh.
+  </Hint>
+  <Hint
+    title="Thread the base URL through both SDKs without breaking local defaults"
+    check="The plan 12 harness runs against prod with only QUICKSPIN_BASE_URL and the prod API key exported, and still runs against Lima with neither set."
+  >
+    Precedence should be explicit option > env var > localhost default, resolved in
+    one place per SDK (the client constructor), not scattered. Add a contract test
+    per SDK that pins the precedence order. Then mint the prod tenant over SSH with
+    the admin CLI against the live DB — and register the docker backend on the host
+    too, since the definition of done validates save/restore on docker-backed
+    sandboxes in prod.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: a port that answers when it shouldn't"
+    check="From the Mac, nc -vz -w3 <host-ip> 8080 and a guest port both fail (refused or timed out), while 443 connects; hack/validate-16.sh asserts exactly this."
+  >
+    If 8080 is reachable from the internet, check three suspects in order. One: the
+    plane's listen address — `localhost:8080`, never `:8080`; confirm on the host
+    with `ss -tlnp`. Two: ufw actually enabled (`ufw status verbose` says active) —
+    cloud-init's `runcmd` may have needed `--force` to enable non-interactively.
+    Three: Docker, if installed for the second backend — Docker inserts iptables
+    rules that bypass ufw for published container ports, a notorious trap; avoid
+    publishing ports or bind them to 127.0.0.1. Write the negative probe with a
+    timeout (`nc -w3` or `curl --max-time`) so "filtered" counts as pass, not hang.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+`hack/validate-16.sh` runs **from the Mac** against the public URL, exits 0, checking:
+
+- `/v1/status` over valid TLS reports the expected version and `db: ok`.
+- Full lifecycle with `backend: firecracker`: create → running, exec streams, file
+  round-trip, destroy — all via the public API.
+- Honest capability boundary: `save` on a Firecracker-backed sandbox returns a typed
+  `snapshot_unsupported` error (plan 11's snapshots are docker-commit-based and plan 14
+  excludes VM snapshotting). The API must say so, not 500 — and the plane should also
+  run the docker backend as a second registered option on this host so save/restore
+  can be validated in prod on docker-backed sandboxes.
+- Auth is enforced (no key ⇒ 401) and the plane's plaintext port and a guest port are
+  **not** reachable from the internet (probe and assert connection refused/filtered).
+- Reboot resilience: `ssh reboot`, then within a bounded window `/v1/status` is green
+  and a new sandbox can be created (systemd + reconciler did their jobs).
+- Deploy safety: `hack/deploy.sh` with a deliberately broken binary rolls back and the
+  API stays serving the old version.
+
+Plus: the plan 12 demo harness completes one task against prod with only env-var
+changes, and its latency table gains a prod column (Mac→Hetzner RTT now included).
+Because Firecracker sandboxes cannot restore from snapshots, the harness needs a
+config switch: snapshot-restore on docker backends, plain-image create (slower first
+step, stated in the latency table) on firecracker. Add that switch as a plan 12 task
+if 16 is known to be coming — it is one flag, and it keeps the demo honest on both
+backends.
+
+Deliberately untested: sustained load, disk-full behavior, Hetzner outages, multiple
+concurrent deploys.
+
+## Solo-developer tradeoffs
+
+No Kubernetes, no Terraform, no CI/CD pipeline, no blue-green: for one host, each of
+those adds more failure modes than it removes, and cloud-init + a deploy script keeps
+the whole prod story readable in two files — itself a resume-legible judgment call.
+The real risks accepted and written down: single point of failure (fine for a demo),
+brief deploy downtime, and secrets managed by file permissions rather than a vault.
+What is *not* compromised: TLS-only exposure, a firewalled plane, hashed keys, and
+rollback-capable deploys — the floor below which "demo" becomes "liability."
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="systemd.service — service unit configuration"
+    href="https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html"
+  >
+    The authoritative reference for every directive the unit file uses — `Restart=`,
+    `ExecStart=`, `Type=` — including restart-rate limiting the plan doesn't cover.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Cloud-init module reference"
+    href="https://cloudinit.readthedocs.io/en/latest/reference/modules.html"
+  >
+    The full vocabulary behind `users`, `packages`, `write_files`, and `runcmd`, with
+    the per-module options the hint steps only gesture at.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Caddy: Automatic HTTPS"
+    href="https://caddyserver.com/docs/automatic-https"
+  >
+    Exactly what Caddy does on your behalf — certificate issuance, renewal, OCSP
+    stapling, HTTP→HTTPS redirects — so the two-line Caddyfile stops being magic.
+  </Resource>
+  <Resource
+    kind="article"
+    title="How It Works"
+    href="https://letsencrypt.org/how-it-works/"
+    by="Let's Encrypt"
+  >
+    The ACME domain-validation protocol underneath Caddy's automation — the challenge
+    flow that explains why the A record must resolve before certificates can issue.
+  </Resource>
+  <Resource
+    kind="article"
+    title="The Twelve-Factor App: Config"
+    href="https://12factor.net/config"
+    by="Adam Wiggins"
+  >
+    The original statement of the "same binary, different env" rule this plan applies —
+    and the test for whether config has leaked into code.
+  </Resource>
+</Resources>

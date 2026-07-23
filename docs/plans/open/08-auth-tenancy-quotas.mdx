@@ -1,0 +1,348 @@
+# 08 — API keys, tenants, and quotas
+
+Depends on: 06 (07 recommended first).
+
+## Summary
+
+Put an identity boundary on the control plane: API keys tied to tenants, every sandbox
+owned by a tenant, list/inspect/destroy scoped to the caller, and per-tenant quotas
+(max concurrent sandboxes, max sandbox TTL). Write down a one-page threat model that
+states what is and is not defended. This is the minimum needed before an SDK in another
+repo can "onboard to the platform" the way you described.
+
+## Industry context
+
+Every platform's SDK constructor takes an API key (`E2B_API_KEY`, Daytona's keys) — the
+key maps to a team/tenant, and the tenant is the unit of quota, billing, and blast
+radius. The standard mechanics you'll copy: keys shown once at creation, stored only as
+hashes (like password storage — a DB leak must not leak keys), a prefix for
+identification (`qs_live_...`), and quota checks that admission-control creates before
+any resource is spent. Commercial platforms layer OAuth, orgs, RBAC, and rate limiting
+on top; the tenant-scoping core underneath is what you're building.
+
+## What you'll learn
+
+- Credential handling: generate with `crypto/rand`, store SHA-256 hashes, compare in
+  constant time, never log secrets.
+- Multi-tenant data scoping in SQL — every query gains a `tenant_id` predicate, and
+  cross-tenant access must read as 404, not 403 (don't leak existence).
+- Admission control vs reconciliation: quota is checked at accept time inside the same
+  transaction that inserts the row, or two racing creates both slip under the cap.
+- Writing a threat model honestly: trusted host, untrusted workload, semi-trusted SDK.
+
+### Concept: the database stores proof of the key, never the key
+
+An API key is a password that a program remembers, and it gets password storage: at
+mint time you generate random bytes with `crypto/rand` (never `math/rand` — its output
+is predictable from its seed), show the full key exactly once, and persist only its
+SHA-256 hash. Verification hashes the presented key and compares digests, so a stolen
+database yields nothing replayable. Two refinements make the scheme operable. The
+prefix (`qs_live_` plus a few identifying characters) is stored in the clear so humans
+and support tooling can talk about a key without possessing it, and lookups can find
+the candidate row before hashing. And the digest comparison uses
+`crypto/subtle.ConstantTimeCompare`, because a byte-by-byte `==` on secrets returns
+faster the earlier the first differing byte is — a timing side channel. SHA-256
+without a salt or work factor is acceptable here precisely because the input is
+high-entropy random bytes, not a human password; brute-forcing 256 random bits is not
+a realistic attack, unlike a dictionary attack on `hunter2`.
+
+### Concept: cross-tenant "no" must be indistinguishable from "does not exist"
+
+Returning 403 for another tenant's sandbox ID confirms the ID exists — an oracle that
+lets any key holder enumerate the platform's resources and infer activity. The rule is
+that a resource outside your scope behaves exactly like a resource that was never
+created: 404, same body, same shape. The implementation discipline that makes this
+automatic rather than per-handler heroics: the tenant predicate lives in the store
+layer, so every lookup is `WHERE id = ? AND tenant_id = ?` and "not yours" and "not
+there" collapse into the same zero-row result before any handler can tell them apart.
+The one deliberate exception in this plan: 403 is reserved for a *revoked key*, where
+the caller's own credential — not someone else's resource — is the thing being
+described.
+
+<Callout tone="warning" title="Scoping is only as strong as its least-scoped query">
+  A single forgotten `tenant_id` predicate — often in a JOIN, an events lookup, or the
+  reconciler-adjacent read reused by a handler — silently un-isolates the platform.
+  Thread the tenant through the store's method signatures so an unscoped query is a
+  compile error, not a code-review hope.
+</Callout>
+
+### Concept: quota is admission control, and it lives inside the insert transaction
+
+The reconciler converges toward desired state, so by the time it runs, an
+over-quota sandbox is already desired — too late to say no. Limits belong at admission:
+the moment the API accepts the create. The subtle part is atomicity. A check-then-insert
+written as two steps (`SELECT COUNT(*)`, then `INSERT`) has a race: two concurrent
+creates both count N−1 sandboxes under a cap of N, both pass, and the tenant lands at
+N+1. The count and the insert must be one atomic unit — a single transaction that
+holds its claim from read to write, or a guarded `INSERT ... SELECT` whose WHERE
+clause re-checks the count. This is plan 06's lost-update lesson wearing a different
+hat: any read-then-write across a gap needs its assumption restated at write time.
+`TestQuotaRaceOnlyAdmitsCap` fires N goroutines at the cap to prove the window is
+closed.
+
+### Concept: a threat model is a list of decisions, not a list of fears
+
+The deliverable is one page that names the assets (host, other tenants' sandboxes and
+data, API keys), the trust boundaries (untrusted workload code, semi-trusted SDK
+callers, trusted host and operator), and — the honest part — the attacks plans 02–08
+explicitly do *not* defend: the unauthenticated plane→guest link from plan 07, host
+escape from a container, unrestricted egress. Writing "not defended" next to a real
+gap converts it from an accident into a decision with a recorded rationale, gives
+later plans a checklist of debts, and is the difference between a security posture and
+a security vibe. The discipline to practice: every claim in the document must be
+either enforced by a test in this plan or explicitly listed as undefended — no third
+category of "probably fine."
+
+## Design and interfaces
+
+Schema: `tenants(id, name, max_sandboxes, max_ttl_s, created_at)` and
+`api_keys(id, tenant_id, prefix, sha256, created_at, revoked_at)`. `sandboxes` gains
+`tenant_id`.
+
+API surface:
+
+```text
+Authorization: Bearer qs_live_<random>       required on all /v1/* routes
+401 missing/invalid key; 403 revoked; 404 other tenants' resources
+POST /v1/sandboxes → 429 {"error":{"code":"quota_exceeded"}} at the cap
+```
+
+Admin operations (create tenant, mint/revoke key) are **CLI-only against the DB**
+(`quickspin admin tenant create`, `quickspin admin key mint`), not HTTP — no admin API
+means no admin-API auth problem yet. Keys print once at mint.
+
+Committed decisions: auth is middleware resolving key→tenant onto the request context;
+handlers below it never see the raw key. Requested TTLs clamp to the tenant cap.
+
+<Figure caption="Every /v1/* request passes through the auth middleware; handlers see only a tenant ID, and every store query carries it.">
+  <svg viewBox="0 0 640 210" role="img" aria-label="Request path through auth middleware to tenant-scoped store queries, with 401 and 403 exits">
+    <defs>
+      <marker id="arrow08" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+      <marker id="arrow08g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#caa552" />
+      </marker>
+    </defs>
+    <rect x="10" y="40" width="120" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="70" y="62" textAnchor="middle" fontSize="12" fill="#18231f">request</text>
+    <text x="70" y="78" textAnchor="middle" fontSize="10" fill="#405049">Bearer qs_live_…</text>
+    <rect x="180" y="40" width="160" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="260" y="62" textAnchor="middle" fontSize="12" fill="#18231f">auth middleware</text>
+    <text x="260" y="78" textAnchor="middle" fontSize="10" fill="#405049">hash key → api_keys row</text>
+    <rect x="390" y="40" width="110" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="445" y="62" textAnchor="middle" fontSize="12" fill="#18231f">handler</text>
+    <text x="445" y="78" textAnchor="middle" fontSize="10" fill="#405049">tenant from ctx</text>
+    <rect x="540" y="40" width="90" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="585" y="62" textAnchor="middle" fontSize="12" fill="#18231f">store</text>
+    <text x="585" y="78" textAnchor="middle" fontSize="10" fill="#405049">AND tenant_id=?</text>
+    <line x1="130" y1="64" x2="178" y2="64" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow08)" />
+    <line x1="340" y1="64" x2="388" y2="64" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow08)" />
+    <text x="364" y="54" textAnchor="middle" fontSize="10" fill="#8f3423">tenant_id only</text>
+    <text x="364" y="100" textAnchor="middle" fontSize="10" fill="#8f3423">raw key stops here</text>
+    <line x1="500" y1="64" x2="538" y2="64" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow08)" />
+    <path d="M 225 88 L 225 140" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow08g)" />
+    <text x="225" y="158" textAnchor="middle" fontSize="10" fill="#7f5d43">no/invalid key → 401</text>
+    <path d="M 295 88 L 295 176" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow08g)" />
+    <text x="298" y="194" textAnchor="middle" fontSize="10" fill="#7f5d43">revoked → 403</text>
+    <text x="530" y="130" textAnchor="middle" fontSize="10" fill="#405049">zero rows: not yours and not there</text>
+    <text x="530" y="146" textAnchor="middle" fontSize="10" fill="#405049">are the same 404</text>
+  </svg>
+</Figure>
+
+## Tasks
+
+<TaskList>
+  <Task title="Migrate the schema and build internal/auth">
+    The `tenants` and `api_keys` tables, `tenant_id` on `sandboxes`, and the mint,
+    hash, verify, and revoke functions with unit tests.
+  </Task>
+  <Task title="Add the auth middleware">
+    Resolve key→tenant onto the request context on every `/v1/*` route, then thread
+    `tenant_id` through all store queries.
+  </Task>
+  <Task title="Enforce quota inside the create transaction">
+    The concurrent-sandbox count check and the row insert commit atomically, so racing
+    creates cannot slip under the cap.
+  </Task>
+  <Task title="Add the admin CLI verbs">
+    `quickspin admin tenant create` and `quickspin admin key mint` (plus revoke)
+    working directly against the DB; keys print once.
+  </Task>
+  <Task title="Write the threat model">
+    `docs/reference/threat-model.mdx`, one page: assets, trust boundaries, what plans
+    02–08 defend, what they explicitly do not (plane→guest link, host escape, egress).
+  </Task>
+  <Task title="Write the tests and validation script">
+    The unit and API tests plus `hack/validate-08.sh` from Definition of done.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Start with the pure key functions, no HTTP in sight"
+    check="TestMintedKeyVerifies and TestRevokedKeyRejected pass, and TestRawKeyNeverStored proves the DB contains no substring of a minted raw key."
+  >
+    In `internal/auth`: mint reads `crypto/rand.Read` bytes, encodes them (hex or
+    base32), prepends `qs_live_`, and returns both the raw key and the record to store
+    (prefix + `sha256.Sum256` digest). Verify re-hashes the presented key and compares
+    with `subtle.ConstantTimeCompare`. These are receiver-free functions with
+    table-driven tests, per the code-structure reference — get them green before any
+    middleware exists.
+  </Hint>
+  <Hint
+    title="Middleware puts the tenant on the context and stops the key there"
+    check="TestMissingKey401 passes, a revoked key gets 403, and no handler signature or log line mentions the raw key."
+  >
+    Standard `func(http.Handler) http.Handler` wrapping the `/v1/*` mux: read the
+    `Authorization` header, strip `Bearer `, verify against `api_keys`, check
+    `revoked_at`, then `context.WithValue` with an unexported key type carrying only
+    the tenant ID. Handlers fetch it with a small typed accessor. Missing/invalid is
+    401; revoked is 403 — the one place a 403 is correct, because it describes the
+    caller's own credential.
+  </Hint>
+  <Hint
+    title="Thread tenant_id through the store as a required parameter"
+    check="TestCrossTenantInspectIs404 and TestCrossTenantDestroyIs404AndHarmless pass, and destroy-across-tenants provably does not touch the other tenant's sandbox."
+  >
+    Change store method signatures (`Get(ctx, tenantID, id)`) rather than sprinkling
+    predicates ad hoc — the compiler then finds every call site for you. Each query
+    gains `AND tenant_id = ?`; zero rows maps to the same not-found error whether the
+    row is absent or foreign. Watch the events endpoint and any query that joins
+    through `sandboxes` — joins are where the predicate is most often forgotten.
+  </Hint>
+  <Hint
+    title="Make the quota count and the insert one atomic unit"
+    check="A quick sequential test shows the M+1th create gets 429 with code quota_exceeded while the first M succeed."
+  >
+    Inside one transaction: count the tenant's live sandboxes, compare to
+    `max_sandboxes`, insert or fail. With `database/sql` that is `BeginTx`, and with
+    SQLite specifically, start the transaction as a write (`BEGIN IMMEDIATE`, or make
+    the count query part of a guarded `INSERT ... SELECT ... WHERE (SELECT COUNT(*)
+    ...) < ?` and check `RowsAffected`) so two readers cannot both pass the check
+    before either writes. Decide what "counts": rows in destroyed/failed states should
+    not occupy quota. TTL clamping (`min(requested, max_ttl_s)`) lands in the same
+    code path.
+  </Hint>
+  <Hint
+    title="Admin verbs are direct-DB CLI commands"
+    check="quickspin admin tenant create + key mint print a key exactly once, and that key immediately authenticates against a running server."
+  >
+    These subcommands open the SQLite file directly (reusing the store package), not
+    the HTTP API — that is the design decision that defers admin auth entirely. Mint
+    prints the raw key to stdout once with a "will not be shown again" line and stores
+    only prefix + hash. Revoke sets `revoked_at`; nothing is deleted, so the audit
+    trail survives.
+  </Hint>
+  <Hint
+    title="Write the threat model from the tests you just wrote"
+    check="docs/reference/threat-model.mdx exists, one page, and every defended claim in it names the test or script that enforces it."
+  >
+    Structure it as three lists: assets, trust boundaries, and two columns of
+    defenses — enforced (each line citing its test: cross-tenant 404s, hashed keys,
+    quota admission) and explicitly not defended (plane→guest auth from plan 07's
+    tradeoffs, container escape, egress, per-key rate limiting). If a claim has no
+    test and is not in the undefended list, either write the test or move the claim.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: the quota race admits more than the cap"
+    check="TestQuotaRaceOnlyAdmitsCap passes repeatedly (run with go test -race -count=10), and hack/validate-08.sh's log grep finds no raw key."
+  >
+    If N concurrent creates admit more than M, the count and insert are not atomic:
+    the classic causes are counting outside the transaction, a read (deferred)
+    transaction that only upgrades to a write lock at insert time — SQLite then lets
+    two transactions both read the old count — or checking quota before the
+    middleware/handler retry re-runs the insert. Fix by making the transaction a
+    write from the start or using the guarded-insert shape, then re-run the test with
+    `-count=10`; a race that passes once proves nothing. If the `validate-08.sh` grep
+    finds a raw key in the logs, the usual leak is a request-logging middleware
+    printing the `Authorization` header — redact at the logging layer, not by hoping
+    handlers stay quiet.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Unit (`make test`):
+
+- `TestMintedKeyVerifies` / `TestRevokedKeyRejected` / `TestRawKeyNeverStored` (assert
+  the DB contains no substring of the raw key).
+- `TestQuotaRaceOnlyAdmitsCap` — N concurrent creates against cap M admit exactly M.
+
+API tests with fake runtime (`make test`):
+
+- `TestMissingKey401` / `TestCrossTenantInspectIs404` / `TestCrossTenantDestroyIs404AndHarmless`
+- `TestQuotaExceededIs429WithCode`
+- `TestTTLClampedToTenantMax`
+
+Validation `hack/validate-08.sh`: mints two tenants' keys via the admin CLI, drives the
+real service proving isolation (tenant B cannot see or destroy tenant A's sandbox) and
+quota enforcement, and greps the server logs to prove no raw key was ever logged.
+
+Deliberately untested/undefended (recorded in the threat model): plane→guest auth,
+per-key rate limiting, key rotation UX, audit of admin actions.
+
+## Solo-developer tradeoffs
+
+No OAuth, no web console, no RBAC, no billing — one bearer-key scheme done correctly.
+That is the right floor: hashing, scoping, and transactional admission are the parts
+that are hard to retrofit, while console/OAuth are additive later. The threat-model doc
+is the resume artifact here: interviewers at platform companies probe "what does your
+sandbox *not* defend against?" and a written honest answer is rarer than the code.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="OWASP API Security Top 10 (2023)"
+    href="https://owasp.org/API-Security/editions/2023/en/0x11-t10/"
+  >
+    The industry's ranked list of API failure modes; API1 (Broken Object Level
+    Authorization) is exactly the cross-tenant scoping bug the 404-not-403 rule prevents.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Authentication Cheat Sheet"
+    href="https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html"
+    by="OWASP Cheat Sheet Series"
+  >
+    The checklist surrounding this plan's key scheme — error messages, logging,
+    lockout — and the password-storage rules that high-entropy keys get to relax.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="package subtle — crypto/subtle"
+    href="https://pkg.go.dev/crypto/subtle"
+  >
+    The reference for `ConstantTimeCompare` and its siblings, including the
+    equal-length requirement that makes comparing fixed-size digests the right call.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Behind GitHub's new authentication token formats"
+    href="https://github.blog/engineering/behind-githubs-new-authentication-token-formats/"
+    by="The GitHub Blog"
+  >
+    A production version of the `qs_live_` prefix decision: why identifiable token
+    prefixes help humans, support tooling, and secret scanners without weakening the key.
+  </Resource>
+  <Resource
+    kind="article"
+    title="A Lesson in Timing Attacks"
+    by="Coda Hale, 2009"
+  >
+    The classic explanation of why early-exit `==` on secrets leaks a measurable
+    signal, with the noise-vs-statistics argument for why "too small to exploit" fails.
+  </Resource>
+  <Resource
+    kind="book"
+    title="Threat Modeling: Designing for Security"
+    by="Adam Shostack"
+  >
+    The full discipline behind this plan's one-page deliverable: STRIDE, trust
+    boundaries, and how to keep a threat model honest instead of aspirational.
+  </Resource>
+</Resources>

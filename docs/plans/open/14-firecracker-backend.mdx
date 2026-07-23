@@ -1,0 +1,413 @@
+# 14 — Deep dive: a Firecracker microVM backend
+
+Depends on: 07, 13 recommended first.
+
+## Summary
+
+The capstone taste of how the leaders actually run untrusted code: boot Firecracker
+microVMs inside the Lima VM (nested virtualization), get the `quickspin-guest` binary
+running inside them, and implement enough of a second `Runtime` backend
+(`firecracker`) that a sandbox created with `--backend firecracker` supports create /
+exec-via-guest / files / destroy through the same control plane and SDKs. Snapshots,
+warm pools, and production hardening are explicitly out of scope — this plan buys the
+mental model and the resume line, not parity with Docker.
+
+## Industry context
+
+Firecracker is the reference answer to "containers share the host kernel" — AWS built
+it for Lambda; E2B, and Vercel Sandbox run on it; Fly runs microVMs for the same
+reason. The architectural payoff of plan 07 lands here: because workload operations go
+through the guest agent over the network rather than through `docker exec`, a VM that
+merely (a) boots and (b) has a reachable guest is already a full Quickspin sandbox.
+What changes underneath is everything plan 13 made visible: instead of namespaces
+sharing your kernel, each sandbox gets its own kernel behind KVM, and the isolation
+boundary moves from "syscall filtering" to "virtual hardware."
+
+<Compare>
+  <CompareItem eyebrow="Plans 02–13" title="Container: shared kernel">
+    Every sandbox syscall lands in the host kernel; isolation is namespaces, cgroups,
+    and capability/seccomp filtering of that one shared attack surface. Fast and
+    dense, but one kernel bug is a full escape — the exact worry plan 13 made
+    concrete.
+  </CompareItem>
+  <CompareItem eyebrow="This plan" title="MicroVM: separate kernel">
+    Each sandbox runs its own kernel on virtual hardware behind KVM. The host exposes
+    only a handful of virtio devices; escaping means breaking the hardware
+    virtualization boundary, not finding a syscall bug. The cost is a real boot and a
+    guest world you must build yourself.
+  </CompareItem>
+</Compare>
+
+## What you'll learn
+
+- KVM at arm's length: `/dev/kvm`, why nested virt works in Lima (Apple Silicon
+  exposes it via Virtualization.framework), and checking for it.
+- The Firecracker control model: an API socket per VM; configure boot source, drives,
+  network; `InstanceStart` — driven from Go via its API (the SDK or plain HTTP).
+- Building a guest world: an uncompressed kernel image, a rootfs ext4 built from the
+  same alpine export as plan 13, and a tiny init that brings up networking and execs
+  `quickspin-guest` — closing the loop on why the guest is a static binary.
+- MicroVM networking: one tap device per VM, addresses, and why platforms obsess over
+  this part.
+- An honest boot-time measurement to place next to plan 11's numbers.
+
+### Concept: Firecracker is a process, and the VM dies with it
+
+Demystify the words first: Firecracker is a single ordinary userspace process (a
+VMM — virtual machine monitor) that opens `/dev/kvm`, asks the kernel's KVM module
+for a virtual CPU and a slab of guest memory, and then emulates only a tiny set of
+devices (virtio block, virtio net, a serial console) into it. "MicroVM" is not a
+different kind of VM — it is a VM whose device model was stripped to what a
+function-runner needs, which is why it boots in hundreds of milliseconds instead of
+tens of seconds: there is no BIOS, no PCI enumeration, no probing of hardware that
+does not exist; the kernel is loaded directly at a known address and told about its
+few devices on the command line. Two consequences shape your backend. One process per
+VM means the host's ordinary process model *is* your VM lifecycle model: `kill -9`
+of the firecracker process is instant, unclean VM death — which is exactly the crash
+your reconciler must detect. And because the VMM process is the sandbox's entire
+footprint on the host, "destroy" is enumerable: the process, its API socket, its tap
+device, its rootfs copy — four artifacts, no daemon holding hidden state the way
+dockerd does.
+
+### Concept: the boot path — API socket, three PUTs, then a kernel
+
+Firecracker has no CLI flags for VM configuration and no shared daemon. Each process
+listens on its own Unix socket and boots exactly one VM, configured by a short REST
+conversation *before* the guest exists: `PUT /boot-source` (kernel image path plus
+`boot_args`), `PUT /drives/rootfs` (the ext4 file as the root block device),
+`PUT /network-interfaces/eth0` (the tap device and a guest MAC), and finally
+`PUT /actions` with `InstanceStart`. Ordering is strict — configuration calls after
+start fail — so your `Create` is a small state machine: spawn the process, wait for
+the socket file to appear, issue the PUTs, start, then poll the guest's `/healthz`.
+From there the boot is the classic Linux sequence with nothing hidden: kernel
+decompresses nothing (you feed it an uncompressed image), mounts the virtio drive as
+`/` because `boot_args` says `root=/dev/vda`, and execs `/sbin/init` — which in your
+rootfs is a shell script you wrote. Every stage that can fail reports on the serial
+console, which is why capturing the firecracker process's stdout to a per-VM log file
+is not optional plumbing but your only debugger.
+
+<Figure caption="Create walks the whole path: spawn the VMM, configure over its API socket, InstanceStart, kernel boot, your init, and finally the guest agent answering /healthz — the same readiness signal plan 07 defined.">
+  <svg viewBox="0 0 640 300" role="img" aria-label="Firecracker boot path from spawning the process through API configuration, kernel boot, init, to the guest agent serving healthz">
+    <defs>
+      <marker id="arrow14" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+      <marker id="arrow14b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#caa552" />
+      </marker>
+    </defs>
+    <rect x="10" y="20" width="160" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="90" y="41" textAnchor="middle" fontSize="12" fill="#18231f">firecracker Runtime</text>
+    <text x="90" y="58" textAnchor="middle" fontSize="10" fill="#405049">spawn process per VM</text>
+    <rect x="240" y="20" width="170" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="325" y="41" textAnchor="middle" fontSize="12" fill="#18231f">API socket (Unix)</text>
+    <text x="325" y="58" textAnchor="middle" fontSize="10" fill="#405049">boot-source · drive · net</text>
+    <rect x="470" y="20" width="160" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="550" y="41" textAnchor="middle" fontSize="12" fill="#18231f">InstanceStart</text>
+    <text x="550" y="58" textAnchor="middle" fontSize="10" fill="#405049">no config after this</text>
+    <line x1="170" y1="44" x2="238" y2="44" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow14)" />
+    <text x="204" y="34" textAnchor="middle" fontSize="10" fill="#8f3423">3 PUTs</text>
+    <line x1="410" y1="44" x2="468" y2="44" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow14)" />
+    <rect x="200" y="110" width="420" height="120" fill="none" stroke="#405049" strokeWidth="1" strokeDasharray="5 4" />
+    <text x="410" y="104" textAnchor="middle" fontSize="10" fill="#405049">inside the microVM (its own kernel)</text>
+    <rect x="220" y="130" width="110" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="275" y="151" textAnchor="middle" fontSize="12" fill="#18231f">kernel boots</text>
+    <text x="275" y="168" textAnchor="middle" fontSize="10" fill="#405049">root=/dev/vda</text>
+    <rect x="370" y="130" width="110" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="425" y="151" textAnchor="middle" fontSize="12" fill="#18231f">/sbin/init</text>
+    <text x="425" y="168" textAnchor="middle" fontSize="10" fill="#405049">ip up, exec guest</text>
+    <rect x="500" y="130" width="110" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="555" y="151" textAnchor="middle" fontSize="12" fill="#18231f">quickspin-guest</text>
+    <text x="555" y="168" textAnchor="middle" fontSize="10" fill="#405049">static binary</text>
+    <path d="M 550 68 C 550 90 275 90 275 128" fill="none" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow14)" />
+    <line x1="330" y1="154" x2="368" y2="154" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow14)" />
+    <line x1="480" y1="154" x2="498" y2="154" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow14)" />
+    <path d="M 555 178 L 555 200 L 90 200 L 90 72" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow14b)" />
+    <text x="322" y="194" textAnchor="middle" fontSize="10" fill="#7f5d43">GET /healthz over the tap device — sandbox becomes "running"</text>
+    <text x="410" y="252" textAnchor="middle" fontSize="10" fill="#405049">serial console → per-VM log file: the only debugger for every stage inside the box</text>
+  </svg>
+</Figure>
+
+### Concept: the guest world is yours to build — kernel, rootfs, init
+
+Docker quietly ships a running userland; Firecracker ships nothing. You supply three
+artifacts and each teaches something. The **kernel** is a plain uncompressed image
+(the Firecracker CI kernels work) — there is no distro, no initramfs, no modules; if
+virtio-net is not compiled in, networking silently does not exist. The **rootfs** is
+an ext4 *file*, not a directory: `dd` an empty file, `mkfs.ext4`, loop-mount, untar
+the same alpine export plan 13 used, drop in `quickspin-guest`. This is why the guest
+agent had to be a static binary all along — there is no glibc contract with a distro
+you control, and alpine is musl anyway. The **init** is the part most people have
+never written: the kernel execs exactly one program as PID 1, and until your shell
+script brings up `lo`, assigns the guest address on `eth0`, and execs the guest,
+nothing in the VM can speak. When the guest answers `/healthz`, you have personally
+crossed every layer between "a process with a KVM fd" and "a serving HTTP endpoint
+on a machine that did not exist a second ago."
+
+### Concept: tap devices, or why every platform obsesses over microVM networking
+
+A microVM's virtio-net device needs a host-side counterpart, and that is a **tap
+device**: a virtual ethernet interface where one end is a file descriptor handed to
+the firecracker process and the other end is a normal interface in the host's network
+stack. Frames the guest sends come out of `tap-sbx…` on the host; the host answers
+back down the same pipe. Your design gives each VM its own tap plus a fixed /30 (one
+host address, one guest address), so guest reachability is plain IP routing with no
+bridge, NAT, or DHCP — the control plane, running inside the Lima VM, curls the guest
+address directly. The engineering lesson is in the allocator: taps and subnets are
+host-global resources created outside any transaction, and concurrent creates racing
+for the same /30 is the textbook check-then-take bug — which is why the plan pins the
+allocator to the concurrency reference's category-3 shape (allocate and mark in one
+locked helper) with its own race test. It is also the seed of why real platforms
+obsess here: per-VM egress policy, MAC/IP spoofing prevention, and thousands of taps
+per host all live in this layer; your version is the minimal honest form of it.
+
+<Callout tone="warning" title="Nested virtualization is a precondition, not a given">
+  Everything in this plan needs `/dev/kvm` *inside* the Lima VM, which requires Lima's
+  `vz` VM type with nested virtualization enabled — available on Apple Silicon (M3 or
+  later) via Virtualization.framework. Check `ls /dev/kvm` in the VM before writing
+  any Go; if it is absent, the fix is Lima configuration (plan 01's territory), and no
+  amount of backend code will route around it.
+</Callout>
+
+## Design and interfaces
+
+`Spec` gains `Backend string` (`"docker"` default, `"firecracker"`); the control plane
+routes create/destroy to the chosen backend and the guest client needs only an address
+— unchanged from plan 07.
+
+```go
+// internal/runtime/firecracker — implements the same Runtime interface for
+// lifecycle; workload ops arrive via the guest as with Docker.
+// Per-VM artifacts: api socket, tap device, rootfs copy, firecracker process.
+// Destroy kills the process and removes all four; idempotent like plan 02.
+```
+
+Committed decisions: the control plane runs **inside** the Lima VM for this plan
+(Firecracker needs /dev/kvm and tap devices; `make build-linux` from plan 01 pays off);
+rootfs is copied per-VM (no CoW — slow and honest); a fixed /30 per VM from a small
+allocator — the allocator is the concurrency reference's category-3 shape (allocate and
+mark in one locked helper, never check-then-take) with its own race test, since
+concurrent creates are the norm once the reconciler drives this backend; exec/files/limits inside the VM are whatever the guest + kernel defaults do
+— cgroup-equivalent limits inside the VM are out of scope (the VM's memory size is the
+real limit and the interesting difference to write up).
+
+<KeyPoint label="The boundary that makes this plan small">
+  The `Runtime` interface from plan 02 plus the guest agent from plan 07 mean this
+  backend only has to answer lifecycle questions: create, inspect, list, destroy, and
+  "what is the guest's address". Exec, files, and limits arrive over the network
+  exactly as they do for Docker — no second implementation of the workload API.
+</KeyPoint>
+
+## Tasks
+
+<TaskList>
+  <Task title="Write hack/setup-firecracker.sh">
+    Verify `/dev/kvm` in Lima, fetch the firecracker binary and a CI kernel image,
+    and build the rootfs (with guest + init) via script. All artifact scripts take
+    `ARCH` (per plan 01's convention) even though this plan only exercises arm64 —
+    plan 16 reruns them for amd64 unchanged.
+  </Task>
+  <Task title="Boot one VM by hand to a shell">
+    Script only, no Go — configure over the API socket with curl and reach a serial
+    console shell. This is the "hello kernel" moment.
+  </Task>
+  <Task title="Wire init and the guest">
+    The VM boots straight into a serving `quickspin-guest`; curl its `/healthz` from
+    inside the Lima VM.
+  </Task>
+  <Task title="Implement the firecracker Runtime backend">
+    create/inspect/list/destroy plus the guest address, including the tap/IP
+    allocator with its race test.
+  </Task>
+  <Task title="Route Backend through the stack">
+    Plumb `Spec.Backend` through the control plane, spec validation, and one SDK
+    field.
+  </Task>
+  <Task title="Validate and measure">
+    `hack/validate-14.sh`, plus the boot-time measurement recorded in
+    `docs/reference/demo-latency.mdx`.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Prove the environment before any code"
+    check="Inside the Lima VM, ls -l /dev/kvm shows the device and ./firecracker --version prints a version."
+  >
+    Check `/dev/kvm` exists and is readable/writable by your user (`test -r /dev/kvm
+    -a -w /dev/kvm`). If missing, this is Lima configuration — `vz` type with nested
+    virtualization — not a code problem. Fetch the firecracker release binary and a
+    matching CI kernel (the firecracker repo's getting-started guide names current
+    artifact URLs; keep them in `hack/setup-firecracker.sh` parameterized by `ARCH`).
+  </Hint>
+  <Hint
+    title="Boot by hand: one socket, three PUTs, one action"
+    check="Your terminal shows the kernel's boot log and ends at an alpine login or shell on the serial console."
+  >
+    Start `firecracker --api-sock /tmp/fc.sock` in one terminal; in another, drive it
+    with `curl --unix-socket /tmp/fc.sock`. `PUT /boot-source` needs
+    `kernel_image_path` and `boot_args` — start with `"console=ttyS0 reboot=k
+    panic=1 root=/dev/vda rw"` (without `console=ttyS0` the boot appears to hang
+    because nothing prints). Then `PUT /drives/rootfs` (`is_root_device: true`),
+    then `PUT /actions` with `{"action_type": "InstanceStart"}`. For this first boot,
+    set the rootfs init to `/bin/sh` via `init=/bin/sh` in boot_args so you get a
+    shell without writing init yet.
+  </Hint>
+  <Hint
+    title="Build the rootfs as an ext4 file with your init inside"
+    check="A hand-booted VM comes up with no interaction and curl http://<guest-ip>:<port>/healthz from the Lima VM returns 200."
+  >
+    `dd if=/dev/zero of=rootfs.ext4 bs=1M count=300`, `mkfs.ext4`, `sudo mount -o
+    loop`, untar the alpine export, copy the statically linked `quickspin-guest`
+    (this is why plan 07 built it static — alpine is musl, and there is no distro
+    contract inside a microVM), and write `/sbin/init` as a small executable shell
+    script: mount `/proc`, `ip link set lo up`, `ip addr add` the guest /30 address
+    on `eth0`, `ip route add default`, `exec /usr/local/bin/quickspin-guest`. The
+    guest address must come from outside — kernel `boot_args` are the simplest
+    channel (append `quickspin.ip=...` and parse `/proc/cmdline` in init).
+  </Hint>
+  <Hint
+    title="Tap plumbing on the host side"
+    check="With a VM running, ip addr shows the tap with the host-side /30 address and ping <guest-ip> answers."
+  >
+    Per VM: `ip tuntap add tap-<id> mode tap`, `ip addr add <host-ip>/30 dev
+    tap-<id>`, `ip link set tap-<id> up`, then `PUT /network-interfaces/eth0` with
+    `host_dev_name` and a `guest_mac` you generate. `man 7 networking` won't help
+    here — the firecracker docs' network-setup guide is the reference. No bridge and
+    no NAT: the control plane lives on the same host, so a directly-addressed /30 per
+    VM is sufficient and keeps routing trivially debuggable with `ip route` and
+    `tcpdump -i tap-<id>`.
+  </Hint>
+  <Hint
+    title="Create is a supervised sequence; Destroy is four removals"
+    check="quickspin sandbox create --backend firecracker reaches running; destroy leaves no firecracker process, no tap in ip link, no socket, no rootfs copy — and a second destroy exits 0."
+  >
+    Shape of `Create`: allocate the /30 (locked helper — allocate and mark in one
+    call, never check-then-take), make a per-VM dir, copy the rootfs, `exec.Command`
+    firecracker with its stdout/stderr to a log file, wait for the socket file to
+    appear (poll with a deadline — it is created asynchronously), issue the PUTs,
+    `InstanceStart`, then poll guest `/healthz` with a context deadline. Any failure
+    unwinds everything so far — same create-gap discipline as plan 02. `Destroy`:
+    SIGKILL the process, reap it, `ip link del` the tap, remove the dir; each step
+    tolerates "already gone" so destroy stays idempotent.
+  </Hint>
+  <Hint
+    title="Route the Backend field and test the allocator under race"
+    check="go test -race on the allocator test passes, and a create with an unknown backend string is rejected at spec validation, not deep in the runtime."
+  >
+    The control plane holds both runtimes and switches on `Spec.Backend` at
+    create/destroy; validation rejects unknown values with the plan 05 error shape.
+    The allocator race test launches N goroutines allocating concurrently and asserts
+    all returned subnets are distinct — this is the concurrency reference's
+    category-3 pattern, and it is the test most likely to catch a check-then-take
+    rewrite during later refactoring.
+  </Hint>
+  <Hint
+    title="Diagnosing the two likely failures: a guest that never gets healthy, and the crash check"
+    check="hack/validate-14.sh's crash check passes: after kill -9 of a firecracker process the reconciler marks the sandbox failed and the tap, socket, and rootfs copy are gone."
+  >
+    A never-healthy guest is debugged from the serial log file, bottom-up: no output
+    at all means kernel path or missing `console=ttyS0`; kernel panic about VFS means
+    the rootfs drive or `root=/dev/vda`; boot completes but no init output means
+    `/sbin/init` is not executable or has a bad interpreter line; init runs but curl
+    fails means the tap/IP layer — `tcpdump -i tap-<id>` shows whether ARP is even
+    answered. For the crash check: the reconciler's liveness probe from plan 06 must
+    treat "firecracker PID no longer exists" as the observed-state signal, and the
+    cleanup path is exactly `Destroy`'s removal list — if leftovers survive, some
+    removal step is not tolerant of the process already being gone.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+`hack/validate-14.sh` runs inside the Lima VM, exits 0, checking:
+
+- Environment: `/dev/kvm` present; firecracker binary runs.
+- Via the control plane API with `"backend": "firecracker"`: create reaches `running`
+  (meaning guest `/healthz` answered from inside the microVM); exec returns correct
+  streams/exit code; file round-trip works; destroy removes the VM process, tap
+  device, socket, and rootfs copy; destroy twice succeeds.
+- Isolation smoke check: `uname -r` inside the sandbox differs from the Lima kernel
+  when the CI kernel version differs, and the Docker socket / control-plane DB are
+  unreachable from inside.
+- Crash check: `kill -9` the firecracker process; the reconciler marks the sandbox
+  `failed` and cleans up the leftovers.
+- Boot-to-guest-healthy time is measured and recorded (target: observe the order of
+  magnitude, not hit a number).
+- The plan 12 demo harness completes one task with `backend: firecracker` — the full
+  stack, SDK to microVM.
+
+Deliberately untested/out of scope: VM snapshots/resume (E2B's crown jewel — future
+plan set), jailer hardening, memory ballooning, CoW rootfs (overlay/reflink), running
+many VMs, egress control per VM.
+
+## Solo-developer tradeoffs
+
+Production Firecracker stacks run the jailer, device-model hardening, snapshot trees,
+and CoW storage — multi-engineer territory. The jailer is worth understanding even
+unused: it wraps each firecracker process in a chroot, its own namespaces, cgroups,
+and a dropped-privilege uid — plan 13's exact toolkit, applied to the VMM itself,
+because a compromised device emulator is the remaining attack surface once guests
+have their own kernels. One unjailed VM with a copied rootfs is weekend territory and
+still crosses the line that matters: your platform demonstrably runs the same
+workload API on shared-kernel *and* separate-kernel isolation, chosen per sandbox by
+a field in the spec. That sentence — with the latency table to back it — is the
+strongest artifact this whole plan set produces for platform-infrastructure
+interviews.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="Getting Started with Firecracker"
+    href="https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md"
+  >
+    The upstream walkthrough of the exact socket-and-three-PUTs boot conversation
+    this plan's `Create` state machine automates, runnable by hand with curl first.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Firecracker Design"
+    href="https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md"
+  >
+    The maintainers' own statement of the minimal device model and threat
+    containment — why the process boundary is the security boundary you rely on.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Firecracker Network Setup"
+    href="https://github.com/firecracker-microvm/firecracker/blob/main/docs/network-setup.md"
+  >
+    The canonical tap-device recipe, including the iptables/NAT variants this plan
+    skips — read it when your guest pings the host but not the internet.
+  </Resource>
+  <Resource
+    kind="paper"
+    title="Firecracker: Lightweight Virtualization for Serverless Applications (NSDI '20)"
+    href="https://www.usenix.org/conference/nsdi20/presentation/agache"
+    by="Agache et al., Amazon Web Services"
+  >
+    The production numbers behind your latency table — density per host, boot-time
+    distributions, and why AWS rejected both QEMU and containers for Lambda.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Firecracker – Lightweight Virtualization for Serverless Computing"
+    href="https://aws.amazon.com/blogs/aws/firecracker-lightweight-virtualization-for-serverless-computing/"
+    by="Jeff Barr, AWS News Blog"
+  >
+    The launch announcement — useful for the Lambda/Fargate context that explains
+    which tradeoffs Firecracker's austerity was purchased for.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="firecracker-go-sdk"
+    href="https://github.com/firecracker-microvm/firecracker-go-sdk"
+  >
+    The official Go SDK this plan lets you choose instead of raw HTTP; its machine
+    configuration types double as documentation of every API field you might set.
+  </Resource>
+</Resources>

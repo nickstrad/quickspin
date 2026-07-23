@@ -1,0 +1,322 @@
+# 09 — TypeScript SDK
+
+Depends on: 07, 08.
+
+## Summary
+
+Create `sdk/typescript/` (`@quickspin/sdk`): a typed client for the control-plane API
+with the E2B-style ergonomic surface agents expect — `Sandbox.create()`, `sbx.exec()`,
+`sbx.files.*`, `sbx.kill()`. Per your direction, **Claude generates this SDK; your job
+is review and contract-testing, not hand-writing TypeScript**. Your Go time in this
+plan goes into the other deliverable: `GET /v1/openapi.json` served by the control
+plane, making the API formally described.
+
+<KeyPoint label="Division of labor">
+  The agent writes the client; you write the spec and the tests that hold the client
+  accountable. Reviewing generated code against a contract you authored is a different
+  skill from writing the code — and it is the one this plan teaches.
+</KeyPoint>
+
+## Industry context
+
+The SDK is the actual product surface of platforms like E2B — nobody curls these APIs;
+agents import `@e2b/code-interpreter` and call three methods. Conventions this SDK
+copies deliberately: constructor/env-var API key resolution (`QUICKSPIN_API_KEY`),
+resource-handle objects rather than bare functions, typed error subclasses
+(`QuotaExceededError`, `SandboxNotFoundError`) so harnesses can branch on failure type,
+and async iteration for streamed exec output. Serving an OpenAPI document is how
+commercial platforms keep N SDKs honest against one API; yours will do the same work
+in plan 10.
+
+<Compare>
+  <CompareItem eyebrow="What you build" title="Spec-anchored, contract-tested">
+    The OpenAPI document is authoritative; a Go test pins it to the real routes, and a
+    Vitest suite pins the SDK to a live server. Drift in any of the three surfaces
+    fails a build.
+  </CompareItem>
+  <CompareItem eyebrow="The anti-pattern" title="SDK as folklore">
+    A hand-maintained client with no spec and mocked tests can diverge from the API
+    for months without anyone noticing — the mocks keep passing against an API shape
+    that no longer exists.
+  </CompareItem>
+</Compare>
+
+## What you'll learn
+
+(Go-side, where your focus is:) API self-description — writing an OpenAPI 3.1 document
+for your own endpoints and discovering where your API is irregular; error-envelope
+stability as a compatibility contract. (Review-side:) judging an SDK you didn't write
+against a spec you did.
+
+### Concept: the spec is a contract only if something enforces it
+
+An OpenAPI document that nobody checks is documentation, and documentation rots. This
+plan wires two enforcement points around the spec. On the Go side, a test enumerates
+the mux's registered routes and diffs them against the paths in `openapi.yaml` — add an
+endpoint without documenting it (or vice versa) and `make test` fails. On the SDK side,
+the contract suite runs every generated method against a **real** control plane, so the
+spec's request and response shapes are exercised end to end, not assumed. Writing the
+spec is also where you discover your API's irregularities: the endpoint that returns a
+bare array where every other returns an envelope, the one field that is camelCase amid
+snake_case. Finding those now is the point — plan 10 ports the same contract to Python,
+and every irregularity you keep costs twice.
+
+<Figure caption="One spec, three enforcement points: the route-sync test pins the server to the spec; the contract suite pins the generated SDK to the live server.">
+  <svg viewBox="0 0 640 210" role="img" aria-label="OpenAPI document connecting the Go control plane, the generated SDK, and the contract test suite">
+    <defs>
+      <marker id="arrow09" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+    </defs>
+    <rect x="240" y="15" width="160" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="320" y="35" textAnchor="middle" fontSize="12" fill="#18231f">openapi.yaml</text>
+    <text x="320" y="51" textAnchor="middle" fontSize="10" fill="#405049">served at /v1/openapi.json</text>
+    <rect x="30" y="120" width="170" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="115" y="140" textAnchor="middle" fontSize="12" fill="#18231f">control plane (Go)</text>
+    <text x="115" y="156" textAnchor="middle" fontSize="10" fill="#405049">real routes on the mux</text>
+    <rect x="440" y="120" width="170" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="525" y="140" textAnchor="middle" fontSize="12" fill="#18231f">@quickspin/sdk</text>
+    <text x="525" y="156" textAnchor="middle" fontSize="10" fill="#405049">generated, reviewed</text>
+    <line x1="255" y1="59" x2="140" y2="118" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow09)" />
+    <text x="155" y="82" textAnchor="middle" fontSize="10" fill="#8f3423">route-sync test</text>
+    <line x1="385" y1="59" x2="500" y2="118" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow09)" />
+    <text x="490" y="82" textAnchor="middle" fontSize="10" fill="#8f3423">generation + review</text>
+    <line x1="438" y1="142" x2="202" y2="142" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow09)" />
+    <text x="320" y="132" textAnchor="middle" fontSize="10" fill="#7f5d43">contract suite hits the live plane</text>
+    <text x="320" y="188" textAnchor="middle" fontSize="10" fill="#405049">drift in any surface fails make test or make test-sdk-ts</text>
+  </svg>
+</Figure>
+
+### Concept: ndjson streaming through an async iterator
+
+The exec-stream endpoint sends newline-delimited JSON over a chunked HTTP response.
+The SDK's job is to turn that byte stream into `for await (const ev of ...)` — which
+means owning three details that libraries usually hide. First, chunk boundaries are
+arbitrary: one network read can contain half an event or three of them, so the parser
+buffers bytes, splits on `\n`, and keeps the trailing partial line for the next read.
+Second, liveness is the whole point: events must be yielded as they arrive, not
+accumulated until the response ends — an SDK that buffers the body defeats streaming
+while still passing every non-timing test. Third, teardown: if the consumer breaks out
+of the loop early, the underlying reader must be cancelled so the HTTP connection and
+the server-side exec are released. The Definition of done's liveness assertion exists
+to catch the second failure, which is by far the most common.
+
+### Concept: typed errors as the machine-readable half of the API
+
+Plan 05 committed to an error envelope with a stable `error.code`. The SDK converts
+those codes into subclasses of a common `QuickspinError` so a harness can write
+`catch (e) { if (e instanceof QuotaExceededError) ... }` instead of matching message
+strings. Two rules make this durable. The mapping is 1:1 and closed over the API's
+published codes — an unknown code maps to the base class rather than crashing, so a
+new server code degrades gracefully in an old SDK. And messages are for humans only:
+the moment a caller parses `e.message`, the message text becomes API surface and can
+never be reworded. This is the TypeScript twin of the Go sentinel-error convention
+from plan 02 — same contract idea, different language mechanism.
+
+<Callout tone="note" title="instanceof and Error subclasses">
+  When reviewing the generated errors, check that each subclass either targets ES2015+
+  or calls `Object.setPrototypeOf(this, new.target.prototype)` in its constructor —
+  the classic transpilation bug makes `instanceof QuotaExceededError` silently false,
+  and every typed-error contract test would catch it only if the tests assert with
+  `instanceof`, not `e.code`.
+</Callout>
+
+## Design and interfaces
+
+SDK surface (generated code must match this):
+
+```ts
+const sbx = await Sandbox.create({ image: "python:3.12-slim", ttlSeconds: 600 });
+const res = await sbx.exec("python", ["-c", "print(1)"], { timeoutMs: 30_000 });
+res.exitCode; res.stdout; res.stderr;               // buffered mode
+for await (const ev of sbx.execStream("make", ["test"])) { ... } // streamed mode
+await sbx.files.write("/app/main.py", code);
+const text = await sbx.files.read("/app/main.py");
+await sbx.keepalive();
+await sbx.kill();                                    // idempotent, like the API
+Sandbox.connect(id)                                  // reattach to an existing sandbox
+```
+
+Committed decisions: zero runtime dependencies (native `fetch`), works on Node 20+,
+ndjson stream parsing in-house; errors map 1:1 from the API's `error.code` values.
+
+## Tasks
+
+<TaskList>
+  <Task title="Write and serve the OpenAPI document (you, Go)">
+    Write `openapi.yaml` covering `/v1/*`, serve it at `/v1/openapi.json`, and add a
+    CI check that it stays in sync with routes — a test enumerating the mux.
+  </Task>
+  <Task title="Generate the SDK package (Claude)">
+    Client, types, errors, stream parsing, README — matching the surface above with
+    zero runtime dependencies.
+  </Task>
+  <Task title="Review the generated SDK (you)">
+    Judge it against the OpenAPI doc and the committed surface; every mismatch is
+    either an SDK fix or a spec fix, decided explicitly.
+  </Task>
+  <Task title="Build the contract test suite (both)">
+    Vitest tests that run against a real local control plane started by the test
+    script — not mocks.
+  </Task>
+  <Task title="Add make test-sdk-ts">
+    Boots the plane with a throwaway SQLite file, mints a key via the admin CLI, and
+    runs the suite.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Start with the spec, and let it audit your API"
+    check="openapi.yaml validates (npx @redocly/cli lint openapi.yaml or the Swagger editor) and lists every /v1 route with its error envelope schema."
+  >
+    Before any TypeScript exists, write `openapi.yaml` by walking the plan 05/07
+    handlers. Define the error envelope once under `components.schemas` and reference
+    it from every non-2xx response — if you find yourself unable to, that endpoint's
+    errors are irregular and should be fixed in Go now. Keep a running list of every
+    irregularity you hit; each is a candidate API fix before generation starts.
+  </Hint>
+  <Hint
+    title="Pin the spec to the mux with a Go test"
+    check="Adding a fake route to the mux (or deleting a path from the YAML) makes the new test fail in make test with a readable diff of the two path sets."
+  >
+    Serving the JSON is the easy half: embed the YAML with `go:embed`, convert once at
+    startup (`sigs.k8s.io/yaml` or `gopkg.in/yaml.v3` into a generic map, then
+    `encoding/json`), and hand it to a handler. The sync test is the valuable half:
+    build the set of documented `method path` pairs by decoding the YAML's `paths`
+    map, build the set of registered patterns from wherever your routes are declared
+    (this is the nudge to keep a single route table both the mux and the test read),
+    and assert set equality.
+  </Hint>
+  <Hint
+    title="Review the generated client top-down, spec in hand"
+    check="You can state, for each of the eight surface methods, which OpenAPI operation it calls and where its types come from — and package.json plus a grep for import statements confirm zero runtime dependencies."
+  >
+    Review order that works: `package.json` (no deps, Node 20 engines), the error
+    module (one subclass per documented `error.code`, `instanceof` intact — see the
+    callout), the request core (base URL + key resolution from `QUICKSPIN_API_KEY`,
+    one place that throws on non-2xx), then the resource methods. Compare each request
+    and response type against the spec, not against the server code — the spec is the
+    contract you agreed to enforce.
+  </Hint>
+  <Hint
+    title="Scrutinize the ndjson parser hardest"
+    check="A scratch test that feeds the parser one event split across two chunks, and two events in one chunk, yields exactly the right events in both cases."
+  >
+    The shape to expect: an async generator wrapping `res.body.getReader()`, a
+    `TextDecoder` with `stream: true`, a string buffer that splits on newline and
+    retains the final partial segment, and a `finally` that calls `reader.cancel()`.
+    Anything that awaits `res.text()` or joins chunks before parsing has silently
+    destroyed streaming — it will pass every test except the liveness one.
+  </Hint>
+  <Hint
+    title="Make the test harness boot a real plane"
+    check="make test-sdk-ts from a clean checkout starts the plane, runs vitest, exits non-zero on failure, and leaves no server process behind."
+  >
+    Shell script shape: `mktemp -d` for the SQLite file, start the control plane in
+    the background, poll its health endpoint until ready (curl in a loop with a
+    timeout), mint a key with the plan 08 admin CLI, export `QUICKSPIN_API_KEY` and
+    the base URL, run `npx vitest run`, and kill the server in a `trap ... EXIT` so
+    cleanup survives test failure. Vitest picks up the env vars without help.
+  </Hint>
+  <Hint
+    title="Assert liveness with two clocks, and typed errors with instanceof"
+    check="The execStream test records a first-event timestamp measurably earlier than command completion, and each typed-error test passes via expect(err).toBeInstanceOf(...)."
+  >
+    For liveness, stream a command that prints then sleeps (`sh -c 'echo hi; sleep
+    2'`) and assert the first event arrives well before total elapsed time — a
+    buffering SDK collapses the two. For errors, drive each failure for real: a
+    garbage key for `AuthenticationError`, a tenant quota of zero (plan 08 admin CLI)
+    for `QuotaExceededError`, exec after `kill()` for `SandboxNotFoundError`. Use
+    Vitest's `rejects.toBeInstanceOf` so message wording stays out of the contract.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: the liveness test times out or flakes"
+    check="With the fix in place, the first stream event consistently arrives within a few hundred milliseconds while the command still runs, on repeated make test-sdk-ts runs."
+  >
+    Three suspects, in order. The SDK buffers (see the parser hint) — verify with a
+    raw `curl -N` against the endpoint: if curl shows lines arriving live, the server
+    is fine and the SDK is the problem. The server doesn't flush — plan 07's handler
+    must call `http.Flusher.Flush()` after each event; without it Go buffers small
+    writes. Or the test itself is wrong — asserting on wall-clock gaps that are too
+    tight for CI. Fix by asserting ordering (first event before process exit) rather
+    than absolute milliseconds.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+`make test-sdk-ts` passes, including at minimum:
+
+- `create → exec → files round-trip → kill` happy path.
+- `execStream` yields output events before command completion (liveness assertion).
+- Typed errors: bad key ⇒ `AuthenticationError`; over-quota ⇒ `QuotaExceededError`;
+  killed sandbox exec ⇒ `SandboxNotFoundError`.
+- `kill()` twice resolves both times.
+- `Sandbox.connect()` reattaches and can exec.
+
+Go-side: the route/OpenAPI sync test is in `make test`.
+
+Deliberately untested: browser runtime, proxy environments, retry/backoff policy
+(explicitly none in v0 — retries interact with idempotency keys and deserve their own
+decision later).
+
+## Solo-developer tradeoffs
+
+Commercial SDKs are fully codegen'd (Stainless/Fern) with retries, pagination, and
+telemetry baked in. A hand-shaped (if machine-written) client with zero dependencies is
+easier to read end-to-end — which matters when the SDK is also a learning artifact and
+a resume exhibit. The real discipline kept from industry: contract tests against a live
+server, so the SDK can never silently drift from the plane.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="OpenAPI Specification v3.1.0"
+    href="https://spec.openapis.org/oas/v3.1.0.html"
+  >
+    The normative reference for `paths`, `components`, and response objects — the
+    document to settle arguments with while writing `openapi.yaml`.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="The OpenAPI Getting Started guide"
+    href="https://learn.openapis.org/"
+    by="OpenAPI Initiative"
+  >
+    The tutorial companion to the spec: how to structure a document and reuse schemas
+    via `$ref`, which is exactly how the shared error envelope should be written once.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Consumer-Driven Contracts: A Service Evolution Pattern"
+    href="https://martinfowler.com/articles/consumerDrivenContracts.html"
+    by="Ian Robinson, martinfowler.com"
+  >
+    The theory behind this plan's enforcement points: why contracts only constrain an
+    API when a consumer's expectations are executable, not documented.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="for await...of"
+    href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for-await...of"
+    by="MDN"
+  >
+    The async-iteration protocol behind `execStream`, including what happens on early
+    `break` — the mechanism your `finally`/`reader.cancel()` teardown hooks into.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Using readable streams"
+    href="https://developer.mozilla.org/en-US/docs/Web/API/Streams_API/Using_readable_streams"
+    by="MDN"
+  >
+    The `getReader()`/`TextDecoder`/cancellation mechanics the ndjson parser is built
+    from, with worked examples of exactly the chunk-boundary handling the hints warn
+    about.
+  </Resource>
+</Resources>

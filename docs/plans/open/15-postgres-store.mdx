@@ -1,0 +1,374 @@
+# 15 — Postgres store (Neon) for production
+
+Depends on: 08 (store shape final through tenants/quotas); 11's snapshot tables if
+already implemented.
+
+## Summary
+
+Make the control plane's store backend pluggable in fact, not just in interface: the
+same store contract runs on SQLite (local dev, unchanged) or Postgres, selected by
+config (`QUICKSPIN_DB=sqlite:path` vs a `postgres://` URL). Production uses Neon —
+serverless Postgres with a free tier and instant database branching, which becomes the
+test isolation mechanism. Every store behavior you've built (state machine,
+idempotency keys, admission-time quotas, events) must pass the same test suite on both
+backends before this plan closes.
+
+## Industry context
+
+Every commercial control plane runs on Postgres or something stronger; SQLite's
+single-writer model dies the moment the plane has two instances or a worker split
+(plan 17). Neon specifically is what a solo developer would pick in 2026: scale-to-zero
+pricing, pooled connection strings via PgBouncer, and branch-per-test-run — the same
+"copy the prod schema in seconds" trick platform teams build internally with snapshots.
+The porting exercise itself is an industry rite: the bugs live exactly where SQLite was
+forgiving (type affinity, `datetime` as text, implicit transaction behavior) and
+Postgres is not.
+
+## What you'll learn
+
+- Writing Go SQL against two engines: `pgx` vs `database/sql`+sqlite, placeholder
+  styles (`?` vs `$1`), and where to stop abstracting (two small store
+  implementations beat one query-builder).
+- Real transaction semantics: Postgres isolation levels, `SELECT ... FOR UPDATE` for
+  the quota admission race (plan 08's `TestQuotaRaceOnlyAdmitsCap` gets interesting —
+  SQLite serialized writes for you; Postgres will not).
+- Migrations at startup under a Postgres advisory lock (`pg_advisory_lock`) so two
+  racing planes cannot double-migrate — the files themselves exist since plan 05; what
+  is new is dialect porting and the lock.
+- Operating a managed DB: connection pooling (pooled vs direct Neon strings), TLS
+  (`sslmode=require`), secrets outside the repo.
+
+### Concept: the conformance suite is the contract, the interface is just its type
+
+The `store` interface names the methods; it says nothing about behavior. "Destroy of
+an absent row returns nil", "an idempotency-key replay returns the original sandbox",
+"a state-guarded UPDATE never resurrects a destroyed sandbox" — none of that is in
+the method signatures, all of it is what the control plane actually relies on. The
+shared suite (`storetest.Run(t, factory)`, written in plan 05 for exactly this
+moment) is where those behaviors live as executable statements: it takes a factory
+that yields a fresh store and runs every assertion against whatever the factory
+returns. That inversion is the whole design — the suite never knows which engine it
+is testing, so adding Postgres is adding a caller, not copying tests. The failure
+mode it prevents is *drift*: two hand-maintained test files that slowly assert
+different things, until "passes on both backends" quietly stops meaning "behaves the
+same on both backends". This is also the industry shape — Kubernetes' storage
+conformance tests and database driver compatibility suites are the same idea at
+scale: one contract, N implementations, zero per-implementation assertions.
+
+<Figure caption="One behavioral contract, two implementations: storetest.Run takes a factory and never learns which engine it is exercising. Each backend adds only a caller.">
+  <svg viewBox="0 0 620 250" role="img" aria-label="The shared storetest suite exercises SQLite and Postgres stores through factories against the same assertions">
+    <defs>
+      <marker id="arrow15" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+      <marker id="arrow15b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#caa552" />
+      </marker>
+    </defs>
+    <rect x="200" y="20" width="220" height="70" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="310" y="44" textAnchor="middle" fontSize="13" fill="#18231f">storetest.Run(t, factory)</text>
+    <text x="310" y="62" textAnchor="middle" fontSize="10" fill="#405049">state machine · idempotency keys</text>
+    <text x="310" y="76" textAnchor="middle" fontSize="10" fill="#405049">quota race · guarded writes · events</text>
+    <rect x="30" y="150" width="180" height="52" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="120" y="172" textAnchor="middle" fontSize="12" fill="#18231f">TestSQLite (plan 05)</text>
+    <text x="120" y="189" textAnchor="middle" fontSize="10" fill="#405049">factory: temp file, instant</text>
+    <rect x="410" y="150" width="180" height="52" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="500" y="172" textAnchor="middle" fontSize="12" fill="#18231f">TestPostgres (this plan)</text>
+    <text x="500" y="189" textAnchor="middle" fontSize="10" fill="#405049">factory: Neon branch URL</text>
+    <line x1="140" y1="148" x2="230" y2="92" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow15)" />
+    <line x1="480" y1="148" x2="390" y2="92" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow15)" />
+    <text x="140" y="118" textAnchor="middle" fontSize="10" fill="#8f3423">same assertions</text>
+    <text x="485" y="118" textAnchor="middle" fontSize="10" fill="#8f3423">same assertions</text>
+    <rect x="410" y="218" width="180" height="26" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" />
+    <text x="500" y="235" textAnchor="middle" fontSize="10" fill="#7f5d43">hack/testdb.sh: create → delete</text>
+    <line x1="500" y1="216" x2="500" y2="204" stroke="#caa552" strokeWidth="1.5" markerEnd="url(#arrow15b)" />
+    <text x="120" y="232" textAnchor="middle" fontSize="10" fill="#405049">runs in make test, offline</text>
+  </svg>
+</Figure>
+
+### Concept: where SQLite was forgiving, and where the port bugs live
+
+SQLite uses *type affinity*: column types are suggestions, and it will happily store
+the string `"2026-07-22T10:00:00Z"` in a column declared `TIMESTAMP` — there is no
+datetime type at all, only text/integer conventions and helper functions. Postgres is
+rigid: a `timestamptz` column stores an instant, comparisons are instant comparisons,
+and a string in a numeric column is an error at insert time, not a quirk at read
+time. This is why the plan commits to `timestamptz` and why the first Postgres suite
+run should be *expected* to fail on time handling: code that formatted times to
+strings for SQLite must hand `time.Time` values to `pgx` and scan them back,
+otherwise you get timezone drift or text-vs-instant comparison bugs that SQLite's
+affinity silently absorbed. The same forgiveness pattern repeats elsewhere: SQLite
+tolerates dialect slips (`AUTOINCREMENT`, `datetime('now')`) that Postgres rejects,
+and — most consequentially — SQLite's single-writer lock *serialized all your
+concurrent writes for you*, which means concurrency bugs in your store logic have
+been physically unreachable until now. The port is less "translate the SQL" than
+"discover which correctness properties were being rented from SQLite's limitations".
+
+### Concept: `FOR UPDATE` — admission control needs a lock, not a read
+
+Plan 08's quota admission is a read-then-write: count the tenant's sandboxes, and
+insert if under cap. Under Postgres's default `READ COMMITTED` isolation, two
+transactions can both run the count, both see `cap - 1`, and both insert — the cap is
+breached and no error is ever raised, because neither transaction did anything
+individually wrong. The classic fix is to make the check-then-take atomic by
+serializing on a lock the data itself carries: `SELECT ... FROM tenants WHERE id = $1
+FOR UPDATE` takes a row lock on the tenant row, so the second transaction blocks at
+the select until the first commits, then counts again and sees the true total. The
+tenant row becomes the admission mutex — the same category-3 shape as plan 14's IP
+allocator, expressed in SQL. This is also why `TestQuotaRaceOnlyAdmitsCap` "gets
+interesting": on SQLite it passes vacuously (one writer at a time, always), so only
+the Postgres run tells you whether your admission logic is correct or was merely
+being escorted. The alternative fixes — `SERIALIZABLE` isolation with retry loops, or
+a unique-index trick — are worth knowing and rejecting in the closing notes: row-lock
+admission is the smallest change that makes the race test meaningful.
+
+### Concept: advisory locks make startup migration safe to race
+
+The moment two control-plane instances exist (plan 17's whole premise), both may
+start against the same fresh database and both will try to apply migrations —
+half-applied DDL from two racers is one of the classic ways teams corrupt a schema.
+Postgres advisory locks are the standard fix: `pg_advisory_lock(key)` is an
+application-defined lock keyed by a number you choose, held by the *session* (the
+specific connection), with no table required — which matters precisely at migration
+time, when your tables may not exist yet. The first plane takes the lock, applies
+migrations, unlocks; the second blocks at the lock call, then wakes, sees the schema
+version already current, and does nothing. Two sharp edges: the lock is tied to the
+connection, so the lock acquisition and the DDL must run on the *same* connection —
+grabbing it through a pool that hands the next statement a different connection locks
+nothing; and PgBouncer's transaction-pooling mode breaks session-level locks for the
+same reason, which is why the migrator should use Neon's **direct** (unpooled)
+connection string while the application pool uses the pooled one.
+
+<Callout tone="warning" title="Two connection strings, two jobs">
+  Neon hands you a pooled URL (through PgBouncer) and a direct one. The application's
+  `pgxpool` wants the pooled URL; the migrator wants the direct URL, because
+  session-level advisory locks and transaction pooling do not mix. Using the pooled
+  string everywhere appears to work — until the exact race the lock exists for.
+</Callout>
+
+## Design and interfaces
+
+The `store` interface from plan 05 does not change — that is the point. Additions:
+
+```go
+// store.Open(cfg) picks the backend from the URL scheme.
+// migrations/ is embedded (go:embed) and applied on startup under an advisory
+// lock (pg_advisory_lock) so two racing planes can't double-migrate.
+```
+
+Committed decisions:
+
+- Time columns become `timestamptz`; IDs stay app-generated strings (no serial PKs to
+  keep backends symmetric).
+- Quota admission uses `SELECT count(*) ... FOR UPDATE` on the tenant row in Postgres;
+  the store test suite gains a cross-backend concurrency test that would have caught
+  the difference.
+- The shared suite already lives as `storetest.Run(t, factory)` (plan 05 wrote it that
+  way for exactly this moment); this plan adds the `TestPostgres` caller and extends
+  the suite with the guard-clause write test: an UPDATE conditioned on current state
+  (plan 06's don't-resurrect rule) must behave identically on both engines.
+- CI/local Postgres tests run against a Neon **branch** created and deleted by
+  `hack/testdb.sh` (fallback: a local `docker run postgres` in the Lima VM if offline).
+
+<KeyPoint label="Where to stop abstracting">
+  Two small store implementations, one shared behavioral suite, zero query builders.
+  The suite guarantees the behaviors match; the SQL is allowed to differ, stay
+  readable, and be debuggable at 2am. An abstraction layer that generates both
+  dialects would trade that readability for symmetry the suite already enforces.
+</KeyPoint>
+
+## Tasks
+
+<TaskList>
+  <Task title="Port migrations to a Postgres-compatible dialect">
+    Plan 05's portability rules should make this small; every divergence found goes
+    in the closing notes.
+  </Task>
+  <Task title="Teach the migrator the advisory-lock dance">
+    Acquire `pg_advisory_lock` on the migration connection before applying, release
+    after; SQLite path unchanged.
+  </Task>
+  <Task title="Implement the Postgres store with pgx">
+    A second small implementation of the plan 05 store interface — `$1` placeholders,
+    `timestamptz`, `FOR UPDATE` admission.
+  </Task>
+  <Task title="Write hack/testdb.sh">
+    Create a Neon branch via `neonctl`/API, export the URL, delete the branch on
+    exit; fall back to a local `docker run postgres` in the Lima VM when offline.
+  </Task>
+  <Task title="Fix everything the shared suite finds">
+    Run `storetest.Run` against Postgres and work the failures; expect datetime and
+    race findings.
+  </Task>
+  <Task title="Plumb config and document Neon setup">
+    `QUICKSPIN_DB` selection by URL scheme, plus a README section covering project,
+    roles, and the pooled vs direct connection strings.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Hunt the SQLite-isms in the migrations first"
+    check="psql against a scratch Neon branch applies every migration file by hand with no errors."
+  >
+    Grep the migration files for the usual suspects: `AUTOINCREMENT`,
+    `datetime('now')`, `strftime`, bare `TIMESTAMP`/`TEXT` time columns, and
+    `INTEGER PRIMARY KEY` rowid tricks. Replace time columns with `timestamptz` and
+    defaults with `now()`. Apply the files manually with `psql -f` before touching
+    Go — dialect errors are much clearer from psql than through a migrator. Record
+    each divergence as you find it; the closing notes require the list.
+  </Hint>
+  <Hint
+    title="The advisory lock must live on the connection that runs the DDL"
+    check="Two migrator processes started simultaneously against one fresh branch both exit healthy, and the schema-version table shows each migration applied exactly once."
+  >
+    Acquire a dedicated `*pgx.Conn` (not a pool), call `SELECT
+    pg_advisory_lock($1)` with a fixed key, run the pending migrations on that same
+    connection, then `pg_advisory_unlock`. Read the Postgres docs section
+    "Advisory Locks" — the session-vs-transaction lock distinction and the
+    PgBouncer caveat are both there. Simulate the race with two copies of the plane
+    (or a tiny test spawning two migrators) against a fresh database.
+  </Hint>
+  <Hint
+    title="Start the Postgres store as a mechanical translation, then run the suite"
+    check="The first several storetest.Run cases pass under TestPostgres; the failures that remain are behavioral (time, concurrency), not syntax."
+  >
+    Build the store on `pgxpool.New` and translate query by query: `?` becomes
+    `$1..$n`, and every place the SQLite code formatted a `time.Time` to a string
+    now passes the `time.Time` straight to pgx and scans it back into `time.Time`.
+    Resist adding any shared SQL-generation helper — the plan's committed position is
+    two readable implementations. `TestPostgres` is just `storetest.Run` handed a
+    factory func that opens the store from the env URL, plus per-run cleanup
+    (truncate tables or use a schema per run) so cases start clean.
+  </Hint>
+  <Hint
+    title="hack/testdb.sh: branch, export, trap delete"
+    check="make test-store-pg with no arguments creates a branch, runs the suite against it, and neonctl branches list afterwards shows the branch gone."
+  >
+    `neonctl branches create --project-id ... --name test-$RANDOM` returns a
+    connection string; export it as the env var the test reads, run the suite, and
+    delete in a `trap ... EXIT` handler so failures still clean up. The offline
+    fallback is `docker run --rm -e POSTGRES_PASSWORD=... -p 5432:5432 postgres`
+    inside the Lima VM plus a readiness poll (`pg_isready` in a loop). Keep the Neon
+    API key outside the repo — env var or a git-ignored file.
+  </Hint>
+  <Hint
+    title="Make the quota race real, then win it with a row lock"
+    check="TestQuotaRaceOnlyAdmitsCap passes repeatedly under go test -race -count=10 against Postgres, admitting exactly cap sandboxes."
+  >
+    First confirm the race exists: run the ported-but-unfixed admission at
+    concurrency and watch the cap breach — a failure worth seeing once. Then wrap
+    admission in a transaction: `SELECT id FROM tenants WHERE id = $1 FOR UPDATE`,
+    count within the same transaction, insert or reject, commit. The tenant row is
+    now the admission mutex. If the test deadlocks instead of passing, look for a
+    second code path locking tenant rows in a different order, or an admission
+    transaction left open across a network call.
+  </Hint>
+  <Hint
+    title="Guard-clause writes: assert on RowsAffected, identically"
+    check="The new shared-suite guard test passes on both engines: an UPDATE conditioned on a stale state reports zero rows changed and the row is unmodified."
+  >
+    Plan 06's don't-resurrect rule is `UPDATE sandboxes SET state = $1 WHERE id = $2
+    AND state = $3`. Both `database/sql`'s `Result.RowsAffected` and pgx's
+    `CommandTag.RowsAffected` report the matched-and-updated count — the store treats
+    zero as "guard refused" and the suite asserts both engines agree. Write the test
+    in `storetest` (not per-backend) so it runs everywhere by construction.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely suite failures: time drift and vacuous concurrency"
+    check="TestMigrationsAreIdempotent and the datetime-sensitive cases pass on Postgres, and the closing-notes list explains each difference you fixed."
+  >
+    A time-comparison failure that only appears on Postgres is almost always a
+    lingering string-formatted timestamp: search for `Format(time.RFC3339` in store
+    code and compare instants with `time.Time.Equal` (not `==` — the monotonic clock
+    and location fields break struct equality). If `TestMigrationsAreIdempotent`
+    fails with duplicate-object errors, the advisory lock is being acquired on a
+    different connection than the DDL — usually a pool acquired between lock and
+    apply, or the pooled Neon string in the migrator. And if a concurrency test
+    passes instantly on Postgres, distrust it: check it is actually running its
+    goroutines against one shared database, not per-goroutine stores — SQLite's
+    serialization has been hiding vacuous tests all along.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+- `make test` — SQLite suite still green, untouched behavior.
+- `make test-store-pg` — the identical `storetest.Run` suite green against a Neon
+  branch (or local Postgres), including:
+  - `TestQuotaRaceOnlyAdmitsCap` at meaningful concurrency (this is the test that
+    proves Postgres-correctness, not just Postgres-compatibility).
+  - `TestIdempotencyKeyReturnsSameSandbox` under concurrent duplicate creates.
+  - `TestMigrationsAreIdempotent` — two planes starting simultaneously against one
+    fresh database both come up healthy (advisory lock works).
+- `hack/validate-15.sh`: boots the full plane against a Neon branch, runs the plan 05
+  end-to-end curl flow, kills and restarts the plane, confirms state survived in Neon.
+- Closing notes must list every behavior difference found between backends.
+
+Deliberately untested: failover/read replicas, connection-storm behavior, Neon
+scale-to-zero cold-start latency under load (worth *measuring* once and noting).
+
+## Solo-developer tradeoffs
+
+A commercial platform would run HA Postgres with PITR, schema-change review, and a
+data-access layer team. You get managed HA from Neon for free-tier money and keep two
+hand-written store implementations, accepting the double-maintenance cost because the
+SQLite path is what keeps local dev and `make test` instant and offline. The discipline
+kept from industry: one conformance suite, versioned migrations, and no ORM — the SQL
+you debug at 2am is the SQL you wrote.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="PostgreSQL: Transaction Isolation"
+    href="https://www.postgresql.org/docs/current/transaction-iso.html"
+  >
+    The precise semantics of Read Committed and its snapshot-per-statement behavior —
+    the reason the quota race exists at all once SQLite's single writer is gone.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="PostgreSQL: Explicit Locking"
+    href="https://www.postgresql.org/docs/current/explicit-locking.html"
+  >
+    Documents `SELECT ... FOR UPDATE` and the row/table lock modes, including the
+    deadlock-detection behavior your admission transaction can trigger.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="PostgreSQL: Advisory Lock Functions"
+    href="https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS"
+  >
+    The `pg_advisory_lock` family this plan's migration guard uses — session vs
+    transaction scope is the distinction that decides whether your lock leaks.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="package pgx — github.com/jackc/pgx/v5"
+    href="https://pkg.go.dev/github.com/jackc/pgx/v5"
+  >
+    The driver's own reference — pgxpool configuration, `$1` placeholders, and error
+    handling via `pgconn.PgError`, which is how you detect unique-violation replays.
+  </Resource>
+  <Resource
+    kind="book"
+    title="Designing Data-Intensive Applications"
+    by="Martin Kleppmann, ch. 7 (Transactions)"
+  >
+    The best conceptual treatment of isolation anomalies — write skew and lost
+    updates — that shows exactly which class of bug `FOR UPDATE` is buying off.
+  </Resource>
+  <Resource
+    kind="article"
+    title="SQLite is not a toy database"
+    href="https://antonz.org/sqlite-is-not-a-toy-database/"
+    by="Anton Zhiyanov"
+  >
+    The counterweight to this plan's migration: a clear-eyed case for how far SQLite
+    goes in production, sharpening why concurrency — not scale — is your real reason.
+  </Resource>
+</Resources>

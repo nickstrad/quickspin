@@ -1,0 +1,434 @@
+# 05 — Control plane: HTTP API and durable state
+
+Depends on: 04.
+
+## Summary
+
+Wrap the runtime in a long-running Go HTTP service — the control plane. It owns sandbox
+records in SQLite, exposes a versioned JSON API (`/v1/sandboxes`...), assigns lifecycle
+states, and supports idempotent creation via client-supplied idempotency keys. The CLI
+becomes a client of the API instead of calling the runtime directly. From this plan on,
+Quickspin is a service, not a tool.
+
+## Industry context
+
+This is the piece users literally point their SDKs at: E2B's and Daytona's public REST
+APIs look strikingly like the surface below (create with a spec, poll state, exec,
+files, delete). Two industry patterns are load-bearing here. First, **desired state
+lives in a database, actual state lives in the runtime**, and they are allowed to
+disagree — reconciling them is plan 06's job; this plan makes the disagreement
+representable. Second, **idempotency keys** (as popularized by Stripe's API) are how
+every serious platform makes "the client retried a create after a network blip" not
+produce two billed sandboxes.
+
+## What you'll learn
+
+- Production-shaped Go HTTP services: `net/http` with Go 1.22+ method routing,
+  middleware, graceful shutdown, structured logging (`log/slog`), request IDs.
+- SQLite from Go: schema migrations, transactions, and why "state machine in a
+  database" is a transactional problem.
+- The error/logging conventions at a second layer: `ControlPlaneError` with `Wrap`
+  above the runtime's errors, one-log-per-error (the handler that converts an error to
+  an HTTP response is the propagation stop, so it logs), child loggers per component.
+- Designing a lifecycle state machine and rejecting illegal transitions.
+- API error design: stable machine-readable error codes vs prose.
+
+### Concept: the database records intent, the runtime records reality
+
+Until now, "does the sandbox exist" had one answer: ask Docker. This plan introduces a
+second answer — the SQLite row — and the design hinges on which one is written first.
+The create handler inserts a `pending` record *before* touching the runtime, then
+transitions it to `running` or `failed` based on what actually happened. That ordering
+is what makes crashes representable instead of catastrophic: if the process dies
+between the insert and the Docker call, restart finds a `pending` row with no
+container — a fact a future reconciler (plan 06) can see and act on. Written the other
+way around (Docker first, row second), a crash produces a container no database knows
+about: an invisible, unbilled, undeletable leak. The database row is not a cache of
+Docker's state; it is the authoritative statement of what *should* exist, and the two
+are allowed to disagree until something reconciles them.
+
+<Figure caption="Create records intent before acting. Each numbered arrow can fail; because the record exists first, every failure leaves a visible row rather than an orphaned container.">
+  <svg viewBox="0 0 640 210" role="img" aria-label="Create request path: handler inserts pending record, calls runtime, then transitions to running or failed">
+    <defs>
+      <marker id="arrow05" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+      <marker id="arrow05b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#caa552" />
+      </marker>
+    </defs>
+    <rect x="10" y="70" width="130" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="75" y="90" textAnchor="middle" fontSize="12" fill="#18231f">POST /v1/sandboxes</text>
+    <text x="75" y="106" textAnchor="middle" fontSize="10" fill="#405049">handler</text>
+    <rect x="240" y="20" width="160" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="320" y="40" textAnchor="middle" fontSize="12" fill="#18231f">SQLite: insert pending</text>
+    <text x="320" y="56" textAnchor="middle" fontSize="10" fill="#405049">intent, before Docker</text>
+    <rect x="240" y="130" width="160" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="320" y="150" textAnchor="middle" fontSize="12" fill="#18231f">runtime.Create</text>
+    <text x="320" y="166" textAnchor="middle" fontSize="10" fill="#405049">reality changes here</text>
+    <rect x="480" y="70" width="150" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="555" y="90" textAnchor="middle" fontSize="12" fill="#18231f">transition(id, ...)</text>
+    <text x="555" y="106" textAnchor="middle" fontSize="10" fill="#405049">→ running or failed</text>
+    <line x1="140" y1="80" x2="238" y2="48" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow05)" />
+    <text x="170" y="48" textAnchor="middle" fontSize="10" fill="#8f3423">1</text>
+    <line x1="140" y1="104" x2="238" y2="140" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow05)" />
+    <text x="170" y="140" textAnchor="middle" fontSize="10" fill="#8f3423">2</text>
+    <line x1="400" y1="152" x2="500" y2="118" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow05)" />
+    <text x="465" y="146" textAnchor="middle" fontSize="10" fill="#8f3423">3</text>
+    <path d="M 320 64 L 320 76 L 470 92" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow05b)" />
+    <text x="420" y="72" textAnchor="middle" fontSize="10" fill="#7f5d43">crash between 1 and 3 leaves a</text>
+    <text x="420" y="85" textAnchor="middle" fontSize="10" fill="#7f5d43">pending row plan 06 can reconcile</text>
+  </svg>
+</Figure>
+
+### Concept: a state machine is only as strong as its narrowest gate
+
+The lifecycle states are cheap to define; the discipline is that every state change in
+the codebase flows through one gate. Split the problem into two layers, per the
+code-structure reference. The *legality* question — may a sandbox go from `stopped` to
+`running`? — is a pure function, `canTransition(from, to State) bool`, exhaustively
+table-tested with no database in sight. The *atomicity* question is transactional: the
+`transition(id, from, to)` helper must read the current state, check legality, and
+write the new state inside one transaction, so two concurrent requests cannot both
+observe `running` and both "win" a transition out of it (the classic lost-update
+race). Scattered `UPDATE sandboxes SET state=...` statements bypass both layers at
+once, and each one is a future bug in which a `failed` sandbox quietly resurrects.
+
+<Figure caption="The control-plane lifecycle. Every arrow is a call to the transition helper; anything not drawn here is a 409.">
+  <svg viewBox="0 0 620 200" role="img" aria-label="State machine: pending to running to stopping to stopped, with pending and running able to reach failed">
+    <defs>
+      <marker id="arrow05c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+    </defs>
+    <rect x="15" y="40" width="120" height="44" rx="22" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="75" y="67" textAnchor="middle" fontSize="13" fill="#18231f">pending</text>
+    <rect x="185" y="40" width="120" height="44" rx="22" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="245" y="67" textAnchor="middle" fontSize="13" fill="#18231f">running</text>
+    <rect x="355" y="40" width="120" height="44" rx="22" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="415" y="67" textAnchor="middle" fontSize="13" fill="#18231f">stopping</text>
+    <rect x="490" y="120" width="115" height="44" rx="22" fill="none" stroke="#405049" strokeWidth="1.5" strokeDasharray="5 4" />
+    <text x="547" y="147" textAnchor="middle" fontSize="13" fill="#405049">stopped</text>
+    <rect x="185" y="140" width="120" height="44" rx="22" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="245" y="167" textAnchor="middle" fontSize="13" fill="#18231f">failed</text>
+    <line x1="135" y1="62" x2="183" y2="62" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow05c)" />
+    <text x="159" y="52" textAnchor="middle" fontSize="10" fill="#8f3423">created</text>
+    <line x1="305" y1="62" x2="353" y2="62" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow05c)" />
+    <text x="329" y="52" textAnchor="middle" fontSize="10" fill="#8f3423">DELETE</text>
+    <line x1="453" y1="84" x2="510" y2="118" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow05c)" />
+    <text x="502" y="98" textAnchor="middle" fontSize="10" fill="#8f3423">destroyed</text>
+    <line x1="90" y1="84" x2="200" y2="142" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow05c)" />
+    <text x="115" y="126" textAnchor="middle" fontSize="10" fill="#8f3423">create failed</text>
+    <line x1="245" y1="84" x2="245" y2="138" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow05c)" />
+    <text x="290" y="114" textAnchor="middle" fontSize="10" fill="#8f3423">runtime error</text>
+    <text x="415" y="188" textAnchor="middle" fontSize="10" fill="#405049">no arrow out of stopped or failed:</text>
+    <text x="415" y="202" textAnchor="middle" fontSize="10" fill="#405049">resurrection is a new sandbox, not a transition</text>
+  </svg>
+</Figure>
+
+### Concept: idempotency keys turn retries into reads
+
+A create request can succeed on the server while the response is lost to a network
+blip. The client cannot tell "failed" from "succeeded, reply lost", so a correct
+client retries — and without protection, the retry creates a second sandbox. The
+idempotency key inverts the responsibility: the client names the *operation* (a random
+key in the `Idempotency-Key` header), and the server promises that one key maps to at
+most one sandbox. Mechanically that is the `idempotency_keys(key, sandbox_id, ...)`
+table: on create, look the key up; a hit returns the existing sandbox's current record
+(making the retry a read), a miss creates and records the mapping. The subtle cases
+worth deciding consciously: a request with no key is a plain create every time, and
+the lookup-or-insert should share the create's transaction — though truly concurrent
+retries racing one key are explicitly out of scope until plan 08's quota work makes
+transactions load-bearing anyway.
+
+<StudyPrompt question="Why does the key map to a sandbox ID rather than a stored copy of the original response?">
+  Ask what the retry should see if the sandbox failed after creation. Replaying a
+  cached 201 body would report a healthy sandbox that no longer exists. Mapping to the
+  ID and re-reading the record means the retry gets the truth as of now — the key
+  deduplicates the side effect, not the response bytes. (Stripe caches responses, but
+  its resources are immutable charges, not long-lived machines.)
+</StudyPrompt>
+
+### Concept: the handler is where errors stop being Go values
+
+Below this plan, failures travel as wrapped sentinels (`errors.Is(err,
+runtime.ErrNotFound)`). Above it, they travel as JSON with a machine-readable `code` —
+because SDK code will branch on `"sandbox_not_found"`, and prose messages must be free
+to improve without breaking anyone. The handler is the propagation stop: it is the one
+place that inspects the chain with `errors.Is`, chooses a status (404, 422, 409),
+writes the envelope through `WriteError`, and logs the full diagnostic once. Nothing
+below it logs-and-returns (double logging), and nothing above it exists. Keeping the
+`ErrorResponse` DTO and the `WriteJSON`/`WriteError` helpers in `internal/httpapi` —
+owned by neither server nor client — is what lets plans 09, 10, and 17 consume the
+same wire format instead of re-deriving it.
+
+## Design and interfaces
+
+Lifecycle states and legal transitions:
+
+```text
+pending -> running -> stopping -> stopped
+pending -> failed
+running -> failed
+```
+
+HTTP surface (JSON bodies; errors as `{"error": {"code": "...", "message": "..."}}`):
+
+```text
+POST   /v1/sandboxes              create (honors Idempotency-Key header)
+GET    /v1/sandboxes              list
+GET    /v1/sandboxes/{id}         inspect
+DELETE /v1/sandboxes/{id}         destroy (idempotent: 204 even if already gone)
+POST   /v1/sandboxes/{id}/exec    run a command (buffered result)
+PUT    /v1/sandboxes/{id}/files?path=/abs/path    write (body = content)
+GET    /v1/sandboxes/{id}/files?path=/abs/path    read
+GET    /v1/sandboxes/{id}/dir?path=/abs/path      list
+```
+
+SQLite schema (minimum): `sandboxes(id, state, spec_json, runtime_ref, created_at,
+updated_at)` and `idempotency_keys(key, sandbox_id, created_at)`.
+
+Committed decisions:
+
+- Create is **synchronous** in this plan (request returns when the sandbox is running
+  or failed). Plan 06 revisits this honestly; note it now as a known simplification.
+- The store is behind a small Go interface so tests can use `:memory:` SQLite. Per the
+  concurrency reference's store rules: typed reads, records by value in and out,
+  `ErrNotFound` + zero value for missing keys, and **no locking or transaction policy
+  of its own** — invariants that span calls (state transition + event append, quota
+  check + insert in plan 08) are the caller's transaction.
+- Now that plan 15 commits prod to Postgres, two of its costs move here where they are
+  nearly free: the schema ships as **versioned migration files** (`migrations/NNNN_*.sql`,
+  embedded, applied at startup) rather than create-if-missing, and it avoids
+  SQLite-isms Postgres will reject (app-generated string IDs, no serial PKs, ISO-8601
+  UTC text timestamps mapping cleanly to `timestamptz`). The store test suite is
+  written as `storetest.Run(t, factory)` from day one so plan 15 adds a second caller
+  instead of an extraction refactor.
+- State transitions happen in one place (a `transition(id, from, to)` helper inside a
+  transaction) — never as scattered UPDATEs. The legality check itself is a pure
+  function, `canTransition(from, to State) bool`, with a table test enumerating the
+  full matrix (code-structure reference, candidate #3).
+- `internal/httpapi` owns the response dance (`WriteJSON`, `WriteError`) and the
+  `ErrorResponse` DTO; handlers never hand-roll status-plus-JSON, `WriteError` sets the
+  body's code from the status it writes, and 204 writes no body. This package is shared
+  wire format — the SDKs (09/10) and the worker client (17) will consume the same DTO,
+  which is why it lives in neither server nor client.
+
+<Callout tone="system" title="The one ordering that is not negotiable">
+  Never let an HTTP handler touch Docker without recording intent in the database
+  first. Every other decision in this plan can be revisited; this ordering is the
+  foundation plan 06's reconciler stands on.
+</Callout>
+
+## Tasks
+
+<TaskList>
+  <Task title="Schema, migrations, and the store package">
+    Versioned migration files applied at startup; the store behind its interface, with
+    `:memory:` tests authored inside `storetest.Run`.
+  </Task>
+  <Task title="Build the HTTP server skeleton">
+    Routing, middleware (request ID, logging, panic recovery), and graceful shutdown
+    on SIGTERM.
+  </Task>
+  <Task title="Write the handlers">
+    The surface above, mapping runtime sentinel errors to HTTP codes
+    (`ErrNotFound`→404, `ErrImageMissing`→422, illegal transition→409).
+  </Task>
+  <Task title="Add idempotency-key handling for create">
+    Look up the `Idempotency-Key` header; a hit returns the existing sandbox, a miss
+    creates and records the mapping.
+  </Task>
+  <Task title="Convert the CLI to an HTTP client">
+    `quickspin serve` starts the plane; every other subcommand speaks the JSON API.
+  </Task>
+  <Task title="Write the tests and validation script">
+    The store suite, the `httptest` API suite with a fake runtime, and
+    `hack/validate-05.sh` end to end.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Start with migrations and the store interface, not the server"
+    check="Store tests pass against :memory: SQLite via storetest.Run, and starting with a fresh database file applies migrations/0001_*.sql automatically."
+  >
+    Embed the migration files with `//go:embed migrations/*.sql`, track the applied
+    version in a `schema_migrations` table, and apply each pending file in a
+    transaction at startup. Define the store interface from what the handlers will
+    need (get, list, create, the transition, idempotency lookup) — and write
+    `storetest.Run(t, func() Store)` now, so the suite is a function of the factory
+    rather than of SQLite.
+  </Hint>
+  <Hint
+    title="canTransition is a pure table; transition is a transaction around it"
+    check="TestCanTransitionMatrix enumerates every (from, to) pair, and TestIllegalTransitionRejected shows stopped→running failing without changing the row."
+  >
+    Write `canTransition` first — a switch or map over the three legal edges plus the
+    two failure edges; everything else false. Then `transition(id, from, to)`: inside
+    `BEGIN`, `SELECT` the current state, verify it equals `from` and the move is
+    legal, `UPDATE`, commit. The read-inside-the-transaction is the point — checking
+    state before opening the transaction reintroduces the race the helper exists to
+    kill.
+  </Hint>
+  <Hint
+    title="Use Go 1.22 method routing and wrap it in middleware"
+    check="A request to any endpoint logs one line with a request ID, method, path, status, and duration; a panicking handler returns 500 instead of killing the server."
+  >
+    `http.NewServeMux` now matches patterns like `"POST /v1/sandboxes/{id}/exec"`,
+    with `r.PathValue("id")` in the handler — no router dependency. Middleware is
+    `func(http.Handler) http.Handler` layered around the mux: request ID (put it in
+    the request context and the child logger), logging (wrap `ResponseWriter` to
+    capture the status), recovery (deferred `recover()` → 500). Graceful shutdown:
+    `signal.NotifyContext` for SIGTERM, then `server.Shutdown(ctx)` with a deadline so
+    in-flight execs finish.
+  </Hint>
+  <Hint
+    title="The create handler is insert-pending, act, transition"
+    check="A create through curl returns the record in running state; with the Docker VM stopped, it returns the error envelope and a subsequent GET shows that sandbox in failed — a row exists either way."
+  >
+    Order of operations: validate the body, insert the record as `pending`, call
+    `runtime.Create`, then `transition` to `running` (storing the runtime ref) or
+    `failed` (storing nothing but the fact). Resist "cleaning up" the failed row by
+    deleting it — a visible `failed` record is the deliverable;
+    `TestRuntimeFailureMarksSandboxFailed` pins exactly this.
+  </Hint>
+  <Hint
+    title="Idempotency is lookup-or-create keyed on the header"
+    check="TestIdempotencyKeyReturnsSameSandbox passes: two creates with one key yield one sandbox and the same ID in both responses."
+  >
+    Read the `Idempotency-Key` header; empty means plain create. On a hit in
+    `idempotency_keys`, load that sandbox and return its current record (decide your
+    status: 200 for the replay vs 201 for the original is a fine, documentable
+    distinction). On a miss, create as usual and insert the mapping. A UNIQUE
+    constraint on the key column is your backstop even though concurrent races are
+    out of scope.
+  </Hint>
+  <Hint
+    title="Centralize the error-to-HTTP mapping in one function"
+    check="TestCreateInspectDestroyFlow sees the exact envelope shape on every failure, and TestDeleteIsIdempotent gets 204 twice with empty bodies."
+  >
+    Write one `WriteError`-adjacent mapper that takes an `error` and picks status +
+    code via `errors.Is`: `runtime.ErrNotFound`→404, `ErrImageMissing`→422, the
+    transition helper's illegal-transition error→409, default 500. Handlers call it
+    and log there — one log per error, per the convention. For DELETE, "already gone"
+    is a success path: map the not-found to a 204 before the generic mapper sees it.
+    And test with a fake `Runtime` you write against the interface — the fake's
+    scripted failures are what make the failure-path tests fast and deterministic.
+  </Hint>
+  <Hint
+    title="The CLI becomes a thin client of the same wire format"
+    check="Every existing quickspin sandbox subcommand works against a running quickspin serve, and none of the CLI code imports internal/runtime."
+  >
+    The CLI's job shrinks to: build the request, set headers, decode the response or
+    the shared `ErrorResponse` DTO from `internal/httpapi`, and print. If a subcommand
+    still constructs a Docker-backed runtime, the seam has leaked. A `--server` flag
+    (or env var) with a localhost default keeps the daily loop unchanged.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: the restart check in validate-05.sh"
+    check="hack/validate-05.sh passes end to end, including the kill-and-restart step where the surviving sandbox is still listed, and exits with no labeled containers leaked."
+  >
+    If the restart check fails — the restarted server lists nothing — suspect, in
+    order: the server was using `:memory:` or a temp-path database (the script must
+    point both runs at the same file), migrations dropping/recreating tables on every
+    startup instead of tracking versions, or the kill arriving before the create's
+    transaction committed (use `kill -TERM`, and have the script wait for the create's
+    HTTP response before killing). Debug with the database directly: `sqlite3 the.db
+    'select id, state from sandboxes;'` between the kill and the restart tells you
+    whether the row ever existed — separating a persistence bug from a listing bug.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Store unit tests (`make test`), authored inside `storetest.Run`:
+
+- `TestIllegalTransitionRejected` — e.g. stopped→running fails atomically.
+- `TestIdempotencyKeyReturnsSameSandbox`.
+- `TestCanTransitionMatrix` — pure table over every (from, to) pair.
+- `TestStoreReturnsCopies` — mutating a returned record does not change a re-read.
+
+API tests with `httptest` and a fake runtime (`make test`):
+
+- `TestCreateInspectDestroyFlow` — JSON contract, status codes, error envelope shape.
+- `TestDeleteIsIdempotent` — second DELETE also 204.
+- `TestRuntimeFailureMarksSandboxFailed` — fake runtime error ⇒ record in `failed`,
+  429/5xx taxonomy correct.
+
+End-to-end validation script `hack/validate-05.sh` against the real service + Docker:
+starts `quickspin serve`, drives create→exec→file write/read→destroy with `curl`,
+asserts on JSON with `jq`, kills the server mid-run and confirms a restart still lists
+the surviving sandbox record. Exits 0 only if all checks pass and no labeled containers
+leak.
+
+Deliberately untested: concurrent creates racing one idempotency key, auth (plan 08),
+TLS, request body size limits.
+
+## Solo-developer tradeoffs
+
+Commercial planes are Postgres-backed, horizontally scaled, and async-first (create
+returns `pending` immediately; you poll or subscribe). SQLite plus synchronous create
+keeps this a single deployable binary with zero infra — the right call for one
+developer — and the store interface plus the state machine mean the Postgres/async
+migration later is mechanical, not architectural. The one habit not to defer: never let
+an HTTP handler touch Docker without recording intent in the database first. That
+ordering is what plan 06 builds on.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="article"
+    title="Routing Enhancements for Go 1.22"
+    href="https://go.dev/blog/routing-enhancements"
+    by="The Go Blog"
+  >
+    The method-and-wildcard `net/http` routing this plan builds on, explained by its
+    authors — including precedence rules that surprise people coming from mux libraries.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Structured Logging with slog"
+    href="https://go.dev/blog/slog"
+    by="The Go Blog"
+  >
+    The design behind `log/slog` — handlers, attrs, and child loggers — which is the
+    machinery under this plan's per-component logger convention.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Write-Ahead Logging"
+    href="https://www.sqlite.org/wal.html"
+  >
+    Why WAL mode lets readers and one writer coexist — the concurrency model your
+    single-binary control plane actually runs under, and its checkpoint tradeoffs.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="How To Corrupt An SQLite Database File"
+    href="https://www.sqlite.org/howtocorrupt.html"
+  >
+    A catalog of the ways durable state actually gets lost — a sharper mental model of
+    what the database does and does not promise your state machine.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Designing robust and predictable APIs with idempotency"
+    href="https://stripe.com/blog/idempotency"
+    by="Brandur Leach, Stripe"
+  >
+    The industry-standard idempotency-key design this plan's create endpoint copies,
+    including the retry-and-network-failure reasoning that motivates it.
+  </Resource>
+  <Resource
+    kind="book"
+    title="Designing Data-Intensive Applications"
+    by="Martin Kleppmann, ch. 7 (Transactions)"
+  >
+    The deep treatment of the intent-before-action pattern: what transactions really
+    guarantee, and what breaks when two systems (DB and Docker) must agree.
+  </Resource>
+</Resources>

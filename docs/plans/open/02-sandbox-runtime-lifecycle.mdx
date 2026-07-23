@@ -1,0 +1,389 @@
+# 02 — Sandbox runtime: lifecycle
+
+Depends on: 01.
+
+## Summary
+
+Build the first real Go package: `internal/runtime`, which owns the create → inspect →
+destroy lifecycle of a single sandbox backed by a Docker container. Exercise it through
+a `quickspin sandbox` CLI subcommand, not HTTP. Everything later (exec, files, the
+control plane, other backends) hangs off the interface defined here.
+
+<KeyPoint label="Why this plan matters">
+  This is the spine interface of the whole project. Every later plan either calls it
+  (control plane, CLI, SDKs) or re-implements it (Firecracker). Getting the contract
+  right here is worth more than getting the Docker code pretty.
+</KeyPoint>
+
+## Industry context
+
+Every platform has this layer. In E2B it's the code behind `Sandbox.create()`; in
+Daytona, the workspace provisioner; in Kubernetes, the kubelet's container-runtime
+calls. The industry pattern worth copying is the **backend-neutral interface**: the
+caller speaks in sandbox specs and sandbox IDs, never in Docker terms. That is what
+lets plan 14 slide Firecracker underneath without rewriting the control plane — exactly
+how Daytona supports multiple providers and how Kubernetes swapped Docker for
+containerd behind the CRI.
+
+<Compare>
+  <CompareItem eyebrow="What you build" title="Interface first, Docker behind it">
+    Callers hold a `Runtime` value and quickspin IDs. Docker types never appear in a
+    signature, so swapping the backend is a new file, not a refactor.
+  </CompareItem>
+  <CompareItem eyebrow="The anti-pattern" title="Docker types in the API">
+    If `container.ID` or `types.ContainerJSON` leaks into a caller, every future
+    backend must fake Docker's shapes. Kubernetes paid years of migration cost for
+    exactly this coupling before the CRI existed.
+  </CompareItem>
+</Compare>
+
+## What you'll learn
+
+- The Docker Engine API from Go (`github.com/docker/docker/client`) — what `docker run`
+  actually does (create + start are separate calls).
+- Designing a Go interface for a resource lifecycle: constructors, contexts everywhere,
+  error taxonomy with `errors.Is`.
+- Idempotency as a design property, not an afterthought.
+- Labels as the mechanism for "which containers are mine?" — the seed of reconciliation.
+- The repo's error and logging conventions applied for the first time (see
+  `docs/reference/error-handling-and-logging.mdx`): a `RuntimeError` struct that carries
+  the sentinels, `E` at the Docker-SDK boundary, and a `slog` child logger injected
+  through the constructor.
+
+### Concept: `docker run` is two calls, and the gap between them is yours
+
+The Docker CLI hides that `run` is `ContainerCreate` (allocate the container, write
+its config) followed by `ContainerStart` (actually start the process). Your `Create`
+must make both calls — which means it can fail *between* them, leaving a created but
+never-started container on the daemon. That half-state is invisible to a caller who
+only got back an error. Whoever owns the gap owns the cleanup: `Create` must delete
+what it made before returning the error, or every failed create leaks a container.
+
+<Figure caption="Create spans two Docker calls; a failure between them must trigger cleanup before the error returns.">
+  <svg viewBox="0 0 640 190" role="img" aria-label="Create maps to ContainerCreate then ContainerStart, with cleanup on failure">
+    <defs>
+      <marker id="arrow02" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+    </defs>
+    <rect x="10" y="20" width="150" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="85" y="46" textAnchor="middle" fontSize="13" fill="#18231f">Create(ctx, spec)</text>
+    <rect x="240" y="20" width="150" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="315" y="40" textAnchor="middle" fontSize="12" fill="#18231f">ContainerCreate</text>
+    <text x="315" y="56" textAnchor="middle" fontSize="10" fill="#405049">config + labels written</text>
+    <rect x="470" y="20" width="150" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="545" y="40" textAnchor="middle" fontSize="12" fill="#18231f">ContainerStart</text>
+    <text x="545" y="56" textAnchor="middle" fontSize="10" fill="#405049">process running</text>
+    <line x1="160" y1="42" x2="238" y2="42" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow02)" />
+    <line x1="390" y1="42" x2="468" y2="42" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow02)" />
+    <text x="429" y="32" textAnchor="middle" fontSize="10" fill="#8f3423">can fail here</text>
+    <path d="M 429 64 L 429 120 L 320 120" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow02)" />
+    <rect x="170" y="98" width="150" height="44" fill="none" stroke="#caa552" strokeWidth="1.5" />
+    <text x="245" y="118" textAnchor="middle" fontSize="12" fill="#18231f">ContainerRemove</text>
+    <text x="245" y="134" textAnchor="middle" fontSize="10" fill="#405049">then return the error</text>
+    <text x="500" y="122" textAnchor="middle" fontSize="10" fill="#405049">skipping cleanup leaks one</text>
+    <text x="500" y="136" textAnchor="middle" fontSize="10" fill="#405049">container per failed create</text>
+  </svg>
+</Figure>
+
+### Concept: two identities, one owner each
+
+A sandbox has two IDs the moment it exists: the quickspin ID you generate
+(`sbx_a1b2c3`) and the container ID Docker generates. They have different owners and
+different lifetimes. The quickspin ID is the *durable, public* identity — it will later
+live in a database row and appear in URLs. The container ID is a *backend detail* that
+changes if the sandbox is ever recreated on another backend or another host. The label
+`quickspin.id=sbx_...` is the join between the two worlds, written at create time so
+the mapping survives even if your process crashes: any future process can list
+containers by label and rediscover what it owns. That rediscovery is the seed of plan
+06's reconciler.
+
+<StudyPrompt question="Why not just use the container ID as the sandbox ID?">
+  Ask what happens in plan 14 when the same sandbox is backed by a Firecracker microVM
+  — there is no container ID. Any identity minted by the backend ties every caller to
+  that backend. Identity that must outlive a backend has to be minted above it, which
+  is why quickspin generates its own IDs and demotes the container ID to a label-joined
+  implementation detail that appears only in logs.
+</StudyPrompt>
+
+### Concept: sentinel errors as the public contract
+
+Callers of this package will branch on *kinds* of failure — "not found" gets a 404
+later, "image missing" gets a 400 — but they should never parse error strings or
+depend on `RuntimeError`'s fields. Go's convention is sentinel values tested with
+`errors.Is`, which walks the chain of wrapped errors. Your `RuntimeError` struct rides
+along as the diagnostic envelope (operation, message, stack) while the sentinel inside
+it remains the only thing callers may rely on.
+
+## Design and interfaces
+
+You implement this interface; it is the spine of the whole project:
+
+```go
+package runtime
+
+// Spec describes what to create. Fields expand in later plans.
+type Spec struct {
+    Image string
+    Env   map[string]string
+}
+
+type State string
+
+const (
+    StateRunning State = "running"
+    StateStopped State = "stopped"
+)
+
+type Info struct {
+    ID        string // quickspin's ID, not the container ID
+    State     State
+    CreatedAt time.Time
+}
+
+// Sentinel errors; callers test with errors.Is.
+var (
+    ErrNotFound     = errors.New("sandbox not found")
+    ErrImageMissing = errors.New("image not available")
+)
+
+type Runtime interface {
+    Create(ctx context.Context, spec Spec) (Info, error)
+    Inspect(ctx context.Context, id string) (Info, error)
+    List(ctx context.Context) ([]Info, error)
+    // Destroy of an unknown id returns nil: cleanup must be retry-safe.
+    Destroy(ctx context.Context, id string) error
+}
+```
+
+<Callout tone="system" title="Idempotent destroy is a design commitment">
+  `Destroy` of an unknown ID returns nil, not `ErrNotFound`. Cleanup code runs in
+  retry loops, signal handlers, and reconcilers — if a second destroy fails, every
+  caller must special-case "already gone", and some will get it wrong. Deleting an
+  absent thing has succeeded.
+</Callout>
+
+Decisions the plan commits to:
+
+- Quickspin generates its own sandbox IDs (e.g. `sbx_` + random suffix) and stores them
+  on containers as labels (`quickspin.id=...`, `quickspin.managed=true`). Container IDs
+  never escape the package (log them for correlation; never join on them).
+- Per the error-handling reference: `internal/runtime/errors.go` defines `RuntimeError`
+  (`Op`, `Message`, `Err`, `Stack`) with `E`/`Wrap` constructors. Sentinels ride in
+  `Err` so `errors.Is(err, ErrNotFound)` works through the chain; the sentinels remain
+  the public contract, the struct is the diagnostic envelope.
+- Per the code-structure reference: ID generation/validation and the managed-label
+  filter are pure helpers (no receiver, no I/O) with their own table-driven tests —
+  they are the first entries in what will become each package's decision layer.
+- `NewDockerRuntime(client, logger)` takes a `*slog.Logger`; no package-level logging.
+- Containers run a long-lived no-op entrypoint (e.g. `sleep infinity`); commands come
+  later (plan 03).
+- CLI surface: `quickspin sandbox create|list|inspect|destroy`.
+
+<Figure caption="The states a sandbox record can be in from this package's point of view. Plan 05 will widen this into the control-plane state machine.">
+  <svg viewBox="0 0 620 130" role="img" aria-label="Sandbox lifecycle states: created, running, destroyed">
+    <defs>
+      <marker id="arrow02b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+    </defs>
+    <circle cx="30" cy="55" r="7" fill="#18231f" />
+    <rect x="90" y="33" width="130" height="44" rx="22" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="155" y="60" textAnchor="middle" fontSize="13" fill="#18231f">running</text>
+    <rect x="290" y="33" width="130" height="44" rx="22" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="355" y="60" textAnchor="middle" fontSize="13" fill="#18231f">stopped</text>
+    <rect x="480" y="33" width="120" height="44" rx="22" fill="none" stroke="#405049" strokeWidth="1.5" strokeDasharray="5 4" />
+    <text x="540" y="60" textAnchor="middle" fontSize="13" fill="#405049">gone</text>
+    <line x1="37" y1="55" x2="88" y2="55" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow02b)" />
+    <text x="62" y="45" textAnchor="middle" fontSize="10" fill="#8f3423">Create</text>
+    <line x1="220" y1="55" x2="288" y2="55" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow02b)" />
+    <text x="254" y="45" textAnchor="middle" fontSize="10" fill="#8f3423">exits / oom</text>
+    <line x1="420" y1="55" x2="478" y2="55" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow02b)" />
+    <text x="449" y="45" textAnchor="middle" fontSize="10" fill="#8f3423">Destroy</text>
+    <path d="M 155 33 C 220 -8 300 -8 355 33" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" />
+    <text x="255" y="14" textAnchor="middle" fontSize="10" fill="#7f5d43">Destroy also works from running</text>
+    <text x="540" y="100" textAnchor="middle" fontSize="10" fill="#405049">Inspect → ErrNotFound</text>
+    <text x="540" y="114" textAnchor="middle" fontSize="10" fill="#405049">Destroy → nil</text>
+  </svg>
+</Figure>
+
+## Tasks
+
+<TaskList>
+  <Task title="Define the interface and error values">
+    `internal/runtime`: the `Runtime` interface, `Spec`, `Info`, `State`, the
+    sentinels, and `RuntimeError` with its `E`/`Wrap` constructors in `errors.go`.
+  </Task>
+  <Task title="Write the pure helpers first">
+    ID generation/validation and the managed-label filter as receiver-free functions
+    with table-driven tests. They pass before any Docker code exists.
+  </Task>
+  <Task title="Implement dockerRuntime">
+    Against the Lima Docker socket from plan 01. Labels written at create; cleanup in
+    the create-start gap; sentinel mapping at the SDK boundary.
+  </Task>
+  <Task title="Wire the CLI subcommands">
+    `quickspin sandbox create|list|inspect|destroy`. The CLI holds a `Runtime`, never
+    a Docker client.
+  </Task>
+  <Task title="Write the Docker-backed tests">
+    The integration tests from Definition of done, hitting the real daemon.
+  </Task>
+  <Task title="Add make test-docker">
+    Daemon-dependent tests run under a separate build tag or environment gate so
+    `make test` stays fast and works without Docker.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Start with the package skeleton and the sentinels"
+    check="A caller in a scratch test can errors.Is(err, runtime.ErrNotFound) against an error built with E and wrapped once with Wrap."
+  >
+    Before touching Docker, make the error convention real: write `errors.go` and a
+    tiny test that builds a `RuntimeError` around `ErrNotFound`, wraps it again, and
+    checks `errors.Is` still finds the sentinel. If this fails, everything downstream
+    misdiagnoses failures. The mechanism to read up on is Go's `Unwrap() error` method
+    — `errors.Is` walks the chain by calling it.
+  </Hint>
+  <Hint
+    title="Prove the socket works before writing lifecycle code"
+    check="A throwaway main or test prints the daemon version through the Go SDK."
+  >
+    Construct the client with `client.NewClientWithOpts(client.FromEnv,
+    client.WithAPIVersionNegotiation())` and call `Ping` or `ServerVersion`. If this
+    fails, the problem is plan 01's `DOCKER_HOST`/socket setup, not your code — debug
+    there, not here.
+  </Hint>
+  <Hint
+    title="Create is ContainerCreate + ContainerStart, with labels in the config"
+    check="docker ps --filter label=quickspin.managed=true shows your container with both labels after quickspin sandbox create."
+  >
+    Labels go in the `container.Config` passed to `ContainerCreate` — they cannot be
+    added after the fact. Use `sleep`/`infinity` (or `tail -f /dev/null` for images
+    without GNU sleep) as the entrypoint. Then handle the gap: if `ContainerStart`
+    fails, remove the created container before returning. Force the failure to see it:
+    temporarily start a container whose entrypoint is a nonexistent binary.
+  </Hint>
+  <Hint
+    title="Inspect and List resolve quickspin IDs via label filters"
+    check="Inspect of a made-up sbx_ ID returns ErrNotFound; List does not show a manually docker-run container."
+  >
+    The SDK's `ContainerList` takes `filters.Args`; filter on
+    `label=quickspin.id=<id>` for inspect-by-ID and `label=quickspin.managed=true` for
+    list. Zero matches for inspect is your `ErrNotFound`. Resist the shortcut of
+    calling `ContainerInspect` with the quickspin ID — Docker will helpfully
+    prefix-match it against container names and IDs, and the bug will be subtle.
+  </Hint>
+  <Hint
+    title="Destroy swallows exactly one error: already gone"
+    check="Running quickspin sandbox destroy twice with the same ID exits 0 both times."
+  >
+    Destroy resolves the label to a container, then removes it with force. Two
+    "absent" cases must both return nil: the label lookup finds nothing, and the
+    remove call races with someone else's remove (the SDK exposes
+    `errdefs.IsNotFound`). Any other error is real and must surface.
+  </Hint>
+  <Hint
+    title="Map SDK failures to your sentinels at the boundary, nowhere else"
+    check="Creating from an image you have not pulled returns an error where errors.Is(err, ErrImageMissing) is true, and the CLI prints a one-line message rather than a Docker stack."
+  >
+    The Docker SDK's `errdefs` package classifies daemon errors (`IsNotFound`,
+    `IsConflict`). Translate them to your sentinels inside `dockerRuntime` methods —
+    if callers ever import `errdefs`, the backend has leaked. `ErrImageMissing` comes
+    from the create call failing with a "No such image" not-found.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: leaked containers after test runs"
+    check="After a full make test-docker run — including a run where you force a failure — docker ps -a --filter label=quickspin.managed=true prints nothing."
+  >
+    If `TestNoLeakedContainers` fails intermittently, the leak is almost always one of:
+    a `t.Cleanup` registered *after* the create call that failed (register it before,
+    keyed on the ID you generated), the create-start gap cleanup missing, or a test
+    asserting mid-test state and returning early. Reproduce by making `ContainerStart`
+    fail deliberately and watching whether the created container survives. `docker ps
+    -a` (with `-a`) is the honest view — created-but-not-started containers do not
+    appear without it.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Pure-helper unit tests (`make test`), table-driven per the code-structure reference:
+
+- `TestNewSandboxIDHasPrefixAndIsUnique` / `TestNewSandboxIDIsNeverEmpty`.
+- `TestManagedLabelFilterMatchesOnlyOurs`.
+- `TestRuntimeErrorPreservesSentinel` — `errors.Is` finds `ErrNotFound` through an
+  `E` + `Wrap` chain (pins the convention itself).
+
+TDD against the real daemon (an integration test here is worth more than a mocked
+client). Required tests, all passing via `make test-docker`:
+
+- `TestCreateThenInspect` — create returns a `sbx_` ID; inspect reports running.
+- `TestCreateWithMissingImage` — unknown image yields `ErrImageMissing`, and no
+  half-created container is left behind (verify by listing labeled containers).
+- `TestDestroyIsIdempotent` — destroy twice; second call returns nil.
+- `TestInspectUnknownID` — returns `ErrNotFound`.
+- `TestListOnlySeesManagedContainers` — a manually-run unlabeled container is invisible.
+- Every test cleans up in `t.Cleanup`; a final `TestNoLeakedContainers` (or a shared
+  check) asserts zero `quickspin.managed` containers remain.
+
+Deliberately untested: concurrent creates, daemon restarts mid-create, non-Docker
+backends.
+
+## Solo-developer tradeoffs
+
+Commercial platforms start at containerd or a microVM for isolation and density; Docker
+is a fat dependency with a root daemon. You start with Docker because its API is the
+best-documented on-ramp and the interface above quarantines the choice. Also deferred:
+image distribution (you pull public images by hand), and any notion of pools or reuse —
+one create equals one cold container, measured honestly, until plan 11.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="Docker Engine SDK for Go"
+    href="https://docs.docker.com/reference/api/engine/sdk/"
+  >
+    The official on-ramp for the client this plan is built on, with examples of the
+    create/start/inspect calls you are wrapping.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="package client — github.com/docker/docker/client"
+    href="https://pkg.go.dev/github.com/docker/docker/client"
+  >
+    The API reference you will actually live in; note how every method takes a
+    context, the pattern your interface copies.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Working with Errors in Go 1.13"
+    href="https://go.dev/blog/go1.13-errors"
+    by="The Go Blog"
+  >
+    The canonical explanation of wrapping, `errors.Is`, and `Unwrap` — the machinery
+    behind this plan's sentinel-error contract.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Introducing the Container Runtime Interface (CRI)"
+    href="https://kubernetes.io/blog/2016/12/container-runtime-interface-cri-in-kubernetes/"
+    by="Kubernetes Blog"
+  >
+    The industrial-scale version of this plan's core move: a backend-neutral runtime
+    interface that later let Kubernetes swap Docker for containerd.
+  </Resource>
+  <Resource
+    kind="book"
+    title="The Go Programming Language"
+    by="Donovan &amp; Kernighan, ch. 7 (Interfaces)"
+  >
+    The deepest treatment of designing small Go interfaces like `Runtime` — satisfied
+    implicitly, defined by the consumer.
+  </Resource>
+</Resources>

@@ -1,0 +1,274 @@
+# 01 — Linux lab environment
+
+Depends on: nothing.
+
+## Summary
+
+Set up the Linux environment every later plan runs against: a Lima VM on macOS running
+Docker, reachable from the Mac both over the Docker API socket and over SSH. Add a
+validation script that proves the environment works, and a Makefile target that
+cross-compiles Quickspin's Go binaries for `linux/arm64` so they can run inside the VM.
+
+Nothing platform-shaped is built yet. The deliverable is a reproducible lab plus the
+muscle memory of moving between the Mac (where you edit and build) and the Linux kernel
+(where sandboxes actually live).
+
+## Industry context
+
+Every sandbox platform you admire — E2B, Daytona, Modal, Vercel Sandbox — ultimately
+runs workloads on Linux hosts, because containers and microVMs are Linux kernel
+features (namespaces, cgroups, KVM). Their engineers develop on laptops but target
+fleet hosts; the Docker-socket-over-VM arrangement you build here is a one-machine
+miniature of that split. Docker Desktop hides this VM from you; Lima gives you the same
+thing with the hood open, which matters from plan 13 onward when you need to touch the
+kernel directly.
+
+## What you'll learn
+
+- Where Linux actually is on a Mac dev setup, and why `DOCKER_HOST` is the seam.
+- Lima basics: VM lifecycle, port/socket forwarding, `limactl shell`.
+- Go cross-compilation (`GOOS`/`GOARCH`) and why static binaries matter for dropping
+  tools into minimal containers/VMs.
+- Writing environment checks as scripts rather than wiki pages.
+
+### Concept: the kernel boundary, and `DOCKER_HOST` as the seam
+
+Containers are not a program you install; they are kernel features (namespaces to
+partition what a process can see, cgroups to limit what it can use). macOS's kernel has
+neither, so every "Docker on a Mac" setup is really Docker inside a hidden Linux VM.
+The `docker` CLI on your Mac is only a REST client: it serializes each command into an
+HTTP request and sends it to `dockerd`, wherever `DOCKER_HOST` points. That indirection
+is the seam this whole project builds on — plan 02's Go code will speak to the exact
+same socket through the Docker SDK, and nothing in it will care that the daemon lives
+in a VM. When something fails later, the first diagnostic question is always *which
+side of the seam broke*: the client's environment (wrong `DOCKER_HOST`, socket not
+forwarded) or the Linux side (daemon down, VM stopped).
+
+<Figure caption="One laptop, two operating systems. Everything Quickspin builds crosses this boundary through exactly two doors: the forwarded Docker socket and SSH.">
+  <svg viewBox="0 0 620 220" role="img" aria-label="Mac and Lima VM boundary with Docker socket forwarding and SSH">
+    <defs>
+      <marker id="arrow01" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+    </defs>
+    <rect x="10" y="20" width="240" height="180" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="130" y="42" textAnchor="middle" fontSize="13" fill="#18231f">macOS (edit + build)</text>
+    <rect x="30" y="60" width="200" height="34" fill="none" stroke="#405049" strokeWidth="1" />
+    <text x="130" y="81" textAnchor="middle" fontSize="11" fill="#405049">docker CLI / Go SDK client</text>
+    <rect x="30" y="110" width="200" height="34" fill="none" stroke="#405049" strokeWidth="1" />
+    <text x="130" y="131" textAnchor="middle" fontSize="11" fill="#405049">go build (GOOS=linux)</text>
+    <rect x="30" y="158" width="200" height="30" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" />
+    <text x="130" y="177" textAnchor="middle" fontSize="10" fill="#405049">DOCKER_HOST=unix://...sock</text>
+    <rect x="370" y="20" width="240" height="180" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="490" y="42" textAnchor="middle" fontSize="13" fill="#18231f">Lima VM (Linux kernel)</text>
+    <rect x="390" y="60" width="200" height="34" fill="none" stroke="#405049" strokeWidth="1" />
+    <text x="490" y="81" textAnchor="middle" fontSize="11" fill="#405049">dockerd + containers</text>
+    <rect x="390" y="110" width="200" height="34" fill="none" stroke="#405049" strokeWidth="1" />
+    <text x="490" y="131" textAnchor="middle" fontSize="11" fill="#405049">sshd (limactl shell)</text>
+    <line x1="230" y1="77" x2="368" y2="77" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow01)" />
+    <text x="299" y="67" textAnchor="middle" fontSize="10" fill="#8f3423">forwarded Docker socket</text>
+    <line x1="230" y1="127" x2="368" y2="127" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow01)" />
+    <text x="299" y="117" textAnchor="middle" fontSize="10" fill="#8f3423">SSH: copy + run binaries</text>
+    <text x="310" y="212" textAnchor="middle" fontSize="10" fill="#405049">macOS has no namespaces or cgroups — every sandbox lives on the right side</text>
+  </svg>
+</Figure>
+
+### Concept: Lima forwards a socket, not a daemon
+
+Lima runs a QEMU/VZ virtual machine and, per its YAML template, can forward Unix
+sockets and TCP ports from the guest to the host. Docker's control channel is the Unix
+socket `/var/run/docker.sock` inside the VM; the template forwards it to a path under
+your home directory on the Mac, and `DOCKER_HOST` points the client at that host-side
+path. Two properties matter. First, the forwarding is owned by the running `limactl`
+instance — stop the VM and the host socket goes stale, which is exactly the failure
+your validation script must report clearly. Second, the socket carries the API but not
+the filesystem: `docker run -v` bind mounts resolve paths *inside the VM*, not on your
+Mac, which is a classic trap when a later plan mounts directories.
+
+<Callout tone="note" title="Reproducibility lives in the template">
+  The checked-in `lima/quickspin.yaml` is the contract, not your shell history. Anything
+  you install by hand inside the VM (Docker itself included) belongs in the template's
+  provisioning script, so `limactl delete` + `limactl start` rebuilds the lab from the
+  repo alone.
+</Callout>
+
+### Concept: cross-compilation and why static binaries earn their keep
+
+Go cross-compiles by setting two environment variables: `GOOS=linux GOARCH=arm64 go
+build` on your Mac emits an ELF binary the VM can run directly — no toolchain inside
+the VM, no CI round-trip. The catch is dynamic linking: with cgo enabled, the binary
+expects the *build* machine's libc, which Linux doesn't have. `CGO_ENABLED=0` forces a
+static binary that depends on nothing but the kernel's syscall ABI. That property is
+why the plan bothers: from plan 07 onward you will drop a guest-agent binary into
+minimal containers and (later) Firecracker rootfs images that contain no libraries at
+all. A binary that runs when copied to an empty Alpine container is the standard to
+hold `make build-linux` to.
+
+<StudyPrompt question="Why parameterize ARCH now, when the only target is arm64?">
+  Plan 16's production host is x86_64. Every artifact-producing script written between
+  now and then (guest binary, rootfs, Firecracker kernel) will copy this Makefile's
+  pattern. If the arch is a variable from birth, plan 16 is `ARCH=amd64 make
+  build-linux`; if it is hardcoded, plan 16 starts with an archaeology dig through
+  every script under deadline pressure.
+</StudyPrompt>
+
+## Design and interfaces
+
+No Go interfaces. The contracts are environmental:
+
+- A Lima instance (suggested name `quickspin`) running Ubuntu LTS with Docker installed,
+  its Docker socket forwarded to the Mac.
+- `DOCKER_HOST` documented in the README (or a `hack/env.sh` to source).
+- New Makefile targets:
+  - `make build-linux` — cross-compiles `cmd/...` to `bin/linux-$(ARCH)/`, with
+    `ARCH ?= arm64`. Parameterizing the arch now is deliberate: the production host in
+    plan 16 is x86_64, and every artifact script written later (guest binary, rootfs,
+    Firecracker kernel) should take the arch as a variable from birth rather than being
+    un-hardcoded under deadline pressure.
+  - `make validate-env` — runs `hack/validate-01.sh`.
+
+## Tasks
+
+<TaskList>
+  <Task title="Create the VM from a checked-in template">
+    Install Lima (`brew install lima`) and create the VM from a checked-in
+    `lima/quickspin.yaml` template so the lab is reproducible from the repo.
+  </Task>
+  <Task title="Install Docker in the VM and forward the socket">
+    Docker installs via the template's provisioning script; forward the socket and
+    verify `docker ps` works from the Mac.
+  </Task>
+  <Task title="Add make build-linux">
+    Cross-compile a hello-world binary on the Mac and confirm it runs inside the VM via
+    `limactl shell`.
+  </Task>
+  <Task title="Write hack/validate-01.sh">
+    A script that checks every environmental contract and fails loudly, per the
+    Definition of done.
+  </Task>
+  <Task title="Document the daily workflow">
+    Start VM, source env, run tests — written down in the README so the routine
+    survives a two-week break.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Start from a Lima template that already forwards a Docker socket"
+    check="limactl start quickspin brings the VM up from the checked-in YAML with no interactive prompts."
+  >
+    Don't write the YAML from scratch. Lima ships example templates (`limactl start
+    template://docker` shows one); copy the relevant pieces into `lima/quickspin.yaml`.
+    The parts to understand rather than paste: the `images` block (pick Ubuntu LTS for
+    arm64), `provision` scripts (mode `system` runs as root at first boot — Docker's
+    install goes here), and `portForwards` with `guestSocket`/`hostSocket` for
+    `/var/run/docker.sock`.
+  </Hint>
+  <Hint
+    title="Make the provisioning script install Docker, not your fingers"
+    check="limactl delete quickspin && limactl start lima/quickspin.yaml yields a VM where docker ps works inside the VM without any manual step."
+  >
+    Use Docker's official convenience script or the apt repository steps inside a
+    `provision` block, and add your VM user to the `docker` group (or forward the
+    rootful socket — decide and document). If you catch yourself running `apt install`
+    by hand in `limactl shell`, move that command into the template and rebuild to
+    prove it.
+  </Hint>
+  <Hint
+    title="Point DOCKER_HOST at the forwarded socket"
+    check="From a fresh Mac terminal, after sourcing hack/env.sh, docker version shows Server: OS/Arch linux/arm64."
+  >
+    The host-side socket lands where your template's `hostSocket` says (commonly under
+    `~/.lima/quickspin/`). Export `DOCKER_HOST=unix://$HOME/...` in `hack/env.sh`. The
+    `docker version` output is the diagnostic: a Client section with no Server section
+    means the socket path is wrong or the VM is down; a Server reporting `darwin` means
+    you are accidentally talking to Docker Desktop.
+  </Hint>
+  <Hint
+    title="build-linux is three variables and an output directory"
+    check="file bin/linux-arm64/<binary> reports an ELF 64-bit ARM aarch64 executable, statically linked."
+  >
+    The recipe shape is `CGO_ENABLED=0 GOOS=linux GOARCH=$(ARCH) go build -o
+    bin/linux-$(ARCH)/ ./cmd/...` with `ARCH ?= arm64` at the top of the Makefile.
+    `file` and `go tool nm` will tell you if cgo crept back in. Copy the binary into
+    the VM (`limactl copy` or a shared mount) and run it via `limactl shell quickspin`.
+  </Hint>
+  <Hint
+    title="Write the validation script as check functions, not a transcript"
+    check="hack/validate-01.sh prints one ok-line per contract and exits 0 on your working setup."
+  >
+    Structure: `set -euo pipefail`, a small `check "description" command...` helper that
+    prints pass/fail, and one call per Definition-of-done bullet (`limactl list`,
+    `docker version --format` with a Linux assertion, `docker run --rm alpine uname
+    -s`, the cross-compiled binary via `limactl shell`, `limactl shell quickspin
+    true`). Each check should test one contract so a failure names the broken layer.
+  </Hint>
+  <Hint
+    title="Diagnosing the negative test: fail clearly when the VM is stopped"
+    check="With the VM stopped (limactl stop quickspin), the script exits non-zero with a message naming the VM and the fix — not a hung docker command or a raw connection-refused trace."
+  >
+    Run the script against a stopped VM before calling the plan done. The two common
+    bad behaviors: `docker` hangs against a stale socket (guard the docker checks with
+    a `limactl list --format` status check *first*, so the script can say "VM
+    quickspin is not running; run limactl start quickspin" and exit), and `set -e`
+    killing the script mid-check with no summary (trap failures inside the `check`
+    helper instead of letting them escape). A validation script that fails cryptically
+    is a wiki page with extra steps.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+`hack/validate-01.sh` exits 0 and prints a check line for each of:
+
+- `limactl list` shows the `quickspin` instance running.
+- `docker version` from the Mac reports a Linux server.
+- `docker run --rm alpine uname -s` prints `Linux`.
+- A Go binary cross-compiled by `make build-linux` executes successfully inside the VM.
+- SSH into the VM works non-interactively (`limactl shell quickspin true`).
+
+Negative check: the script fails with a clear message (not a stack trace) when the VM is
+stopped.
+
+Deliberately untested: x86_64 hosts, multiple VM instances, VM survival across macOS
+reboots.
+
+## Solo-developer tradeoffs
+
+A commercial platform provisions hosts with Terraform/cloud-init across a fleet and
+never depends on one laptop VM. One Lima VM costs nothing, keeps the edit-test loop
+local, and still gives you a real kernel. The cost: nothing here teaches multi-host
+networking, and arm64 (Apple Silicon) means your images differ from the x86_64 most
+clouds run — acceptable until plan 14, where Firecracker on arm64 works fine anyway.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="Lima documentation"
+    href="https://lima-vm.io/docs/"
+  >
+    The full reference behind `limactl` — templates, port forwarding rules, and mount
+    modes this plan's single VM config only samples.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Docker contexts"
+    href="https://docs.docker.com/engine/manage-resources/contexts/"
+  >
+    The maintained alternative to a raw `DOCKER_HOST` export: named endpoints you can
+    switch between, useful once a second daemon (plan 16's real host) exists.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Cross compilation with Go 1.5"
+    href="https://dave.cheney.net/2015/08/22/cross-compilation-with-go-1-5"
+    by="Dave Cheney"
+  >
+    Why `GOOS`/`GOARCH` builds are a one-liner in Go and what actually changes in the
+    toolchain — background for the static-binary check this plan scripts.
+  </Resource>
+</Resources>

@@ -1,0 +1,397 @@
+# 06 — Reconciler, TTLs, and the event log
+
+Depends on: 05.
+
+## Summary
+
+Make the control plane survive reality: a background reconciler compares desired state
+(SQLite) with actual state (the runtime) and repairs drift; every sandbox gets a TTL so
+abandoned sandboxes are reaped; every lifecycle transition is appended to an event log.
+Create becomes asynchronous — `POST /v1/sandboxes` returns `pending` immediately and
+the reconciler drives it to `running`. This is the plan where Quickspin stops being a
+CRUD app and starts being infrastructure.
+
+<KeyPoint label="Why this plan matters">
+  Everything before this plan assumed the process never dies mid-operation. This plan
+  removes that assumption: after any crash, at any point, the system converges — and a
+  script proves it.
+</KeyPoint>
+
+## Industry context
+
+Reconciliation is *the* control-plane pattern: Kubernetes controllers, Nomad, and every
+sandbox platform's janitor loops work this way — write desired state, then repeatedly
+observe and converge, so crashes anywhere leave a repairable system rather than a
+corrupt one. TTL reaping is universal in agent platforms (E2B kills sandboxes after a
+default timeout) because agents crash and forget to clean up, and orphaned compute is
+the fastest way to burn money. Event logs are how platforms answer "what happened to my
+sandbox?" — and later become billing and audit records.
+
+## What you'll learn
+
+- The reconcile loop pattern: level-triggered ("observe full state, fix it") vs
+  edge-triggered ("react to events"), and why level-triggered survives crashes.
+- Crash-consistency thinking: enumerate the half-done states (row without container,
+  container without row, both present but disagreeing) and write code that heals each.
+- Long-running goroutine hygiene: tickers, jitter, shutdown, not overlapping runs — and
+  the error-handling rule for top-of-goroutine loops: the reconciler has no caller to
+  return to, so it logs each failure once and continues; it never aborts a pass because
+  one sandbox misbehaved.
+- The **lost-update** failure mode from the concurrency reference, in its exact home:
+  the reconciler reads a record, does seconds of Docker I/O with no transaction held,
+  then writes back. A whole-record write can resurrect a sandbox the API destroyed
+  mid-create. The fix is the reference's category-4 shape translated to SQL: writes
+  re-check ownership in the WHERE clause (`UPDATE ... SET state='running' WHERE id=?
+  AND state='pending'`) and touch only the columns the reconciler owns.
+- Append-only event modeling.
+
+### Concept: level-triggered loops survive what edge-triggered loops miss
+
+An edge-triggered design reacts to notifications: "a create request arrived, so make a
+container." It is efficient and it is fragile — if the process crashes after the row
+insert but before the Docker call, the notification is gone forever and the sandbox is
+stuck in `pending` until a human notices. A level-triggered design ignores history and
+looks only at current state: every pass asks "what does the database want, what does
+Docker actually have, what single step closes the gap?" A missed event costs one tick
+of latency, never correctness, because the *state itself* is the trigger and state
+persists across crashes. This is why the pass must also be idempotent: a pass over an
+already-converged system finds no gaps and does nothing, which is exactly what lets
+you run it on a dumb ticker without tracking what previous passes did.
+
+<Figure caption="One reconcile pass: read both worlds, decide in a pure function, then perform I/O with ownership-checked writes.">
+  <svg viewBox="0 0 640 210" role="img" aria-label="Reconcile pass: store and runtime feed decideReconcileAction, which feeds ReconcileOnce dispatch, which writes back to both">
+    <defs>
+      <marker id="arrow06" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+      <marker id="arrow06g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#caa552" />
+      </marker>
+    </defs>
+    <rect x="10" y="20" width="150" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="85" y="40" textAnchor="middle" fontSize="12" fill="#18231f">store (SQLite)</text>
+    <text x="85" y="56" textAnchor="middle" fontSize="10" fill="#405049">desired state</text>
+    <rect x="10" y="140" width="150" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="85" y="160" textAnchor="middle" fontSize="12" fill="#18231f">runtime (Docker)</text>
+    <text x="85" y="176" textAnchor="middle" fontSize="10" fill="#405049">observed state</text>
+    <rect x="240" y="80" width="180" height="52" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="330" y="102" textAnchor="middle" fontSize="12" fill="#18231f">decideReconcileAction</text>
+    <text x="330" y="118" textAnchor="middle" fontSize="10" fill="#405049">pure, table-tested, no I/O</text>
+    <rect x="480" y="80" width="150" height="52" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="555" y="102" textAnchor="middle" fontSize="12" fill="#18231f">ReconcileOnce</text>
+    <text x="555" y="118" textAnchor="middle" fontSize="10" fill="#405049">dispatch + I/O only</text>
+    <line x1="160" y1="42" x2="238" y2="92" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow06)" />
+    <text x="180" y="52" textAnchor="start" fontSize="10" fill="#8f3423">list rows</text>
+    <line x1="160" y1="162" x2="238" y2="120" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow06)" />
+    <text x="180" y="164" textAnchor="start" fontSize="10" fill="#8f3423">list by label</text>
+    <line x1="420" y1="106" x2="478" y2="106" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow06)" />
+    <text x="449" y="96" textAnchor="middle" fontSize="10" fill="#8f3423">actions</text>
+    <path d="M 555 132 L 555 162 L 165 162" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow06g)" />
+    <text x="360" y="156" textAnchor="middle" fontSize="10" fill="#7f5d43">create / destroy containers</text>
+    <path d="M 555 80 L 555 42 L 165 42" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow06g)" />
+    <text x="360" y="34" textAnchor="middle" fontSize="10" fill="#7f5d43">writes re-check ownership in WHERE</text>
+  </svg>
+</Figure>
+
+### Concept: enumerate the half-done states before writing any healing code
+
+A crash can interrupt every multi-step operation, so the honest starting point is a
+table, not code: for each pairing of (desired record, observed container) — row without
+container, container without row, both present but disagreeing, both absent — what is
+the one safe action? That table *is* `decideReconcileAction`, and making it a pure
+function is the highest-leverage extraction in the project: the branching is where a
+reordered condition destroys live sandboxes, and a pure function lets you test every
+row without Docker, a clock, or sleeps. The orphan row of the table (labeled container,
+no DB record) is only safe because plan 02 wrote `quickspin.managed` labels — without
+them, "destroy unknown containers" would eat the user's unrelated workloads.
+
+### Concept: the lost update, and why the WHERE clause is the fix
+
+The reconciler cannot hold a database transaction across seconds of Docker I/O, so its
+read-decide-write cycle has a window: it reads a `pending` row, spends time creating
+the container, and meanwhile the API handles a DELETE and marks the sandbox destroyed.
+A naive write-back (`UPDATE sandboxes SET state='running' WHERE id=?`) now overwrites
+the deletion — the sandbox is resurrected, and its container will run until the TTL
+mercy-kills it. `go test -race` is silent here because nothing races on memory; the
+interleaving is entirely between valid SQL statements. The fix is optimistic
+concurrency in miniature: the write restates its assumption
+(`... WHERE id=? AND state='pending'`) so a vanished assumption makes the write match
+zero rows, and the reconciler checks `RowsAffected` to learn it lost the race and must
+clean up the container it just made.
+
+<Figure caption="The lost-update interleaving: the API's delete lands inside the reconciler's read–write gap. The guarded write matches zero rows instead of resurrecting the sandbox.">
+  <svg viewBox="0 0 640 200" role="img" aria-label="Timeline showing reconciler read, API delete during Docker create, and the guarded write-back">
+    <defs>
+      <marker id="arrow06b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+    </defs>
+    <text x="10" y="44" textAnchor="start" fontSize="12" fill="#18231f">reconciler</text>
+    <line x1="95" y1="40" x2="620" y2="40" stroke="#405049" strokeWidth="1" />
+    <text x="10" y="114" textAnchor="start" fontSize="12" fill="#18231f">API</text>
+    <line x1="95" y1="110" x2="620" y2="110" stroke="#405049" strokeWidth="1" />
+    <rect x="110" y="24" width="110" height="32" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="165" y="44" textAnchor="middle" fontSize="10" fill="#18231f">read: pending</text>
+    <rect x="250" y="24" width="150" height="32" fill="none" stroke="#18231f" strokeWidth="1.5" strokeDasharray="5 4" />
+    <text x="325" y="44" textAnchor="middle" fontSize="10" fill="#405049">Docker create (seconds)</text>
+    <rect x="440" y="24" width="170" height="32" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="525" y="38" textAnchor="middle" fontSize="10" fill="#18231f">UPDATE ... state='running'</text>
+    <text x="525" y="50" textAnchor="middle" fontSize="10" fill="#8f3423">WHERE state='pending'</text>
+    <rect x="270" y="94" width="130" height="32" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="335" y="114" textAnchor="middle" fontSize="10" fill="#18231f">DELETE → destroyed</text>
+    <line x1="335" y1="94" x2="335" y2="58" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow06b)" />
+    <text x="345" y="78" textAnchor="start" fontSize="10" fill="#8f3423">lands inside the gap</text>
+    <text x="110" y="160" textAnchor="start" fontSize="10" fill="#405049">unguarded write: sandbox resurrected, container leaks until TTL</text>
+    <text x="110" y="178" textAnchor="start" fontSize="10" fill="#7f5d43">guarded write: RowsAffected == 0 → reconciler destroys the container it just made</text>
+  </svg>
+</Figure>
+
+### Concept: events are appended facts, not derived state
+
+The event log answers "what happened?" after the fact, which means it can never be
+recomputed — either the transition was recorded when it happened or the history has a
+hole. That forces two design properties. First, the append happens inside the same
+transaction as the state change it describes: commit both or neither, so the log and
+the row can never disagree. Second, events are immutable rows (`from_state`,
+`to_state`, `reason`, timestamp) that only ever grow — no updates, no deletes. The
+reward for the discipline is a strong invariant you can test: replaying a sandbox's
+events from the beginning must land on its current state, which catches any code path
+that mutates state without recording why.
+
+## Design and interfaces
+
+```go
+// Reconciler runs one converge pass; the serve loop calls it on a ticker.
+// A pass must be safe to run concurrently with API traffic and safe to repeat.
+type Reconciler struct { /* store, runtime, clock, logger */ }
+
+func (r *Reconciler) ReconcileOnce(ctx context.Context) (Actions, error)
+
+// Actions summarizes what a pass did — createdN, destroyedN, orphansAdopted,
+// expiredReaped — so tests and logs can assert on behavior.
+```
+
+Schema additions: `sandboxes.expires_at`, `sandboxes.desired_state`, and
+`events(id, sandbox_id, at, from_state, to_state, reason)`. New API surface:
+`GET /v1/sandboxes/{id}/events`, and `POST /v1/sandboxes/{id}/keepalive` to extend the
+TTL (default e.g. 15 minutes, cap enforced).
+
+Committed decisions:
+
+- Desired vs observed state are separate columns; the reconciler is the **only**
+  component that transitions observed state based on runtime facts.
+- The what-to-do branching is a pure function, straight from the code-structure
+  reference: `decideReconcileAction(desired *SandboxRecord, observed *runtime.Info,
+  now time.Time) ReconcileAction`. Every (desired, observed) pairing — including both
+  nil, and present-but-drifted — is a named table row; `ReconcileOnce` only dispatches
+  actions and performs I/O. This is the single highest-leverage extraction in the
+  project: a reordered branch here destroys live sandboxes.
+- Orphan policy: containers labeled `quickspin.managed` with no DB row are destroyed
+  and logged (the DB is authoritative). The label from plan 02 is what makes this safe.
+- The clock is injected (`func() time.Time`) so TTL tests don't sleep.
+
+<Callout tone="system" title="Ownership of the observed-state column is exclusive">
+  API handlers write desired state (`desired_state`, `expires_at`); only the reconciler
+  writes observed state from runtime facts. The moment two components write the same
+  column from different sources of truth, the lost-update bug stops being a test case
+  and becomes a lottery.
+</Callout>
+
+## Tasks
+
+<TaskList>
+  <Task title="Migrate the schema and make create asynchronous">
+    Add `expires_at`, `desired_state`, and the `events` table. `POST /v1/sandboxes`
+    inserts a `pending` row and returns 202 immediately; the reconciler creates the
+    container.
+  </Task>
+  <Task title="Implement ReconcileOnce">
+    Handle every drift case: pending→create, expired→destroy, orphan→adopt or destroy,
+    missing-container-for-running-row→mark failed. Decisions come from the pure
+    `decideReconcileAction`; the method only dispatches and does I/O.
+  </Task>
+  <Task title="Wire the ticker">
+    Run passes on a ticker with jitter and single-flight: skip a tick if the previous
+    pass is still live, and shut down cleanly on context cancellation.
+  </Task>
+  <Task title="Append events transactionally">
+    Every state change writes its event row inside the same transaction as the
+    `UPDATE`, so log and row cannot disagree.
+  </Task>
+  <Task title="Add the keepalive endpoint">
+    `POST /v1/sandboxes/{id}/keepalive` extends `expires_at`, clamped to the cap.
+  </Task>
+  <Task title="Write the tests and crash script">
+    The unit tests and `hack/validate-06.sh` from Definition of done.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Start with the decision table on paper, not in Go"
+    check="You have a written table where every (desired, observed) pairing — including both-nil and present-but-drifted — has exactly one named action, and no pairing is missing."
+  >
+    Before the migration, enumerate the states: desired row present/absent ×
+    desired_state pending/running/destroyed × container present/absent/exited, plus
+    expiry. Each cell gets one action (create, destroy, markFailed, reapExpired,
+    destroyOrphan, none). This table becomes `decideReconcileAction` and its test
+    almost verbatim — the code is a `switch` over the table, and
+    `TestDecideReconcileAction` is the table with names.
+  </Hint>
+  <Hint
+    title="Make create async before touching the loop"
+    check="POST /v1/sandboxes returns 202 with state pending and no container exists yet; a manual ReconcileOnce call then brings the container up and the row reads running."
+  >
+    The handler change is small: insert the row with `desired_state='running'`,
+    observed state `pending`, `expires_at = now + defaultTTL`, return `202 Accepted`.
+    Delete the handler's direct runtime call. Wire a temporary CLI or test hook that
+    invokes `ReconcileOnce` once so you can drive convergence by hand before any
+    ticker exists — debugging a loop is much harder than debugging a function.
+  </Hint>
+  <Hint
+    title="ReconcileOnce is: snapshot both worlds, decide, dispatch"
+    check="With a fake runtime, a pass over one pending row returns Actions{createdN: 1}, and a second pass over the converged state returns the zero Actions value."
+  >
+    Read all rows (`SELECT ... FROM sandboxes`), list all labeled containers
+    (`runtime.List`), and join them by sandbox ID into pairs; feed each pair plus
+    `r.clock()` to `decideReconcileAction`. Per-sandbox failures are logged with the
+    sandbox ID and the pass continues — accumulate into `Actions`, never `return err`
+    from the middle of the loop. Containers whose ID matches no row are the orphan
+    input: `decideReconcileAction(nil, &info, now)`.
+  </Hint>
+  <Hint
+    title="Guard every observed-state write with its assumption"
+    check="TestReconcilerDoesNotResurrectDestroyedSandbox passes: the write-back after a mid-create delete affects zero rows and the reconciler destroys the container it created."
+  >
+    Each write names the state it read: `UPDATE sandboxes SET state='running',
+    container_id=? WHERE id=? AND state='pending'`. Check
+    `sql.Result.RowsAffected()` — zero means the world changed underneath you, and the
+    correct reaction is to undo your side effect (destroy the container you just made,
+    which is safe because plan 02 made destroy idempotent). Write the resurrection test
+    with a fake runtime whose `Create` blocks on a channel so the test controls the
+    interleaving deterministically.
+  </Hint>
+  <Hint
+    title="Ticker with jitter and single-flight"
+    check="Log lines show passes at slightly irregular intervals, a deliberately slowed pass causes skipped-tick log lines rather than overlap, and Ctrl-C exits promptly."
+  >
+    `time.Ticker` in a goroutine started by the serve command; add jitter with
+    `interval + time.Duration(rand.Int64N(...))` recomputed per tick (use
+    `time.Timer`/`Reset` if you want true per-tick jitter). Single-flight needs no
+    mutex in a single goroutine: run the pass synchronously in the loop body, or if
+    passes run elsewhere, a `select` on a buffered-1 token channel. Shut down via the
+    server's root context; `ReconcileOnce` already takes `ctx`, so cancellation
+    propagates into Docker calls for free.
+  </Hint>
+  <Hint
+    title="Events and keepalive both live inside transactions"
+    check="TestEveryTransitionEmitsEvent passes — replaying a sandbox's ordered events reproduces its current state — and TestKeepaliveExtendsTTLUpToCap shows clamping at the cap."
+  >
+    Wrap each state change in `BEGIN`/`COMMIT` (`sql.Tx`): the guarded `UPDATE`, then
+    `INSERT INTO events(...)` with `from_state`/`to_state`/`reason`, then commit. If
+    the guarded update affected zero rows, roll back — no event for a write that did
+    not happen. Keepalive is a similar guarded write: `expires_at = MIN(now + extend,
+    now + cap)` computed with the injected clock, only for sandboxes still alive.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: the crash script does not converge"
+    check="hack/validate-06.sh passes at all three kill points, and the hand-labeled orphan container is gone within one reconcile interval."
+  >
+    When `validate-06.sh` finds a mismatch after a `kill -9`, first identify which
+    half-done state you are in: `sqlite3 quickspin.db 'SELECT id, state,
+    desired_state FROM sandboxes'` versus `docker ps -a --filter
+    label=quickspin.managed=true`. A row stuck in `pending` forever means the pass is
+    erroring out early on a different sandbox — check for a `return err` inside the
+    loop. A leaked container with no row means orphan adoption never ran, usually
+    because the join keyed on container ID instead of the `quickspin.id` label. A
+    sandbox flapping created/destroyed on alternating passes means two table rows
+    claim the same pairing — your decision table has an overlap, and the pure test
+    should be extended to pin it.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Unit tests with fake runtime + injected clock (`make test`):
+
+- `TestReconcileCreatesPendingSandbox`
+- `TestReconcileReapsExpiredSandbox` — advance the fake clock past `expires_at`.
+- `TestReconcileDestroysOrphanContainer`
+- `TestReconcileMarksVanishedContainerFailed`
+- `TestReconcileOncePassIsIdempotent` — two passes over the same state: second is a
+  no-op (assert on `Actions`).
+- `TestKeepaliveExtendsTTLUpToCap`
+- `TestEveryTransitionEmitsEvent` — event log replays to the current state.
+- `TestDecideReconcileAction` — pure table over every (desired, observed) pairing,
+  named by behavior ("orphan container is destroyed", not "case 3").
+- `TestReconcilerDoesNotResurrectDestroyedSandbox` — drive the exact interleaving:
+  reconciler reads `pending`, API deletes the sandbox during the (fake) create, the
+  reconciler's write-back must not flip it out of its destroyed/stopping state. `-race`
+  cannot catch this; only this test does.
+
+Crash validation `hack/validate-06.sh` (real Docker): creates sandboxes, `kill -9`s the
+server at three points (after row insert / after container create / during destroy),
+restarts it, and asserts the system converges — every DB row matches a container state
+and vice versa, with zero leaks — within one reconcile interval. Also creates a
+container with the quickspin label by hand and confirms the reconciler removes it.
+
+Deliberately untested: two control-plane instances racing (single-instance is a stated
+assumption until plan-set two), clock skew, event-log compaction.
+
+## Solo-developer tradeoffs
+
+Kubernetes-grade reconcilers use informers, work queues, and rate-limited retries per
+object; you run one full-scan loop on a ticker, which is O(sandboxes) per pass and
+entirely fine below thousands of rows. Commercial platforms also emit events to a
+message bus for other services to consume; your events are rows in SQLite, queryable
+with one endpoint — same concept, one binary. The non-negotiable kept: after any crash,
+convergence, provable by script.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="Controllers"
+    href="https://kubernetes.io/docs/concepts/architecture/controller/"
+  >
+    The canonical statement of the pattern this plan implements: a control loop that
+    watches desired state and moves current state toward it, at planetary scale.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Level Triggering and Reconciliation in Kubernetes"
+    href="https://hackernoon.com/level-triggering-and-reconciliation-in-kubernetes-1f17fe30333d"
+    by="James Bowes"
+  >
+    Walks the edge-vs-level distinction through concrete missed-event failure
+    scenarios — the argument for this plan's dumb-ticker design, drawn out slowly.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Event Sourcing"
+    href="https://martinfowler.com/eaaDev/EventSourcing.html"
+    by="Martin Fowler"
+  >
+    Where the append-only event table leads if you promote it from audit trail to
+    source of truth — useful for seeing precisely which half of the idea this plan uses.
+  </Resource>
+  <Resource
+    kind="article"
+    title="The Log: What every software engineer should know about real-time data's unifying abstraction"
+    by="Jay Kreps, LinkedIn Engineering, 2013"
+  >
+    The classic essay on append-only logs as the backbone of distributed systems —
+    context for why "events are rows you never update" is a load-bearing choice.
+  </Resource>
+  <Resource
+    kind="book"
+    title="Designing Data-Intensive Applications"
+    by="Martin Kleppmann, ch. 7 (Transactions)"
+  >
+    The general theory behind this plan's lost-update fix: read-modify-write races,
+    compare-and-set, and why re-checking state in the WHERE clause closes the window.
+  </Resource>
+</Resources>

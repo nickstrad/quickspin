@@ -1,0 +1,347 @@
+# 03 — Exec, resource limits, and cancellation
+
+Depends on: 02.
+
+## Summary
+
+Make sandboxes useful: run commands inside them with separated stdout/stderr and a real
+exit code, enforce CPU / memory / process-count limits at creation, control outbound
+network access, and make `context.Context` cancellation actually kill the process in the
+container — not just abandon the Go call.
+
+## Industry context
+
+This is the workhorse endpoint of every agent platform — E2B's `sandbox.commands.run`,
+Vercel Sandbox's `runCommand`, Modal's function exec. Two industry behaviors are worth
+copying exactly: **exit codes and streams are sacred** (agents branch on them; merging
+stdout/stderr or faking exit codes breaks real harnesses), and **cancellation must reach
+the process** (a platform that lets a `while true` spin after the client gave up leaks
+money; that is why every serious platform enforces deadlines server-side). Resource
+limits are the first line of multi-tenant defense: cgroups, which is what Docker's
+flags configure, are the same mechanism Kubernetes and Firecracker jailers use.
+
+## What you'll learn
+
+- Docker exec semantics and the stream-demultiplexing wire format (stdout/stderr arrive
+  multiplexed on one connection; you split them).
+- What `--memory`, `--cpus`, and `--pids-limit` actually set in cgroup v2, verified
+  from inside the VM (`/sys/fs/cgroup/...`), not taken on faith.
+- Context plumbing under pressure: cancelling a blocked read vs killing the remote
+  process are different problems.
+- Why a fork bomb is the canonical test of `PidsLimit`.
+
+### Concept: one connection, two streams — the demux format
+
+An exec without a TTY sends stdout and stderr over a single hijacked HTTP connection,
+interleaved as frames: each frame is an 8-byte header (first byte says which stream,
+last four bytes are a big-endian payload length) followed by that many payload bytes.
+If you copy the raw connection into one buffer, you get both streams shredded together
+*with header bytes embedded in the output* — the corruption is subtle because short
+ASCII output can look almost right. The Docker SDK's `stdcopy.StdCopy(stdout, stderr,
+reader)` decodes the framing into two writers; your job is to hand it two capped
+buffers and to know why it exists, because plan 07 rebuilds this split natively in the
+guest agent. With `Tty: true` there is no framing and no separation — which is exactly
+why this plan's exec is TTY-less.
+
+### Concept: Docker's limit flags are cgroup writes
+
+`--memory`, `--cpus`, and `--pids-limit` are not Docker features; they are a thin
+translation onto cgroup v2 controller files that the kernel enforces. Mapping `Spec`
+to `container.HostConfig` is therefore a units problem worth pinning with tests:
+`Memory` is bytes, `NanoCPUs` is cores × 10⁹ (0.5 cores = 500,000,000), `PidsLimit`
+is a plain count (and a pointer in the SDK — a nil is "unlimited", which is how a
+silently-dropped field becomes a security bug). Verify the result from inside the VM:
+the container's cgroup directory (under `/sys/fs/cgroup/system.slice/docker-<id>.scope`
+on a systemd host) contains `memory.max`, `cpu.max`, and `pids.max`, and the values
+must match the Spec. When the memory limit trips, the kernel OOM-kills the process and
+the shell reports exit 137 (128 + SIGKILL); when `pids.max` is hit, `fork` fails with
+`EAGAIN` — the fork bomb doesn't get killed, it simply cannot spawn.
+
+<KeyPoint label="Invariant">
+  A limit that exists in `Spec` but not in the container's cgroup files is worse than
+  no limit: callers will trust it. `TestSpecToHostConfigMapsEveryLimit` plus one manual
+  cgroup read is the honest check.
+</KeyPoint>
+
+### Concept: cancellation must cross the wire
+
+Cancelling the Go context tears down your side: the hijacked connection closes and the
+blocked read returns. It does **not** kill the process in the container — Docker's API
+has no "kill this exec" endpoint, and an orphaned `sleep 300` will happily run to
+completion with nobody reading its output. So kill-on-cancel is something you build: on
+`ctx.Done()`, deliver a signal to the process inside the container, then reap. The raw
+material: `ContainerExecInspect` reports the process's PID (in the daemon host's pid
+namespace, not the container's — you cannot pass it to `kill` inside the container
+directly) and whether it is still running; a second exec can run a kill command inside
+the container; polling `ContainerExecInspect` after the kill confirms the reap. The
+timeout path is the same machinery with `context.WithTimeout` upstream, translated to
+`ErrExecTimeout` at the boundary.
+
+<Figure caption="The exec request path. Cancellation closes the attach connection for free, but killing the remote process is a separate, deliberate step.">
+  <svg viewBox="0 0 640 210" role="img" aria-label="Exec path: ExecCreate, ExecAttach with demux, ExecInspect; cancel path kills the process in the container">
+    <defs>
+      <marker id="arrow03" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+      <marker id="arrow03b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#caa552" />
+      </marker>
+    </defs>
+    <rect x="10" y="20" width="130" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="75" y="46" textAnchor="middle" fontSize="12" fill="#18231f">Exec(ctx, id, cmd)</text>
+    <rect x="200" y="20" width="130" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="265" y="40" textAnchor="middle" fontSize="12" fill="#18231f">ExecCreate</text>
+    <text x="265" y="56" textAnchor="middle" fontSize="10" fill="#405049">cmd, env, workdir</text>
+    <rect x="390" y="20" width="130" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="455" y="40" textAnchor="middle" fontSize="12" fill="#18231f">ExecAttach</text>
+    <text x="455" y="56" textAnchor="middle" fontSize="10" fill="#405049">stdcopy demux → 2 bufs</text>
+    <rect x="390" y="130" width="130" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="455" y="150" textAnchor="middle" fontSize="12" fill="#18231f">ExecInspect</text>
+    <text x="455" y="166" textAnchor="middle" fontSize="10" fill="#405049">running? exit code</text>
+    <line x1="140" y1="42" x2="198" y2="42" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow03)" />
+    <line x1="330" y1="42" x2="388" y2="42" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow03)" />
+    <line x1="455" y1="64" x2="455" y2="128" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow03)" />
+    <text x="490" y="100" textAnchor="middle" fontSize="10" fill="#8f3423">EOF, then</text>
+    <text x="490" y="113" textAnchor="middle" fontSize="10" fill="#8f3423">exit code</text>
+    <rect x="10" y="130" width="130" height="44" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" />
+    <text x="75" y="150" textAnchor="middle" fontSize="12" fill="#18231f">ctx.Done()</text>
+    <text x="75" y="166" textAnchor="middle" fontSize="10" fill="#405049">timeout or cancel</text>
+    <path d="M 140 152 L 250 152 L 250 190 L 386 190" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow03b)" />
+    <text x="255" y="205" textAnchor="middle" fontSize="10" fill="#7f5d43">kill process in container, then reap</text>
+    <text x="196" y="128" textAnchor="middle" fontSize="10" fill="#7f5d43">closing the attach conn alone</text>
+    <text x="196" y="141" textAnchor="middle" fontSize="10" fill="#7f5d43">orphans the process</text>
+  </svg>
+</Figure>
+
+## Design and interfaces
+
+Extend `internal/runtime`:
+
+```go
+type Spec struct {
+    Image        string
+    Env          map[string]string
+    CPULimit     float64 // cores, e.g. 0.5
+    MemoryLimit  int64   // bytes
+    PidsLimit    int64
+    AllowNetwork bool    // false => no outbound network (Docker "none" network)
+}
+
+type ExecResult struct {
+    ExitCode int
+    Stdout   []byte // buffered in this plan; streaming is a later, explicit change
+    Stderr   []byte
+}
+
+var ErrExecTimeout = errors.New("exec deadline exceeded")
+
+type Runtime interface {
+    // ...plan 02 methods...
+    // Exec runs cmd in the sandbox. When ctx is cancelled or its deadline passes,
+    // the process inside the container is killed and ErrExecTimeout (or ctx.Err())
+    // is returned.
+    Exec(ctx context.Context, id string, cmd []string, opts ExecOpts) (ExecResult, error)
+}
+
+type ExecOpts struct {
+    Env     map[string]string
+    WorkDir string
+    Timeout time.Duration // 0 => a documented default, not "forever"
+}
+```
+
+Committed decision: output is **buffered** with a size cap (e.g. 1 MiB per stream,
+truncation flagged in the result). Streaming is deliberately deferred to the guest-API
+plan (07) so it is built once, in the right place.
+
+## Tasks
+
+<TaskList>
+  <Task title="Extend Spec and map limits as pure functions">
+    Map limits to Docker `HostConfig` and reject nonsense values. Per the
+    code-structure reference, both halves are pure functions with table tests:
+    `validateSpec(Spec) error` and `specToHostConfig(Spec) container.HostConfig` — the
+    field-by-field translation is exactly the "struct-to-struct merge that silently
+    drops a field" bug class the reference warns about, and the daemon is not needed to
+    pin it.
+  </Task>
+  <Task title="Implement Exec">
+    Stream demultiplexing into capped stdout/stderr buffers, plus exit-code retrieval
+    after the stream ends.
+  </Task>
+  <Task title="Implement kill-on-cancel">
+    Watch `ctx.Done()`, kill the exec'd process inside the container, and reap it.
+  </Task>
+  <Task title="Wire the CLI">
+    `quickspin sandbox exec <id> -- <cmd...>` with a `--timeout` flag.
+  </Task>
+  <Task title="Write the tests">
+    The pure-function and `make test-docker` suites listed in Definition of done.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Pin the Spec translation before touching exec"
+    check="TestValidateSpecRejectsNonsense and TestSpecToHostConfigMapsEveryLimit pass under make test with no daemon running."
+  >
+    Write `validateSpec` and `specToHostConfig` first — they are receiver-free and need
+    no Docker. Read the `container.HostConfig` field docs for the units:
+    `Resources.Memory` (bytes), `Resources.NanoCPUs` (cores × 1e9),
+    `Resources.PidsLimit` (`*int64` — nil means unlimited), `NetworkMode`
+    (`"none"` when `AllowNetwork` is false). The all-fields-set table case is the one
+    that catches a dropped field when `Spec` grows later.
+  </Hint>
+  <Hint
+    title="Exec is create, attach, then inspect — in that order"
+    check="A command like sh -c 'echo out; echo err >&2; exit 17' returns Stdout of out, Stderr of err, and ExitCode 17."
+  >
+    The SDK sequence: `ContainerExecCreate` (with `AttachStdout/AttachStderr: true`,
+    `Tty: false`), `ContainerExecAttach` (returns a hijacked connection), read until
+    EOF, then `ContainerExecInspect` for the exit code. Do not read the exit code
+    before the stream reaches EOF — the process may not have exited, and `ExitCode`
+    for a running exec is a meaningless zero. Poll inspect until `Running` is false if
+    EOF and exit race.
+  </Hint>
+  <Hint
+    title="Demultiplex with stdcopy, never a raw io.Copy"
+    check="Stdout and Stderr come back byte-exact with no stray 8-byte headers, and TestExecSeparatesStreamsAndExitCode passes."
+  >
+    `github.com/docker/docker/pkg/stdcopy.StdCopy(stdoutW, stderrW, resp.Reader)`
+    decodes the frame format. If output contains occasional unprintable bytes, you
+    copied the raw multiplexed stream. For the cap, wrap each destination in a small
+    writer that counts bytes, discards past the limit, and sets a truncated flag —
+    a pure type you can table-test without Docker.
+  </Hint>
+  <Hint
+    title="Kill-on-cancel needs a second channel to the container"
+    check="TestExecKillsProcessOnContextCancel passes both assertions: the call returns promptly and ps inside the container no longer shows the sleep."
+  >
+    Structure the method as: run the attach-and-read in a goroutine, `select` on its
+    completion versus `ctx.Done()`. On cancel, closing the hijacked connection unblocks
+    your read but the remote process survives — you must also kill it inside the
+    container. `ContainerExecInspect` tells you whether it is still running (its `Pid`
+    is in the VM's pid namespace, so it is evidence, not a kill target from inside).
+    Fire a short second exec that signals the process in the container, then poll
+    inspect until `Running` is false before returning — returning before the reap is
+    the bug the test's second assertion exists to catch.
+  </Hint>
+  <Hint
+    title="Timeout is a context decoration plus a translation"
+    check="TestExecTimeout returns an error where errors.Is(err, ErrExecTimeout) is true in roughly one second, not after the command's natural length."
+  >
+    Apply `context.WithTimeout(ctx, opts.Timeout)` inside `Exec` (with the documented
+    default when `Timeout` is 0), reuse the same kill path, and translate: when the
+    derived context's error is `context.DeadlineExceeded`, wrap `ErrExecTimeout`;
+    plain cancellation returns `ctx.Err()` as the interface comment promises. The
+    caller must be able to tell the two apart with `errors.Is`.
+  </Hint>
+  <Hint
+    title="Prove the limits against the kernel, not the flags"
+    check="cat /sys/fs/cgroup/system.slice/docker-<id>.scope/memory.max inside the VM shows your MemoryLimit; the OOM test observes exit 137 and the fork bomb fails to spawn while the VM stays responsive."
+  >
+    In `limactl shell`, find the container's cgroup directory and read `memory.max`,
+    `cpu.max`, `pids.max`. For `TestMemoryLimitEnforced`, allocate-and-touch past the
+    limit (e.g. a small shell/python loop appending to a string) and assert exit 137 —
+    the kernel only OOM-kills pages that are actually written. Keep `PidsLimit` small
+    (64) for the fork-bomb test so the blast radius is a failed `fork`, not a stressed
+    VM.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: the sleep that would not die"
+    check="After a full make test-docker run, exec'ing ps aux in a surviving sandbox shows no leftover test processes."
+  >
+    If `TestExecKillsProcessOnContextCancel` reports the process still alive, check in
+    order: (1) you killed the shell but not its child — `sh -c 'sleep 300'` makes the
+    sleep a child of `sh`, and signalling only the parent leaves the sleep running, so
+    either exec the sleep directly in the test or make the kill cover the process
+    group; (2) the kill exec targeted the host-namespace `Pid` from `ExecInspect`,
+    which matches nothing inside the container; (3) you asserted `ps` output too
+    quickly — poll briefly, because kill-then-check races the reap. Reproduce by hand:
+    start the long exec, cancel it, then `quickspin sandbox exec <id> -- ps` and read
+    what actually survived.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Pure-function tests under `make test`:
+
+- `TestValidateSpecRejectsNonsense` — negative/zero limits, empty image (table).
+- `TestSpecToHostConfigMapsEveryLimit` — each `Spec` field lands in the right
+  `HostConfig` field; a case with all fields set pins the full list.
+
+Required tests under `make test-docker`:
+
+- `TestExecSeparatesStreamsAndExitCode` — a command writing to both streams and exiting
+  17 comes back intact.
+- `TestExecKillsProcessOnContextCancel` — cancel a `sleep 300`; the call returns
+  promptly AND `ps` inside the container shows the sleep is gone (assert both).
+- `TestExecTimeout` — `Timeout: 1s` on a long command returns `ErrExecTimeout`.
+- `TestMemoryLimitEnforced` — a process allocating past the limit is OOM-killed
+  (exit 137), the sandbox survives.
+- `TestPidsLimitStopsForkBomb` — a fork bomb in a `PidsLimit: 64` sandbox fails to
+  spawn and the VM stays responsive.
+- `TestNetworkDenied` — with `AllowNetwork: false`, an HTTP request from inside fails.
+- `TestOutputTruncation` — output beyond the cap is truncated and flagged.
+
+Plus one manual verification recorded in the plan when closing it: read the cgroup
+files for a limited sandbox inside the VM and confirm the values match the Spec.
+
+Deliberately untested: interactive/TTY sessions, stdin, disk I/O limits, streaming.
+
+## Solo-developer tradeoffs
+
+Commercial platforms stream output over WebSocket/gRPC from day one and meter
+CPU-seconds for billing. Buffered-with-cap is far simpler, honest about its limits, and
+sufficient for an agent loop that inspects results between steps. Network policy here
+is binary (on/off); real platforms do egress allowlists, DNS filtering, and metered
+bandwidth — that nuance is deferred to the isolation capstones.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="cgroups(7) — Linux manual page"
+    href="https://man7.org/linux/man-pages/man7/cgroups.7.html"
+  >
+    The authoritative overview of both cgroup versions and the controller model —
+    context for why the files this plan reads live where they do.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Control Group v2 — kernel admin guide"
+    href="https://docs.kernel.org/admin-guide/cgroup-v2.html"
+  >
+    The exact semantics of `memory.max`, `cpu.max`, and `pids.max` — including the
+    OOM and `EAGAIN` behaviors this plan's negative tests provoke.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Resource constraints"
+    href="https://docs.docker.com/engine/containers/resource_constraints/"
+  >
+    Docker's own account of the flags `Spec` maps onto, plus limits this plan skips
+    (swap, block I/O) and their interaction gotchas.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Go Concurrency Patterns: Context"
+    href="https://go.dev/blog/context"
+    by="The Go Blog"
+  >
+    The original design rationale for `context.Context` — deadlines, cancellation
+    propagation, and why every blocking call in this plan takes one.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="package stdcopy — github.com/docker/docker/pkg/stdcopy"
+    href="https://pkg.go.dev/github.com/docker/docker/pkg/stdcopy"
+  >
+    The demultiplexer this plan leans on, with the frame-header format documented —
+    the spec you will reimplement natively in plan 07.
+  </Resource>
+</Resources>

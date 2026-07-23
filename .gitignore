@@ -33,3 +33,7 @@ go.work.sum
 
 # Build output
 /bin/
+
+# Local documentation reader
+/docs/node_modules/
+/docs/dist/

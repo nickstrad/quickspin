@@ -1,0 +1,376 @@
+# 07 — Guest agent: the in-sandbox API
+
+Depends on: 06.
+
+## Summary
+
+Build `quickspin-guest`: a small static Go binary injected into every sandbox at
+creation, exposing an HTTP API *from inside* the sandbox — exec (now with streaming
+output), file read/write/list, and health. The control plane proxies
+`/v1/sandboxes/{id}/...` workload calls to the guest instead of using Docker exec and
+the tar copy API. The `Runtime` interface keeps lifecycle (create/destroy); workload
+operations move to the guest client. This is the architectural move that makes plan 14
+(Firecracker) possible, because a microVM has no `docker exec`.
+
+## Industry context
+
+This is exactly how E2B works: their `envd` daemon runs inside every sandbox and serves
+the exec/filesystem API; Daytona runs an in-workspace agent; Fly Machines run init +
+agent inside the VM. The pattern exists because runtime-mediated exec is a Docker-ism —
+the moment you want microVMs, bare metal, or lower latency, the only universal
+interface is "a process inside the workload listening on a socket." You are also
+building your first two-binary distributed system: control plane and guest version-skew
+is a real design constraint from here on.
+
+<KeyPoint label="The ownership shift">
+  After this plan the `Runtime` interface owns only lifecycle — create, inspect, list,
+  destroy. Everything that happens *inside* a running sandbox goes through the guest.
+  That split is the whole reason plan 14 can swap the backend without touching a
+  workload code path.
+</KeyPoint>
+
+## What you'll learn
+
+- Designing a minimal internal API and owning both sides of it.
+- Streaming HTTP in Go: chunked responses, `http.Flusher`, framing stdout/stderr/exit
+  as typed lines (simplest: ndjson events `{"stream":"stdout","data":...}`,
+  `{"exit":17}`).
+- Process supervision inside a container: the guest as PID 1's child, zombie reaping,
+  signal forwarding.
+- Readiness semantics: "container running" vs "guest answering" are different states —
+  the control plane's `running` now means the latter.
+- Static binaries and injection via bind-mount.
+
+### Concept: streaming HTTP is fighting three buffers
+
+An agent watching a long build wants output as it happens, but between the child
+process and the caller sit three places bytes can pool: the child's stdio pipes, Go's
+`http.ResponseWriter` buffer, and any proxy in between. Go only sends buffered response
+bytes when the handler returns or the buffer fills — unless you assert the writer to
+`http.Flusher` and call `Flush()` after each event. Framing is the second half of the
+problem: raw interleaved bytes lose the stdout/stderr distinction and have nowhere to
+put the exit code, so the guest wraps each chunk in a typed ndjson line and ends the
+stream with a terminal exit event. One JSON object per line means the client needs
+nothing smarter than `bufio.Scanner`, and `curl` remains a usable debugger. The same
+mechanics repeat in the control plane's passthrough: if the proxy handler buffers the
+guest's stream before forwarding, all the guest-side flushing was for nothing —
+`TestStreamedExecThroughControlPlane` exists to catch exactly that.
+
+Disconnection is part of the contract too: when the caller goes away mid-stream, the
+write path fails and the request context is canceled, and the guest must treat that as
+"kill the child process," or every abandoned exec leaks a running process inside the
+sandbox.
+
+### Concept: readiness is a different fact than running
+
+Docker will happily report a container as running the instant its entrypoint has a PID
+— milliseconds before the guest has bound its socket, and regardless of whether the
+guest binary works at all in that image. If the control plane marks the sandbox
+`running` on container start, the first exec request races the guest's startup and
+fails confusingly. The fix is to redefine `running` to mean "the guest answered
+`/healthz`": after the container starts, the reconciler polls the guest and only then
+transitions state. The failure direction matters as much as the success direction — a
+guest that never answers within a bounded window means the sandbox can never do work,
+so it goes to `failed` and its container is cleaned up, rather than sitting `pending`
+forever. This is the same readiness-vs-liveness distinction Kubernetes encodes as two
+separate probes.
+
+### Concept: errors do not cross process boundaries — DTOs do
+
+Inside one Go process, `errors.Is` walks a chain of wrapped values. Between the guest
+and the plane there is no chain — only bytes on a wire. This plan applies the error
+reference's process-boundary rule for the first time: the guest serializes the shared
+`httpapi.ErrorResponse` DTO, and `guest.Client` reads it, logs what it said, and mints
+a *fresh* error of its own package's type. Wrapping is a lie here — the client never
+had the guest's error value, so pretending to wrap it fabricates a provenance that
+debugging will later trust and be misled by. The DTO lives in `internal/httpapi`
+precisely because it is wire format owned by neither side.
+
+### Concept: someone must reap the zombies
+
+On Linux, a process that exits stays in the process table as a zombie until its parent
+calls `wait` on it; if every ancestor ignores it, the zombie is reparented up to PID 1,
+which is expected to reap it. Full distros run an init that does this — a container
+whose PID 1 is your guest binary has no such safety net. Go's `exec.Cmd.Wait` reaps
+the direct children the guest starts, but a child that spawns its own subprocesses and
+dies first leaves grandchildren that reparent to the guest. Kill-on-disconnect has the
+same shape: killing only the direct child leaves its subprocess tree running. The
+standard mechanism for both is the process group — start children with
+`SysProcAttr{Setpgid: true}` and signal the negative PID to hit the whole group — plus
+a PID-1-aware reap of stray `SIGCHLD`s if you make the guest the entrypoint directly.
+
+## Design and interfaces
+
+Guest HTTP surface (listens inside the sandbox, e.g. `:8321`):
+
+```text
+GET  /healthz                    liveness + guest version
+POST /exec                       body: {cmd, env, workdir, timeout_s}
+                                 response: ndjson stream of stdout/stderr/exit events
+PUT  /files?path=&mode=          write (body = content)
+GET  /files?path=                read
+GET  /dir?path=                  list
+```
+
+<Figure caption="The workload request path after this plan: the plane proxies to the guest inside the sandbox; lifecycle calls still go to the runtime.">
+  <svg viewBox="0 0 640 210" role="img" aria-label="Request path from caller through control plane and guest.Client to quickspin-guest and the child process inside the sandbox">
+    <defs>
+      <marker id="arrow07" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+      <marker id="arrow07g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#caa552" />
+      </marker>
+    </defs>
+    <rect x="330" y="14" width="300" height="150" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" />
+    <text x="480" y="32" textAnchor="middle" fontSize="10" fill="#7f5d43">inside the sandbox</text>
+    <rect x="10" y="52" width="100" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="60" y="74" textAnchor="middle" fontSize="12" fill="#18231f">caller</text>
+    <text x="60" y="90" textAnchor="middle" fontSize="10" fill="#405049">?stream=true</text>
+    <rect x="150" y="52" width="140" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="220" y="74" textAnchor="middle" fontSize="12" fill="#18231f">control plane</text>
+    <text x="220" y="90" textAnchor="middle" fontSize="10" fill="#405049">handler → guest.Client</text>
+    <rect x="350" y="52" width="150" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="425" y="74" textAnchor="middle" fontSize="12" fill="#18231f">quickspin-guest</text>
+    <text x="425" y="90" textAnchor="middle" fontSize="10" fill="#405049">HTTP on :8321</text>
+    <rect x="530" y="52" width="90" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="575" y="74" textAnchor="middle" fontSize="12" fill="#18231f">child</text>
+    <text x="575" y="90" textAnchor="middle" fontSize="10" fill="#405049">process group</text>
+    <line x1="110" y1="70" x2="148" y2="70" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow07)" />
+    <line x1="290" y1="70" x2="348" y2="70" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow07)" />
+    <text x="319" y="60" textAnchor="middle" fontSize="10" fill="#8f3423">POST /exec</text>
+    <line x1="500" y1="70" x2="528" y2="70" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow07)" />
+    <path d="M 575 100 L 575 130 L 65 130 L 65 102" fill="none" stroke="#cf5436" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow07)" />
+    <text x="320" y="124" textAnchor="middle" fontSize="10" fill="#8f3423">ndjson events flushed per line, exit event last</text>
+    <path d="M 220 102 L 220 186 L 348 186" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow07g)" />
+    <text x="222" y="176" textAnchor="start" fontSize="10" fill="#7f5d43">lifecycle only: Runtime create/destroy</text>
+  </svg>
+</Figure>
+
+Committed decisions:
+
+- Injection: bind-mount the cross-compiled guest binary read-only into the container
+  and make it the entrypoint (replacing `sleep infinity`). No custom images required —
+  any base image the user picks still works.
+- Reachability: publish the guest port to the Lima VM / localhost via Docker port
+  mapping; the control plane records the mapped address per sandbox. (Firecracker will
+  swap this for vsock/tap behind the same client interface.)
+- The control plane talks to guests through a `guest.Client` Go interface mirroring the
+  surface above; handlers depend on that interface, not on `Runtime`, for workload ops.
+- First application of the error reference's process-boundary rule: a guest-side Go
+  error never crosses the wire. The guest serializes the shared `httpapi.ErrorResponse`
+  DTO; `guest.Client` logs what the DTO said and mints a fresh error of its own package
+  type rather than pretending to wrap an error it does not have. Guest and plane both
+  reuse `internal/httpapi` — the DTO is wire format owned by neither side.
+- Public API change: `POST /v1/sandboxes/{id}/exec` gains `?stream=true` returning the
+  ndjson stream; the buffered mode remains for SDK simplicity.
+- `/healthz` reports the guest's version; the control plane logs a warning on skew with
+  itself.
+
+<Callout tone="warning" title="Cross-compile for the sandbox, not for your laptop">
+  The guest runs inside a Linux container on Lima's VM, so it must be built with
+  `GOOS=linux` (and the VM's `GOARCH`), `CGO_ENABLED=0` for a static binary that works
+  on any base image, including ones without libc. A dynamically linked or darwin
+  binary fails as an entrypoint with errors that look like injection bugs.
+</Callout>
+
+## Tasks
+
+<TaskList>
+  <Task title="Build cmd/quickspin-guest">
+    HTTP server with exec (streaming + kill-on-disconnect), the files endpoints
+    reusing plan 04's path-validation helpers, and `/healthz` with the version.
+  </Task>
+  <Task title="Change the runtime to inject the guest">
+    Bind-mount the binary read-only, make it the entrypoint, add the port mapping, and
+    store the mapped guest address per sandbox.
+  </Task>
+  <Task title="Gate running on readiness">
+    After container start, the reconciler polls `/healthz` before marking `running`,
+    with a bounded window before the sandbox goes to `failed`.
+  </Task>
+  <Task title="Introduce guest.Client in the control plane">
+    Define the interface mirroring the guest surface and switch workload handlers to
+    depend on it instead of `Runtime`.
+  </Task>
+  <Task title="Stream through the public exec endpoint">
+    `?stream=true` on `POST /v1/sandboxes/{id}/exec` passes the guest's ndjson stream
+    through live; buffered mode remains.
+  </Task>
+  <Task title="Delete the dead Docker exec/copy paths">
+    Remove the now-unused runtime code and report the removal.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Stand the guest up as a plain local process first"
+    check="With the guest running on your host, curl localhost:8321/healthz returns the version, and curl -N against /exec on a command like `sh -c 'echo a; sleep 1; echo b'` prints the first event a second before the second."
+  >
+    The guest is just a Go HTTP server; no container is needed to develop it. Start
+    with `/healthz` and `/exec`. The `-N` flag makes curl print without buffering — if
+    events still arrive in one burst at the end, you are missing the
+    `http.Flusher` assertion and per-line `Flush()` in the handler. Set the
+    `Content-Type` early and remember `WriteHeader` before the first flush.
+  </Hint>
+  <Hint
+    title="Frame exec output as ndjson events from two pipe readers"
+    check="TestGuestExecStreamsInOrder passes: interleaved stdout/stderr arrive as typed, ordered events with exactly one final exit event."
+  >
+    `exec.CommandContext` with `StdoutPipe`/`StderrPipe`, one goroutine per pipe
+    reading chunks, both sending typed events into a single channel that the handler
+    drains, encodes with `json.Encoder`, and flushes. The trap is ending the stream:
+    `Wait` must not be called until both pipe readers hit EOF (the `os/exec` docs are
+    explicit about this), and the exit event is written only after `Wait` returns —
+    `ExitError.ExitCode()` carries the code.
+  </Hint>
+  <Hint
+    title="Kill-on-disconnect rides the request context"
+    check="TestGuestExecKillsOnClientDisconnect passes: closing the response body mid-stream leaves no child process behind (verify with a command that would run for minutes)."
+  >
+    `r.Context()` is canceled when the client disconnects; `exec.CommandContext` kills
+    on cancellation — but only the direct child. Start the child with
+    `syscall.SysProcAttr{Setpgid: true}` and set `cmd.Cancel` (Go 1.20+) to signal the
+    group via `syscall.Kill(-pid, SIGKILL)` so `sh -c` wrappers take their subtree
+    with them. The timeout from `timeout_s` composes as `context.WithTimeout` layered
+    on the request context.
+  </Hint>
+  <Hint
+    title="Inject via bind-mount and rewire the entrypoint"
+    check="docker inspect on a created sandbox shows the read-only mount and the guest entrypoint, and curl against the mapped host port answers /healthz."
+  >
+    In the runtime's create path: a `Mounts` entry (`Type: bind`, `ReadOnly: true`)
+    mapping the built binary to e.g. `/opt/quickspin/guest`, `Entrypoint` set to that
+    path, and a `PortBindings`/`ExposedPorts` pair publishing `:8321` to an ephemeral
+    host port. Read the mapped port back from `ContainerInspect`
+    (`NetworkSettings.Ports`) and persist it as the guest address. Add a Makefile
+    target that cross-compiles the guest before `make test-docker` so the mount source
+    always exists.
+  </Hint>
+  <Hint
+    title="Readiness is a reconciler decision, not a create-time sleep"
+    check="A fresh sandbox shows pending until /healthz answers, then running; with a deliberately broken entrypoint it lands in failed within the window and the container is gone."
+  >
+    Extend plan 06's decision table: a row whose container is running but whose guest
+    has not answered stays `pending`; each pass probes `/healthz` with a short
+    per-probe timeout. The bounded window falls out of data you already have —
+    `now - created_at > readinessWindow` while still unready decides `failed` +
+    destroy. Do not poll in the create request path; the whole point of async create
+    is that the reconciler owns convergence.
+  </Hint>
+  <Hint
+    title="guest.Client mints fresh errors from the DTO"
+    check="TestEndToEndStillPassesWithGuestBackend passes: plan 05's validate script runs unmodified, and a guest-side failure surfaces to the API caller with the plane's error shape, not a doubly wrapped guest error."
+  >
+    Define the interface next to its consumer (`internal/guest` or similar) with
+    methods mirroring the five endpoints; the HTTP implementation decodes
+    `httpapi.ErrorResponse` on non-2xx, logs its fields, and returns its own error
+    values that handlers can map to status codes. Swap handlers over one at a time,
+    keeping plan 05's tests green after each swap — the public contract is the
+    regression suite for this refactor.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: streaming works via curl but not through the plane"
+    check="TestStreamedExecThroughControlPlane passes: the first event arrives at the public API before the command finishes."
+  >
+    If the guest streams but the public endpoint delivers one burst, the plane's
+    passthrough is buffering. Copy the guest's response body to the client with a
+    flush per line (or `io.Copy` to a flushing writer) — a plain `io.Copy` into an
+    unflushed `ResponseWriter` defers everything to handler return. Also check that
+    the plane's outbound request does not read the whole body first (no
+    `io.ReadAll`), and that no `httputil.ReverseProxy` default `FlushInterval` of
+    zero is in the path (set it to a small negative value to flush immediately). For
+    `TestGuestNeverReadyMarksFailed`, the classic wrong outcome is `pending` forever
+    — that means the failed-readiness row is missing from the decision table, not
+    that the probe is broken.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Guest tests, no Docker needed — run the guest as a local process against `httptest`
+(`make test`):
+
+- `TestGuestExecStreamsInOrder` — interleaved stdout/stderr arrive as ordered events
+  ending with an exit event.
+- `TestGuestExecKillsOnClientDisconnect` — closing the response body kills the child.
+- `TestGuestFilesRoundTrip`, `TestGuestRejectsTraversal` (reused table).
+
+Integration (`make test-docker`):
+
+- `TestSandboxRunningMeansGuestHealthy` — `running` state implies `/healthz` was seen.
+- `TestGuestNeverReadyMarksFailed` — break injection deliberately (e.g. bad entrypoint);
+  sandbox lands in `failed` within the readiness window, container cleaned up.
+- `TestStreamedExecThroughControlPlane` — end-to-end: public API `?stream=true`
+  delivers events live (assert first event arrives before the command finishes).
+- `TestEndToEndStillPassesWithGuestBackend` — plan 05's validate script (create, exec,
+  files, destroy) passes unmodified against the guest-backed plane, proving the public
+  contract survived an internal rewrite.
+
+Deliberately untested: guest auto-upgrade, mutual auth between plane and guest (noted
+in plan 08's threat model), stdin/PTY.
+
+## Solo-developer tradeoffs
+
+E2B's envd speaks gRPC with generated clients and supports PTYs, port forwarding, and
+file watching; you ship one ndjson-over-HTTP binary because it is debuggable with curl
+and has zero codegen overhead. The plane→guest link is unauthenticated plaintext on a
+local interface — acceptable on a single trusted host, indefensible multi-tenant; plan
+08 records this in the threat model rather than fixing it, which is itself the
+commercial-vs-learning tradeoff made explicit.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="package exec — os/exec"
+    href="https://pkg.go.dev/os/exec"
+  >
+    The reference for the process side of the guest: `Cmd.Wait`'s reaping behavior,
+    the pipe-deadlock warnings, and where `SysProcAttr` hooks in.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="http.Flusher — net/http"
+    href="https://pkg.go.dev/net/http#Flusher"
+  >
+    The three-sentence interface the entire streaming design hinges on, including the
+    caveat that not every ResponseWriter supports it — hence the type assertion.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Docker and the PID 1 zombie reaping problem"
+    href="https://blog.phusion.nl/docker-and-the-pid-1-zombie-reaping-problem/"
+    by="Phusion Blog"
+  >
+    The write-up that made container zombie reaping famous: why a container has no
+    init safety net and what a PID 1 must therefore do — this plan's reaping rationale.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="wait(2)"
+    href="https://man7.org/linux/man-pages/man2/wait.2.html"
+  >
+    The authoritative semantics under `Cmd.Wait`: zombie lifetime, `SIGCHLD`, and the
+    `WNOHANG` loop a PID-1-aware reaper is built from.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Liveness, Readiness, and Startup Probes"
+    href="https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/"
+  >
+    How Kubernetes formalizes this plan's "running vs answering" distinction into
+    separate probes with separate consequences — the vocabulary interviews use.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="JSON Lines"
+    href="https://jsonlines.org/"
+  >
+    The one-page spec for the framing the exec stream uses, with the conventions
+    (UTF-8, `\n` separator, no enclosing array) that keep it `bufio.Scanner`-parseable.
+  </Resource>
+</Resources>

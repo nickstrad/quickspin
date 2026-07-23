@@ -1,0 +1,368 @@
+# 13 — Deep dive: a mini container runtime by hand
+
+Depends on: 01 (independent of 05–12; can run in parallel with them).
+
+## Summary
+
+Build `quickspin-mini`: a few hundred lines of Go that create a "container" with no
+Docker involved — clone a process into new namespaces, set up a root filesystem with
+`pivot_root`, mount `/proc`, apply cgroup v2 limits, drop capabilities, and run a
+command inside. It runs only inside the Lima VM, is never wired into the platform, and
+exists purely to replace "Docker does isolation" with "I know which five kernel
+features Docker composes, because I called them."
+
+<KeyPoint label="Scope">
+  This is a flashlight, not a product. `quickspin-mini` is never plugged into the
+  control plane; Docker and (later) Firecracker remain the real backends. The output
+  is understanding, captured in `docs/reference/what-docker-does.mdx`.
+</KeyPoint>
+
+## Industry context
+
+This is the layer where platform companies actually differentiate and hire: runc is
+"just" these syscalls productionized; gVisor and Firecracker are answers to the
+question "which of these boundaries is too weak?" — a question you can only evaluate
+after building the weak version. The exercise is a rite of passage with public
+ancestry (Liz Rice's "containers from scratch"); the twist here is tying each syscall
+back to behavior you already observed through Docker in plans 02–03 (e.g. the
+`PidsLimit` fork-bomb test becomes *your* `pids.max` write).
+
+## What you'll learn
+
+- Namespaces concretely: `CLONE_NEWPID/NEWNS/NEWUTS/NEWIPC/NEWNET`, and what each one
+  actually hides (PID 1 illusion, mount table privacy, hostname, no network).
+- Filesystem containment: why `pivot_root` (not `chroot`), unpacking an image rootfs
+  (`docker export` of alpine) into a directory.
+- cgroup v2 by hand: create the group, write `memory.max` / `pids.max` / `cpu.max`,
+  put the child's PID in `cgroup.procs`, watch the kernel enforce it.
+- Capabilities: what root inside the sandbox can still do, and dropping the set.
+- Go-specific mechanics: `syscall.SysProcAttr`, the re-exec pattern (`/proc/self/exe`)
+  for the parent/child split.
+
+### Concept: namespaces are per-resource views, not a box
+
+There is no "container" object in the kernel. There are seven-plus independent
+namespace types, each of which virtualizes exactly one global resource: PID namespaces
+give the child a private process-ID space where it is PID 1 and host processes simply
+do not exist as numbers it can name; mount namespaces give it a private copy of the
+mount table so its mounts and unmounts are invisible outside; UTS covers the hostname;
+IPC covers System V queues and shared memory; a fresh network namespace contains only
+a loopback device, which is why "no network setup" *is* network denial. A "container"
+is just a process whose clone flags requested new instances of several of these at
+once. The failure mode this framing prevents: assuming one boundary implies another.
+A process in a new PID namespace but the host mount namespace can still read
+`/home`; a process with a private mount table but the host network namespace can
+still reach your control-plane port. Every isolation claim in the validation script
+maps to exactly one flag, and dropping any one flag breaks exactly one claim.
+
+<Callout tone="note" title="PID 1 is a job, not just a number">
+  Inside a new PID namespace your command becomes PID 1, and PID 1 has kernel-assigned
+  duties: it does not get default signal handlers for signals it hasn't registered,
+  and it inherits every orphaned descendant as a zombie to reap. `sh` copes; a naive
+  program may hang or accumulate zombies. Docker's `--init` flag exists for exactly
+  this — now you know what it papers over.
+</Callout>
+
+### Concept: why `pivot_root`, and why the order of mounts matters
+
+`chroot` only changes the path-lookup root of one process; the old root is still
+present in the mount table, and a root process can escape with a well-known
+`fchdir`-out-of-the-jail trick. `pivot_root(2)` instead rewires the mount namespace
+itself: the new rootfs becomes `/`, the old root is moved to a subdirectory, and you
+then `umount2` it with `MNT_DETACH` so the host filesystem is not merely hidden but
+*gone* from the child's mount table. The mechanism has sharp preconditions that
+produce the classic error sequence: the new root must itself be a mount point (hence
+the bind-mount-onto-itself trick, or `pivot_root` fails with `EINVAL`), and the
+child's mount namespace must not share propagation with the host (hence remounting
+`/` as `MS_PRIVATE|MS_REC` first, or your unmounts propagate back and mangle the
+host's mount table — the exact leak the "outside" check in the validation script
+exists to catch). Only after the pivot do you mount a fresh `proc`, because `/proc`
+reflects the PID namespace of the process that mounts it; mounting it early or
+inheriting the host's would let `ps` see every host process again.
+
+### Concept: cgroup v2 is a filesystem you write to, from the outside
+
+Namespaces control what the child can *see*; cgroups control what it can *use*, and
+the two are entirely independent mechanisms. cgroup v2 presents one unified hierarchy
+at `/sys/fs/cgroup`: creating a directory creates a group, writing
+`memory.max`/`pids.max`/`cpu.max` sets limits, and writing a PID into `cgroup.procs`
+moves that process (and its future children) into the group. Two behavioral details
+matter for the validation script. First, membership is inherited on fork — which is
+why the fork bomb caps at your `pids.max`: every forked child lands in the same group
+automatically. Second, enforcement is delegated to the kernel, not your code: when
+the group exceeds `memory.max` the kernel's OOM killer kills inside the group and the
+VM stays healthy, with the evidence in `memory.events` (`oom_kill 1`). The parent —
+outside the sandbox — owns the group's lifecycle: it creates the directory before the
+child runs meaningful work, and it can only `rmdir` the group after every member
+process has exited, which is why sloppy teardown shows up as `EBUSY`.
+
+### Concept: the re-exec pattern, or why the program runs itself twice
+
+The setup work (sethostname, pivot_root, mounting proc, dropping capabilities) must
+run *inside* the new namespaces but *before* the user's command starts. Go cannot
+`fork()` safely because of its runtime threads, so the standard pattern — used by
+runc's `libcontainer` too — is re-exec: the parent invokes `/proc/self/exe` with a
+hidden `child` argument via `exec.Command`, and passes the namespace flags in
+`syscall.SysProcAttr.Cloneflags` so the *new process* starts inside the new
+namespaces. The child branch of `main` then performs the setup sequence and finally
+`syscall.Exec`s the real command, replacing itself so the user's process — not your
+wrapper — is PID 1. The parent, still in the host namespaces, is the natural place
+for everything that needs an outside view: writing the child's PID into
+`cgroup.procs`, waiting for exit, and tearing the cgroup down.
+
+<Figure caption="One binary, two roles: the parent clones itself into new namespaces and manages the cgroup from outside; the child sets up the sandbox interior and execs the command as PID 1.">
+  <svg viewBox="0 0 640 260" role="img" aria-label="Re-exec pattern: parent process clones /proc/self/exe into new namespaces; child performs setup then execs the command">
+    <defs>
+      <marker id="arrow13" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+      <marker id="arrow13b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#caa552" />
+      </marker>
+    </defs>
+    <rect x="10" y="30" width="180" height="52" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="100" y="52" textAnchor="middle" fontSize="12" fill="#18231f">quickspin-mini run (parent)</text>
+    <text x="100" y="70" textAnchor="middle" fontSize="10" fill="#405049">host namespaces, real PID</text>
+    <rect x="280" y="20" width="350" height="150" fill="none" stroke="#405049" strokeWidth="1" strokeDasharray="5 4" />
+    <text x="455" y="14" textAnchor="middle" fontSize="10" fill="#405049">new pid + mnt + uts + ipc + net namespaces</text>
+    <rect x="300" y="36" width="150" height="52" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="375" y="58" textAnchor="middle" fontSize="12" fill="#18231f">child (PID 1)</text>
+    <text x="375" y="76" textAnchor="middle" fontSize="10" fill="#405049">hostname, pivot_root,</text>
+    <text x="375" y="88" textAnchor="middle" fontSize="10" fill="#405049">mount /proc, drop caps</text>
+    <rect x="480" y="100" width="130" height="52" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="545" y="122" textAnchor="middle" fontSize="12" fill="#18231f">/bin/sh -c ...</text>
+    <text x="545" y="140" textAnchor="middle" fontSize="10" fill="#405049">still PID 1 (exec)</text>
+    <line x1="190" y1="56" x2="298" y2="56" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow13)" />
+    <text x="244" y="46" textAnchor="middle" fontSize="10" fill="#8f3423">clone /proc/self/exe</text>
+    <line x1="450" y1="82" x2="490" y2="106" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow13)" />
+    <text x="480" y="88" textAnchor="middle" fontSize="10" fill="#8f3423">exec</text>
+    <rect x="10" y="180" width="230" height="60" fill="none" stroke="#caa552" strokeWidth="1.5" />
+    <text x="125" y="202" textAnchor="middle" fontSize="12" fill="#18231f">/sys/fs/cgroup/quickspin-*</text>
+    <text x="125" y="220" textAnchor="middle" fontSize="10" fill="#405049">memory.max · pids.max · cpu.max</text>
+    <path d="M 100 82 L 100 178" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow13b)" />
+    <text x="60" y="132" textAnchor="middle" fontSize="10" fill="#7f5d43">parent writes limits,</text>
+    <text x="60" y="146" textAnchor="middle" fontSize="10" fill="#7f5d43">adds child PID,</text>
+    <text x="60" y="160" textAnchor="middle" fontSize="10" fill="#7f5d43">rmdir after wait</text>
+    <path d="M 240 214 C 340 214 375 160 375 92" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow13b)" />
+    <text x="355" y="212" textAnchor="middle" fontSize="10" fill="#7f5d43">limits enforced by the kernel,</text>
+    <text x="355" y="226" textAnchor="middle" fontSize="10" fill="#7f5d43">inherited by every fork</text>
+  </svg>
+</Figure>
+
+<StudyPrompt question="Which single flag would you remove to prove the mount namespace is doing its job?">
+  Drop `CLONE_NEWNS` and run the setup anyway: the pivot and unmounts now execute in
+  the host's mount table, and the "outside: host mount table unchanged" check fails
+  loudly. Each namespace flag maps to exactly one validation claim — removing a flag
+  and watching the matching check fail is the fastest way to internalize which flag
+  hides what.
+</StudyPrompt>
+
+## Design and interfaces
+
+```text
+quickspin-mini run \
+  --rootfs /tmp/alpine-rootfs \
+  --memory 64m --pids 32 --cpu 0.5 \
+  --hostname sandbox \
+  -- /bin/sh -c 'command'
+```
+
+Committed decisions: cgroup v2 only (what the Lima Ubuntu runs); no network setup —
+new netns left empty, which *is* the `AllowNetwork: false` behavior from plan 03; no
+image pulling — a `hack/make-rootfs.sh` produces the rootfs via `docker export`; runs
+as root inside the VM (rootless/userns is stretch, noted below).
+
+## Tasks
+
+<TaskList>
+  <Task title="Build the rootfs script and the re-exec skeleton">
+    `hack/make-rootfs.sh` produces an alpine rootfs via `docker export`; the Go
+    skeleton has the parent clone `/proc/self/exe` with the namespace flags and a
+    child branch that (for now) just execs the command.
+  </Task>
+  <Task title="Contain the filesystem view">
+    In the child: set the hostname, make the mount namespace private, `pivot_root`
+    into the rootfs, unmount the old root, and mount a fresh `/proc`.
+  </Task>
+  <Task title="Apply cgroup v2 limits from the parent">
+    Create the group directory, write `memory.max` / `pids.max` / `cpu.max`, add the
+    child's PID to `cgroup.procs`, and remove the group after the child exits.
+  </Task>
+  <Task title="Drop capabilities">
+    Reduce what root inside the sandbox can still do before execing the command.
+  </Task>
+  <Task title="Write hack/validate-13.sh">
+    This plan is validated by script, not `go test` — the behaviors are cross-process
+    and root-only. One printed check per claim in Definition of done.
+  </Task>
+  <Task title="Write docs/reference/what-docker-does.mdx">
+    A table mapping each plan 02–03 Docker behavior to the syscall(s) you now invoke
+    yourself.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Get a rootfs you can trust before any Go code"
+    check="chroot /tmp/alpine-rootfs /bin/sh gives you an alpine shell, and ls shows alpine's /etc and /bin."
+  >
+    `hack/make-rootfs.sh` is three commands: `docker create alpine`, `docker export
+    <id> | tar -x -C /tmp/alpine-rootfs`, `docker rm <id>`. Verify with plain
+    `chroot` first — if the rootfs is broken (missing `/bin/sh`, wrong architecture),
+    every later step fails confusingly. `docker export` (flattened filesystem) is what
+    you want here, not `docker save` (layer archives).
+  </Hint>
+  <Hint
+    title="The re-exec split: one binary, a hidden child argument"
+    check="quickspin-mini run -- /bin/sh drops you into a shell where echo $$ prints 1 and hostname setting no longer touches the host."
+  >
+    The parent builds `exec.Command("/proc/self/exe", "child", ...)` and sets
+    `cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUTS |
+    CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWNET}`; `main` dispatches on
+    `os.Args[1] == "child"`. Wire stdio through with `cmd.Stdin/Stdout/Stderr =
+    os.Stdin/...`. Read `man 2 clone` (the flag semantics) and `man 7 pid_namespaces`
+    (why the *next* process is PID 1, not the caller).
+  </Hint>
+  <Hint
+    title="Mount privacy first, then pivot, then proc"
+    check="Inside: ls / shows alpine and ps aux shows only PID 1 and ps itself. Outside, after exit: findmnt looks exactly as before."
+  >
+    Order is the whole trick, in the child: `syscall.Sethostname`; remount `/` with
+    `MS_PRIVATE|MS_REC` (stops propagation to the host); bind-mount the rootfs onto
+    itself with `MS_BIND` (pivot_root requires the new root to be a mount point);
+    `syscall.PivotRoot(rootfs, rootfs+"/oldroot")`; `os.Chdir("/")`;
+    `syscall.Unmount("/oldroot", syscall.MNT_DETACH)`; then mount a fresh `proc` on
+    `/proc`. `man 2 pivot_root` documents each precondition; `EINVAL` almost always
+    means the bind mount or the private remount is missing.
+  </Hint>
+  <Hint
+    title="cgroups belong to the parent, and the PID write is the enrollment"
+    check="A shell fork bomb (:(){ :|:& };:) inside the sandbox stalls at ~32 processes; sh -c 'cat /dev/zero | head -c 100m | tail' gets killed while the VM stays responsive."
+  >
+    In the parent, after `cmd.Start()`: `os.MkdirAll("/sys/fs/cgroup/quickspin-<id>")`,
+    write the limit files (`memory.max` takes bytes or `64M`; `cpu.max` takes
+    `"50000 100000"` for half a core; see `man 7 cgroups`, cgroup v2 section), then
+    write `strconv.Itoa(cmd.Process.Pid)` into `cgroup.procs`. Membership is
+    inherited on fork, so the bomb caps itself. Check `memory.events` for `oom_kill`
+    to confirm the kernel, not luck, stopped the allocation.
+  </Hint>
+  <Hint
+    title="Capabilities: shrink what root inside can do"
+    check="Inside the sandbox, mount -t tmpfs none /mnt fails with 'permission denied' even though whoami says root."
+  >
+    Root inside your sandbox still holds the full capability set — it could mount
+    filesystems, load modules via a helper, or reboot. In the child, before exec,
+    drop bounding-set entries with `unix.Prctl(unix.PR_CAPBSET_DROP, cap, 0, 0, 0)`
+    from `golang.org/x/sys/unix`, looping over the capabilities you exclude (keep a
+    small allowlist like `CAP_CHOWN`, `CAP_KILL`; drop `CAP_SYS_ADMIN` first — `man 7
+    capabilities` explains why it is "the new root"). Verify from inside with
+    `cat /proc/1/status | grep Cap` and decode via `capsh --decode=<hex>` on the host.
+  </Hint>
+  <Hint
+    title="Teardown is parent code, and rmdir has a precondition"
+    check="After the sandbox exits, /sys/fs/cgroup has no quickspin-* directory and ps aux on the host shows no stray children."
+  >
+    After `cmd.Wait()` the parent removes the cgroup directory with `os.Remove` (not
+    `RemoveAll` — cgroupfs directories are removed empty-by-rmdir; the limit files
+    inside are virtual). `EBUSY` on removal means processes are still in
+    `cgroup.procs` — a grandchild survived PID 1's exit. Since PID 1's death kills
+    the whole PID namespace, persistent `EBUSY` usually means you put the *parent's*
+    PID in the group by mistake.
+  </Hint>
+  <Hint
+    title="Diagnosing the failure path: bogus rootfs and half-set-up state"
+    check="quickspin-mini run --rootfs /nonexistent prints one clear error, exits nonzero, and leaves no quickspin-* cgroup and an unchanged host mount table — the last checks in hack/validate-13.sh pass."
+  >
+    Validate the rootfs (exists, is a directory, contains `/bin/sh`) in the *parent*
+    before cloning — a child that dies mid-setup after `Sethostname` but before
+    `PivotRoot` is the mess the failure-path check exists to catch. If the host mount
+    table does change after a failed run, the private remount ran after (or never
+    ran before) a mount that propagated; if a cgroup directory lingers, the parent
+    created it before a validation that can fail — order creation after the checks,
+    and put teardown in a `defer` keyed on whether creation happened. `findmnt` diff
+    before/after and `ls /sys/fs/cgroup` are the two honest probes.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+`hack/validate-13.sh` runs inside the VM as root, exits 0, printing a check per claim:
+
+- Inside: `ps aux` shows the command as PID 1 with no host processes; `hostname` is
+  `sandbox`; `/` is the alpine rootfs; host paths (e.g. the real `/home`) unreachable.
+- Outside: host mount table is unchanged after exit (mount ns didn't leak).
+- Network: `ping -c1 1.1.1.1` fails inside (empty netns).
+- Memory: allocating past `--memory 64m` gets the child killed; the VM stays healthy.
+- Pids: fork bomb caps at `--pids 32`.
+- Cleanup: after exit, the cgroup directory is removed and no stray processes remain.
+- Failure path: a bogus `--rootfs` produces a clean error, not a half-set-up mess.
+
+Deliberately untested/out of scope: rootless mode (user namespaces + uid maps — listed
+as the stretch goal), seccomp filters, veth/bridge networking, overlayfs layering.
+Each is one more rung on the same ladder; note in the closing which you attempted.
+
+## Solo-developer tradeoffs
+
+runc handles dozens of edge cases per syscall (mount propagation, console handling,
+checkpoint hooks); your mini-runtime handles the happy path of five features and that
+is the point — it's a flashlight, not a product, and it is deliberately never plugged
+into the control plane (Docker/Firecracker remain the real backends). The payoff is
+disproportionate for interviews at E2B/Daytona/Modal-type companies: "walk me through
+what happens when a container starts" answered from personal syscalls beats any amount
+of Docker-flag fluency.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="namespaces(7) — Linux manual page"
+    href="https://man7.org/linux/man-pages/man7/namespaces.7.html"
+  >
+    The authoritative index of every namespace type and its clone flag — the exact
+    mapping this plan's "one flag, one isolation claim" framing is built on.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="pivot_root(2) — Linux manual page"
+    href="https://man7.org/linux/man-pages/man2/pivot_root.2.html"
+  >
+    Documents the exact preconditions (new root must be a mount point, not shared)
+    whose violation produces the cryptic `EINVAL` this plan's hint steps warn about.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="cgroups(7) — Linux manual page"
+    href="https://man7.org/linux/man-pages/man7/cgroups.7.html"
+  >
+    Covers the v1-to-v2 unified-hierarchy story and the controller files
+    (`memory.max`, `pids.max`, `cpu.max`) beyond the three this plan writes by hand.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Namespaces in operation, part 1: namespaces overview"
+    href="https://lwn.net/Articles/531114/"
+    by="Michael Kerrisk, LWN"
+  >
+    Start of a seven-part series that builds a container from C and shell one
+    namespace at a time — the long-form version of this plan, with kernel history.
+  </Resource>
+  <Resource
+    kind="video"
+    title="Containers From Scratch"
+    by="Liz Rice, GOTO 2018"
+  >
+    Live-codes essentially this plan's runtime in ~60 lines of Go on stage — watch it
+    after your version works to compare re-exec and mount ordering choices.
+  </Resource>
+  <Resource
+    kind="book"
+    title="Container Security"
+    by="Liz Rice, O'Reilly 2020"
+  >
+    Turns each mechanism you built into its threat model — what capabilities root
+    retains, which namespace gaps attackers actually use, and why VMs still exist.
+  </Resource>
+</Resources>

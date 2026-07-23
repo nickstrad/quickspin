@@ -1,0 +1,412 @@
+# 18 — Cloud host provisioning and fleet observability
+
+Depends on: 17.
+
+## Summary
+
+Close the loop on "create and monitor live cloud hosts": the control plane gains a
+provider integration (Hetzner Cloud API behind a Go interface) so an admin command —
+`quickspin admin host create` — provisions a real server that boots via cloud-init
+into a registered, heartbeating worker with no manual steps; `drain` + `delete`
+retire one just as cleanly. Monitoring becomes real observability: Prometheus-format
+`/metrics` on the plane and workers, scraped into Grafana Cloud's free tier, with a
+small dashboard and two alerts. A cost-safety reconciler guarantees no forgotten
+server ever bills you silently.
+
+## Industry context
+
+This is infrastructure-as-software rather than infrastructure-as-clicking: the same
+pattern as Kubernetes cluster-autoscaler node groups or Nomad autoscaler plugins —
+desired hosts in a database, a provider API to realize them, cloud-init to make new
+metal self-joining, and reconciliation between the provider's server list and yours.
+The metrics stack is the industry-standard shape at minimum size: instrument with
+`prometheus/client_golang`, let a managed Grafana scrape and alert, and treat the
+provider's server list as one more "actual state" to reconcile — orphan cloud servers
+are the fleet-scale version of plan 02's orphan containers, except these cost money.
+
+## What you'll learn
+
+- Driving a cloud provider API from Go (`hcloud-go`): create/list/delete servers,
+  labels as ownership markers, user-data injection — and writing it behind an
+  interface with a fake for tests.
+- Cloud-init as a joining mechanism: the worker token and plane URL templated into
+  user-data so a booted server needs zero SSH to become fleet capacity.
+- Metrics that matter: counters (creates by outcome), histograms (create-to-ready
+  latency), gauges (running sandboxes, host headroom, heartbeat age) — and the
+  restraint to stop there.
+- Alerting on symptoms not causes: "no ready hosts" and "sandbox failure rate" page;
+  everything else is a dashboard.
+- Cost-safety engineering: reconciling billing-relevant external state with strict
+  "delete unknowns bearing our label" policy.
+
+### Concept: the provider is just another runtime, one level up
+
+`Provider` is the same shape as plan 02's `Runtime`, with servers instead of
+containers: create realizes intent, list discovers actuals by an ownership label,
+delete is idempotent. The parallel is not cosmetic — it dictates the same design
+moves. Labels (`quickspin.fleet`) answer "which servers are mine?" exactly as
+`quickspin.managed` did for containers, so a fresh plane process can rediscover the
+fleet it owns. Idempotent delete matters for the same reason destroy did: the fleet
+reconciler retries, and a delete that errors on an already-gone server turns every
+retry loop into special-case code. And putting `hcloud-go` behind the interface with
+a fake is what makes `TestOrphanServerReapedAfterGrace` a unit test instead of a
+bill. The one asymmetry to respect: `ListServers` returns *ours only* — filtering by
+label inside the implementation — because everything above it must be structurally
+unable to touch servers Quickspin doesn't own.
+
+### Concept: user-data is how a server joins the fleet without you
+
+Plan 16's cloud-init made one host reproducible; this plan makes it *parameterized*.
+When the provider creates a server it attaches user-data — a cloud-init document the
+machine executes on first boot. Template into it the three things a worker cannot
+invent: its per-host token, the plane URL, and the arch-appropriate artifacts. The
+boot then runs the whole join sequence unattended: cloud-init installs and starts
+workerd, workerd calls `POST /register` with its token, heartbeats begin, the host
+turns `ready`, and placement starts using it. The moment any step needs SSH, you
+don't have fleet provisioning — you have a runbook with extra steps, and host number
+five will be subtly different from host number four. The failure mode that motivates
+the "zero SSH interventions" assertion: a template bug (wrong token, unexpanded
+variable) produces a server that bills but never joins — which is precisely the
+orphan class the fleet reconciler exists to catch.
+
+<Figure caption="Host provisioning lifecycle: the admin verb drives the provider API; cloud-init user-data carries the token so the new server self-joins via plan 17's registration path.">
+  <svg viewBox="0 0 620 240" role="img" aria-label="Provisioning lifecycle from admin host create through cloud-init boot to a ready registered host">
+    <defs>
+      <marker id="arrow18" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+      <marker id="arrow18g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#caa552" />
+      </marker>
+    </defs>
+    <rect x="10" y="24" width="140" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="80" y="44" textAnchor="middle" fontSize="12" fill="#18231f">admin host create</text>
+    <text x="80" y="60" textAnchor="middle" fontSize="10" fill="#405049">mints token, hosts row</text>
+    <rect x="230" y="24" width="150" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="305" y="44" textAnchor="middle" fontSize="12" fill="#18231f">Hetzner API</text>
+    <text x="305" y="60" textAnchor="middle" fontSize="10" fill="#405049">server + quickspin.fleet</text>
+    <rect x="460" y="24" width="150" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="535" y="44" textAnchor="middle" fontSize="12" fill="#18231f">first boot</text>
+    <text x="535" y="60" textAnchor="middle" fontSize="10" fill="#405049">cloud-init runs user-data</text>
+    <rect x="460" y="130" width="150" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="535" y="150" textAnchor="middle" fontSize="12" fill="#18231f">workerd starts</text>
+    <text x="535" y="166" textAnchor="middle" fontSize="10" fill="#405049">token + plane URL from env</text>
+    <rect x="230" y="130" width="150" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="305" y="150" textAnchor="middle" fontSize="12" fill="#18231f">POST /register</text>
+    <text x="305" y="166" textAnchor="middle" fontSize="10" fill="#405049">then heartbeats (plan 17)</text>
+    <rect x="10" y="130" width="140" height="48" rx="24" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="80" y="150" textAnchor="middle" fontSize="12" fill="#18231f">host ready</text>
+    <text x="80" y="166" textAnchor="middle" fontSize="10" fill="#405049">placement may use it</text>
+    <line x1="150" y1="48" x2="228" y2="48" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow18)" />
+    <text x="189" y="38" textAnchor="middle" fontSize="10" fill="#8f3423">CreateServer</text>
+    <line x1="380" y1="48" x2="458" y2="48" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow18)" />
+    <text x="419" y="38" textAnchor="middle" fontSize="10" fill="#8f3423">user-data(token, URL)</text>
+    <line x1="535" y1="72" x2="535" y2="128" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow18)" />
+    <line x1="460" y1="154" x2="382" y2="154" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow18)" />
+    <line x1="230" y1="154" x2="152" y2="154" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow18)" />
+    <text x="300" y="216" textAnchor="middle" fontSize="10" fill="#405049">no SSH anywhere on this path — a step that needs one is a template bug</text>
+    <path d="M 80 130 C 80 100 80 90 80 74" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow18g)" />
+    <text x="140" y="100" textAnchor="middle" fontSize="10" fill="#7f5d43">retire: drain →</text>
+    <text x="140" y="114" textAnchor="middle" fontSize="10" fill="#7f5d43">delete + revoke token</text>
+  </svg>
+</Figure>
+
+### Concept: reconcile the bill — two lists, two failure directions
+
+The fleet reconciler compares two authorities that can drift: your `hosts` table
+(desired) and the provider's labeled server list (actual). Drift has exactly two
+directions, and they fail differently. A server with the `quickspin.fleet` label but
+no hosts row is an **orphan** — a create that crashed after the API call, or a join
+that never completed — and it bills by the hour whether or not it works. After a
+grace window (long enough to cover a slow legitimate boot), the reconciler deletes it
+and emits a loud event; before the window, it waits, because deleting a server that
+is mid-cloud-init is how a working create gets eaten. The reverse drift — a hosts row
+whose server is gone from the provider — means someone deleted it in the console or
+Hetzner lost it; the host can never heartbeat again, so mark it dead *immediately*
+and skip the 2-minute wait, failing its sandboxes now rather than later. Both
+branches live in one pure function, `decideFleetAction(hostRow, server, now)`,
+because a wrong branch here either deletes a paying customer's capacity or leaks a
+billed server — the two most expensive bugs in the plan, and both table-testable for
+free.
+
+<Callout tone="warning" title="Orphaned servers are silent money">
+  Every code path that calls `CreateServer` must assume it can crash on the next
+  line. The label goes on at creation (atomically, in the create request — never a
+  second call), the reaper trusts only the label, and `hack/validate-18.sh` ends by
+  asserting the provider's labeled server list matches expectations exactly, failing
+  loudly otherwise. A leaked container costs RAM; a leaked CX32 costs real money
+  every hour until the invoice tells you about it.
+</Callout>
+
+<StudyPrompt question="Why do only two alerts page, when the dashboard has a dozen panels?">
+  A page should mean "users are affected and a human must act" — that is a symptom.
+  "No ready hosts" means every create fails; "sandbox failure rate elevated" means
+  the product is broken for someone. Causes — one host unready, heartbeat age
+  creeping, disk headroom shrinking — belong on the dashboard, where they explain a
+  symptom after it pages. Alerting on causes produces pages that need no action,
+  and every such page trains you to ignore the pager; on a one-person team the
+  entire on-call rotation's alert fatigue is yours.
+</StudyPrompt>
+
+## Design and interfaces
+
+```go
+// internal/provider
+type Provider interface {
+    CreateServer(ctx context.Context, req CreateServerRequest) (Server, error) // labels: quickspin.fleet
+    ListServers(ctx context.Context) ([]Server, error)                          // ours only (by label)
+    DeleteServer(ctx context.Context, id string) error                          // idempotent
+}
+```
+
+```text
+Admin flow: host create → provider server w/ user-data(token, plane URL, arch)
+  → boots workerd → self-registers (plan 17) → ready. hosts row carries
+  provider_server_id from birth; deletion refuses unless drained+empty (--force
+  overrides, destroying remaining sandboxes first).
+Fleet reconciler: provider server with our label but no hosts row, older than a
+  grace window ⇒ delete + loud event. hosts row whose server is gone ⇒ dead
+  immediately (skip the heartbeat wait).
+Observability: GET /metrics on plane (auth-exempt, IP-restricted via Caddy) and
+  workerd; Grafana Cloud scrapes; dashboard JSON checked into hack/dashboard.json;
+  alerts: zero-ready-hosts, failure-rate.
+```
+
+Committed decisions: creation is admin-triggered, not autoscaling — an autoscaler is
+a policy loop atop exactly these primitives and is left as the natural sequel; hosts
+are cattle (no in-place upgrades — create new, drain old, delete: your first fleet
+rollout procedure, documented in the runbook); the token in user-data is per-host and
+revoked on delete.
+
+<KeyPoint label="Invariant">
+  Every provider server Quickspin creates carries the `quickspin.fleet` label from
+  the create call itself, and every reconciler decision about money flows through
+  the pure `decideFleetAction` — no ad-hoc deletes anywhere else.
+</KeyPoint>
+
+## Tasks
+
+<TaskList>
+  <Task title="Build the provider interface, hcloud implementation, and fake">
+    `internal/provider` with the interface above; labels as ownership markers,
+    idempotent delete, and a fake provider for every unit test.
+  </Task>
+  <Task title="Parameterize cloud-init into user-data templating">
+    A workerd-only variant of plan 16's cloud-init with the token, plane URL, and
+    arch templated in at create time.
+  </Task>
+  <Task title="Add the admin verbs">
+    `host create|delete [--force]`, wiring drain-then-delete, with delete refusing
+    undrained or non-empty hosts unless forced.
+  </Task>
+  <Task title="Extend the reconciler to the fleet">
+    Orphan servers and vanished servers, decided by a pure
+    `decideFleetAction(hostRow *Host, server *provider.Server, now time.Time)` —
+    table-tested, with `E` at the provider-SDK boundary per the error reference.
+  </Task>
+  <Task title="Instrument and wire the metrics stack">
+    `prometheus/client_golang` on plane and workerd, Caddy-restricted `/metrics`
+    exposure, Grafana Cloud scrape, `hack/dashboard.json`, and the two alerts.
+  </Task>
+  <Task title="Write the runbook">
+    `docs/reference/runbook.mdx`: host roll procedure, alert responses, and the
+    "the bill looks wrong" checklist.
+  </Task>
+  <Task title="Write hack/validate-18.sh">
+    The live validation from the definition of done, ending with the loud
+    no-leaked-servers assertion.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Start with the interface and the fake, not the hcloud SDK"
+    check="The fake provider passes a small contract test (create shows up in list, delete twice returns nil), and reconciler work can begin with zero cloud calls."
+  >
+    Write `internal/provider` types first: `CreateServerRequest` needs name, server
+    type, image, user-data, and labels; `Server` needs ID, name, labels, and
+    created-at (the grace window needs it). The fake is a mutex-guarded map that
+    implements the same interface — build it alongside so every consumer is testable
+    from day one. Real implementation second:
+    `hcloud.NewClient(hcloud.WithToken(...))`, `ServerClient.Create` with
+    `UserData` and `Labels` in the create options (labels at birth, never patched
+    on afterwards), `AllWithOpts` with a `LabelSelector` of `quickspin.fleet` for
+    list, and delete mapping the SDK's not-found to nil. Wrap SDK errors with `E`
+    at this boundary — the provider is an external origin like the Docker SDK was.
+  </Hint>
+  <Hint
+    title="Template user-data and test it without a cloud"
+    check="TestUserDataContainsTokenAndPlaneURL renders the template and finds the token, plane URL, and arch in the output — and finds no unexpanded {{ markers."
+  >
+    Use `text/template` over a workerd-only derivative of plan 16's
+    `hack/cloud-init.yaml` (no Caddy, no plane — just workerd, its env file, ufw).
+    The variables are exactly what a host cannot invent: token, plane URL, arch.
+    Keep the template as a repo file rather than a Go string so it stays reviewable
+    as cloud-init. The unit test renders and asserts on substrings; add a negative
+    assertion that no `{{` survives rendering — an unexpanded variable is the
+    canonical "server boots but never joins" bug.
+  </Hint>
+  <Hint
+    title="host create is: mint token, insert row, then call the provider"
+    check="quickspin admin host create against the fake provider leaves a hosts row carrying provider_server_id, and the fake shows one labeled server whose user-data contains the row's token."
+  >
+    Order matters for crash-safety: mint the per-host token (plan 17's machinery),
+    insert the hosts row in a provisioning state, then `CreateServer`, then write
+    `provider_server_id` back to the row. A crash after the provider call but
+    before the write-back leaves a labeled server with no linked row — which is
+    exactly the orphan case the reconciler must catch, so this ordering is what
+    makes the reaper *necessary* rather than paranoid. Delete is the mirror with a
+    guard: refuse unless the host is drained and empty; `--force` destroys the
+    remaining sandboxes first, then deletes the server, then revokes the token.
+  </Hint>
+  <Hint
+    title="decideFleetAction is a pure function with a small truth table"
+    check="TestOrphanServerReapedAfterGrace, TestOrphanServerKeptDuringGrace, and TestVanishedServerMarksHostDeadImmediately pass as table tests over (hostRow, server, now) with the fake provider recording exactly the expected deletes."
+  >
+    Enumerate the matrix before coding: row+server = healthy, nothing to do;
+    server-only = orphan, compare `now.Sub(server.CreatedAt)` against the grace
+    window, delete + loud event only after it; row-only = vanished, mark dead
+    immediately (skip the heartbeat thresholds — the server cannot come back) and
+    fail its sandboxes via plan 17's existing path. Return a typed action from the
+    pure function and let the reconciler loop execute it; side effects in the
+    decision function would drag the provider into every table row. Pick the grace
+    window against your measured boot time — generous (10+ minutes) is fine; the
+    reaper is a backstop, not a race.
+  </Hint>
+  <Hint
+    title="Instrument with the three metric types, then stop"
+    check="curl localhost:8080/metrics locally shows your counters, the create-to-ready histogram, and the gauges alongside the default Go metrics."
+  >
+    `promhttp.Handler()` mounts `/metrics`; register a counter vec for creates
+    labeled by outcome (`prometheus.NewCounterVec`, low-cardinality label values
+    only — outcome, never sandbox ID), a histogram for create-to-ready with buckets
+    spanning your real latencies (`prometheus.NewHistogram` with explicit buckets —
+    the defaults top out around 10s), and gauges for running sandboxes, host
+    headroom, and heartbeat age (a `GaugeFunc` reading the store works). Workerd
+    gets its own smaller set. Resist adding more series — the learning here
+    includes the restraint.
+  </Hint>
+  <Hint
+    title="Expose metrics to Grafana Cloud without exposing them to the internet"
+    check="The Grafana Cloud data source shows your series arriving, while curl https://api.../metrics from an arbitrary IP is denied."
+  >
+    The endpoint is auth-exempt (Prometheus scrapers don't hold tenant keys) so the
+    protection is network-level: a Caddy `@metrics` matcher with `remote_ip` allow
+    rules, or run Grafana Alloy on the host pushing via `remote_write` so nothing
+    inbound is needed at all — the push model is simpler with one host and worth
+    considering. Then build the dashboard in the UI, export the JSON model into
+    `hack/dashboard.json`, and define the two alerts: `sum(hosts_ready) == 0` and
+    the failure-rate expression over the creates counter, each with a for-duration
+    so a single blip doesn't page.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: validate-18 ends with a server still billing"
+    check="The final assertion of hack/validate-18.sh — the provider's quickspin-labeled server list matches the expected set exactly — passes even on a run where you made an earlier step fail deliberately."
+  >
+    Structure the script so cleanup is unconditional: a shell `trap ... EXIT` that
+    lists labeled servers and deletes stragglers, with the final assertion still
+    failing the run so leaks are seen, not silently mopped. If the assertion trips,
+    diagnose by direction. Extra server, no hosts row: the create path crashed
+    before write-back and the reaper's grace window hasn't elapsed — decide whether
+    the script waits or the trap collects it, but never shorten the production
+    grace window to make a test pass. Extra server *with* a row: delete refused
+    (host not drained — check the script ordering: drain, wait for placement to
+    avoid it, then delete) or token revocation errored after a partial delete.
+    Also verify the zero-SSH claim honestly: if the new host never turns ready,
+    resist the urge to SSH-fix it — fetch `/var/log/cloud-init-output.log` once for
+    diagnosis, fix the template, and re-run from create. An SSH fix that makes the
+    script pass defeats the thing the script exists to prove.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Unit tests with the fake provider (`make test`):
+
+- `TestOrphanServerReapedAfterGrace` / `TestOrphanServerKeptDuringGrace`.
+- `TestVanishedServerMarksHostDeadImmediately`.
+- `TestDeleteRefusesUndrainedHost` and `--force` path destroys sandboxes first.
+- `TestUserDataContainsTokenAndPlaneURL` (templating, no live API).
+
+Live validation `hack/validate-18.sh` (spends real money — cents — and says so):
+
+- `admin host create` → within a bounded window the hosts table shows a new ready
+  host that came up with **zero SSH interventions**.
+- A `backend: firecracker` sandbox is placed on the new host and passes exec/files.
+- Drain → placement avoids it; delete → Hetzner API confirms the server is gone and
+  the token is revoked. Final assertion: provider server list contains exactly the
+  expected set —**the script fails loudly if anything labeled quickspin remains**.
+- Metrics: `/metrics` on plane and worker include the required series; the
+  create-to-ready histogram observed the new host's sandbox.
+- Alert check (once, manually acknowledged in closing notes): stop all workerds and
+  confirm the zero-ready-hosts alert fires in Grafana.
+
+Deliberately untested: multi-region, autoscaling policy, provider rate limits/outage
+handling, Grafana-is-down blindness.
+
+## Solo-developer tradeoffs
+
+A commercial fleet layer adds autoscaling, multi-region placement, capacity
+forecasting, and its own observability pipeline (Prometheus federation, Loki, traces).
+You stop at admin-triggered elasticity plus managed Grafana because the *primitives* —
+provider reconciliation, self-joining hosts, drain-based rolls, symptom alerts — are
+the transferable knowledge, and each omitted layer is policy atop them. The one place
+this plan is deliberately stricter than a first pass needs: the orphan-server reaper.
+Platforms have engineers who notice a stray $400 instance; you have a reconciler or a
+surprise invoice.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="Prometheus: Metric types"
+    href="https://prometheus.io/docs/concepts/metric_types/"
+  >
+    The precise semantics of counter, gauge, histogram, and summary — including why
+    the create-to-ready measurement is a histogram and heartbeat age is a gauge.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Prometheus: Instrumentation best practices"
+    href="https://prometheus.io/docs/practices/instrumentation/"
+  >
+    What to instrument and — the harder discipline — what not to: label-cardinality
+    rules and naming conventions behind the "outcome, never sandbox ID" restraint.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Prometheus: Alerting best practices"
+    href="https://prometheus.io/docs/practices/alerting/"
+  >
+    The canonical justification for symptom-based paging and for-durations — the
+    reasoning that reduces a dozen dashboard panels to exactly two pages.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Monitoring Distributed Systems"
+    href="https://sre.google/sre-book/monitoring-distributed-systems/"
+    by="Google SRE Book"
+  >
+    The four golden signals and the symptoms-versus-causes framing this plan's alert
+    design borrows, plus the alert-fatigue argument in its original form.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Hetzner Cloud API overview"
+    href="https://docs.hetzner.cloud/"
+  >
+    The REST surface underneath the provider interface — server creation with labels
+    and user-data, label selectors for list, and the rate limits left untested.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="package hcloud — github.com/hetznercloud/hcloud-go/v2/hcloud"
+    href="https://pkg.go.dev/github.com/hetznercloud/hcloud-go/v2/hcloud"
+  >
+    The Go SDK reference for the real Provider implementation: `ServerClient.Create`
+    options, label selectors, and the error types to map to nil on delete.
+  </Resource>
+</Resources>

@@ -1,0 +1,300 @@
+# 10 — Python SDK
+
+Depends on: 09.
+
+## Summary
+
+Create `sdk/python/` (`quickspin` package): the same client surface as the TypeScript
+SDK, in idiomatic Python (sync-first, context managers, `httpx`). As with plan 09,
+**Claude generates it; you review and gate on contract tests**. The learning payload
+for you is smaller and different: watching whether your API survives a second language
+untouched — every place the Python SDK needs a workaround is an API bug to fix in Go.
+
+## Industry context
+
+Python is the default language of agent frameworks (LangChain, CrewAI, OpenAI/Anthropic
+tool loops), so a sandbox platform without a Python SDK doesn't exist to half the
+market — E2B and Daytona both lead with Python. The industry pattern exercised here is
+**API-first symmetry**: both SDKs derive from the same OpenAPI contract and pass
+equivalent contract suites, which is the only scalable answer to N languages. Where
+TypeScript is async-native, Python platforms typically ship sync-first with an async
+variant later; this plan follows that.
+
+## What you'll learn
+
+- Reading your API through a second language's eyes: naming (`ttlSeconds` vs
+  `ttl_seconds`), error-code stability, streaming ergonomics (`for ev in
+  sbx.exec_stream(...)` over generators).
+- Keeping two contract suites equivalent — and noticing when one suite asserts
+  something the other forgot.
+- Light Python packaging (`pyproject.toml`, `uv`) as consumer, not expert.
+
+### Concept: the second language is a free API review
+
+One consumer proves an API is usable; the second proves it is *regular*. Every place
+the Python client needs special handling — a field that must be renamed at the
+boundary, an endpoint whose error shape differs, a response the TypeScript SDK quietly
+tolerated — is a defect that was always there and only became visible under a second
+set of conventions. The wire format stays exactly what the OpenAPI document says
+(`ttlSeconds` on the JSON, because plan 09 froze it); each SDK owns the translation to
+its language's idiom (`ttl_seconds=` as a Python keyword argument, mapped in one place
+at the request boundary). The discipline this plan asks for is to *log* every friction
+point instead of silently absorbing it into the client — that list, sorted into
+"Python fix" versus "Go API fix", is a deliverable, and the Go fixes are the ones that
+pay off forever.
+
+<Figure caption="Both SDKs derive from the one spec and pass equivalent contract suites against the same live plane — symmetry is what makes N languages sustainable.">
+  <svg viewBox="0 0 640 220" role="img" aria-label="One OpenAPI spec feeding the TypeScript and Python SDKs, whose parallel contract suites both run against one live control plane">
+    <defs>
+      <marker id="arrow10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+    </defs>
+    <rect x="245" y="12" width="150" height="40" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="320" y="37" textAnchor="middle" fontSize="12" fill="#18231f">openapi.yaml</text>
+    <rect x="60" y="90" width="180" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="150" y="110" textAnchor="middle" fontSize="12" fill="#18231f">@quickspin/sdk</text>
+    <text x="150" y="126" textAnchor="middle" fontSize="10" fill="#405049">Vitest contract suite</text>
+    <rect x="400" y="90" width="180" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="490" y="110" textAnchor="middle" fontSize="12" fill="#18231f">quickspin (PyPI-style)</text>
+    <text x="490" y="126" textAnchor="middle" fontSize="10" fill="#405049">pytest contract suite</text>
+    <rect x="230" y="165" width="180" height="42" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="320" y="185" textAnchor="middle" fontSize="12" fill="#18231f">live control plane</text>
+    <text x="320" y="200" textAnchor="middle" fontSize="10" fill="#405049">booted by hack/testplane.sh</text>
+    <line x1="258" y1="52" x2="165" y2="88" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow10)" />
+    <line x1="382" y1="52" x2="475" y2="88" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow10)" />
+    <text x="320" y="76" textAnchor="middle" fontSize="10" fill="#8f3423">one contract</text>
+    <line x1="170" y1="134" x2="270" y2="163" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow10)" />
+    <line x1="470" y1="134" x2="370" y2="163" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow10)" />
+    <line x1="245" y1="112" x2="398" y2="112" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" />
+    <text x="320" y="104" textAnchor="middle" fontSize="10" fill="#7f5d43">parity by review: test ↔ test mapping table</text>
+  </svg>
+</Figure>
+
+### Concept: context managers encode ownership, not just cleanup
+
+`with Sandbox.create(...) as sbx:` is Python's way of making a lifetime lexical: the
+`__exit__` method runs when the block ends, *including when the block raises*, which is
+exactly the guarantee an agent harness needs so a crashed task doesn't strand a
+sandbox. But the same syntax must not always mean "kill on exit" — `connect` attaches
+to a sandbox someone else created, and attachment is not ownership. The clean design
+gives the object an ownership flag set by its constructor path: `create` returns an
+owning handle whose exit kills; `connect` returns a non-owning handle whose exit only
+closes the HTTP client. Because `kill()` is idempotent (the API promised that in plan
+05), the owning path can kill unconditionally in `__exit__` without special-casing
+"already dead". This create-owns / connect-borrows split is the documented behavior
+the contract tests pin.
+
+### Concept: sync streaming is a generator over a live response
+
+Where the TypeScript SDK exposed an async iterator, the Python SDK exposes a plain
+generator: `for ev in sbx.exec_stream(...)`. `httpx` does the transport work — 
+`client.stream("POST", url) as response` keeps the body open, and
+`response.iter_lines()` handles the chunk-boundary buffering that plan 09 had to do by
+hand. The subtlety that remains is lifetime: a generator body only runs while the
+caller iterates, and the `with client.stream(...)` block inside it must stay open for
+the whole loop — so the generator wraps the stream context and yields from inside it.
+If the caller abandons the loop early, generator finalization closes the response and
+frees the connection. Buffering bugs look identical to plan 09's: everything passes
+except the liveness test, which is why the pytest suite repeats that assertion.
+
+<StudyPrompt question="Why sync-first when the TypeScript SDK is async?">
+  Ask who calls each SDK. TypeScript on Node is async by construction — blocking the
+  event loop is not an option. Python agent harnesses are overwhelmingly plain
+  scripts and sync frameworks; a sync client keeps the plan 12 demo readable, and an
+  async variant can wrap the same wire logic later. Shipping async-first would force
+  every consumer into an event loop to run one command — ergonomics backwards.
+</StudyPrompt>
+
+## Design and interfaces
+
+```python
+with Sandbox.create(image="python:3.12-slim", ttl_seconds=600) as sbx:
+    res = sbx.exec("python", ["-c", "print(1)"], timeout_s=30)
+    res.exit_code; res.stdout; res.stderr
+    for ev in sbx.exec_stream("make", ["test"]):
+        ...
+    sbx.files.write("/app/main.py", code)
+    text = sbx.files.read("/app/main.py")
+# context-manager exit kills the sandbox
+
+Sandbox.connect(sandbox_id)   # reattach without killing on exit unless asked
+```
+
+Committed decisions: `httpx` as the only runtime dependency; typed exceptions mirror
+plan 09's names (`QuotaExceededError`, `SandboxNotFoundError`, `AuthenticationError`);
+key from `QUICKSPIN_API_KEY`; the context manager kills on exit for `create` but not
+for `connect` (attachment ≠ ownership — document this).
+
+## Tasks
+
+<TaskList>
+  <Task title="Generate the package (Claude)">
+    Mirror the TS SDK's structure and README: client, types, typed exceptions,
+    generator-based streaming, `pyproject.toml`.
+  </Task>
+  <Task title="Review against the spec and log friction (you)">
+    Review against `openapi.yaml`; file every friction point as either a Python fix
+    or a Go API fix — keep that list, it goes in the closing notes.
+  </Task>
+  <Task title="Port the contract suite to pytest (both)">
+    Assert the same behaviors as plan 09's Vitest suite, plus the context-manager
+    semantics that only exist in Python.
+  </Task>
+  <Task title="Add make test-sdk-py">
+    Boots a throwaway plane and runs pytest — same harness pattern as `test-sdk-ts`;
+    extract the shared boot script into `hack/testplane.sh`.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Extract the shared boot script before writing any Python"
+    check="Both make test-sdk-ts and a bare hack/testplane.sh run work: the script boots the plane on a throwaway SQLite file, prints the base URL and a freshly minted key, and its cleanup kills the server."
+  >
+    Refactor plan 09's harness first so both suites share one boot path. The script
+    owns: temp dir, plane start, health-poll loop, key minting, and a `trap ... EXIT`
+    cleanup. Decide its output convention now (print `QUICKSPIN_BASE_URL` and
+    `QUICKSPIN_API_KEY` as shell-eval'able lines, or write an env file) — pytest and
+    vitest will both consume it.
+  </Hint>
+  <Hint
+    title="Review the generated package structure against the TS twin"
+    check="pyproject.toml lists httpx as the only runtime dependency, uv sync succeeds, and python -c 'import quickspin' works in the created venv."
+  >
+    Read `pyproject.toml` before the code: one dependency, a `requires-python` of
+    3.11+, and no build exotica. Then diff the module layout against the TS package —
+    the same conceptual pieces (client core, resources, errors, streaming) should be
+    findable in both; structural drift between the twins is itself review feedback.
+    Use `uv venv` + `uv sync` rather than global installs.
+  </Hint>
+  <Hint
+    title="Check the naming boundary is exactly one layer thick"
+    check="Grepping the package for ttlSeconds finds it only in the request-serialization code, and grepping for ttl_seconds finds it only in the public surface and tests."
+  >
+    The wire names stay camelCase because the spec froze them; the Python surface is
+    snake_case because PEP 8 says so. The translation belongs in one place — where
+    the request dict is built — not sprinkled through the codebase. If the generated
+    client instead changed the wire names, that is a contract violation the pytest
+    suite would catch against the live plane; fix the SDK, never the spec.
+  </Hint>
+  <Hint
+    title="Scrutinize __exit__ for the ownership split"
+    check="A scratch test shows create's context manager calls kill on normal exit and on an exception raised inside the block, while connect's exits without any kill request."
+  >
+    Look for a single `Sandbox` class with an owning flag (or two constructor paths
+    setting `_kill_on_exit`). `__exit__(self, exc_type, exc, tb)` must kill
+    unconditionally when owning — not only when `exc_type is None` — and must return
+    a falsy value so exceptions propagate; a `__exit__` returning `True` silently
+    swallows the harness's errors, which is a bug worth hunting for explicitly.
+  </Hint>
+  <Hint
+    title="Verify streaming is a generator over an open httpx stream"
+    check="A quick REPL session shows the first event from exec_stream of a print-then-sleep command arriving while the command is still sleeping."
+  >
+    The shape: a generator function that opens `with self._client.stream("POST", ...)
+    as response:` and yields `json.loads(line)` from `response.iter_lines()`, mapping
+    non-2xx to the typed exceptions before yielding anything (use
+    `response.read()` on the error path — a streaming response's body is not
+    pre-loaded). A version that calls plain `.post()` and splits the finished body
+    passes everything except liveness.
+  </Hint>
+  <Hint
+    title="Port the suite test-by-test and write the parity table as you go"
+    check="pytest -x against a booted plane passes, and every Vitest test name has a row in the parity table pointing at its pytest twin or an explained gap."
+  >
+    Use a session-scoped pytest fixture that either shells out to `hack/testplane.sh`
+    or reads the env the Makefile exported — one plane per run, not per test. Assert
+    exceptions with `pytest.raises(QuotaExceededError)`, never message text. The
+    Python-only additions (context-manager kill/no-kill, stream liveness) get their
+    own named tests from the Definition of done; add each parity-table row as you
+    port, not at the end.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: the sandbox survives the with block"
+    check="After the fix, test_context_manager_kills_on_exit passes including its raising variant, and listing the tenant's sandboxes after the block shows none."
+  >
+    If `test_context_manager_kills_on_exit` fails only in the raising variant, the
+    generated `__exit__` guards the kill behind `exc_type is None` — ownership means
+    cleanup on *every* exit. If it fails in both variants, check whether the test
+    entered the manager at all: `Sandbox.create(...)` without `with` never calls
+    `__exit__`, and a helper that returns an already-entered object breaks the
+    protocol. Confirm from the plane's request log whether DELETE was ever issued —
+    that tells you client bug versus test bug in one look.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+`make test-sdk-py` passes with the pytest equivalents of every plan 09 contract test,
+plus:
+
+- `test_context_manager_kills_on_exit` — sandbox is gone after the `with` block, even
+  when the block raises.
+- `test_connect_does_not_kill_on_exit`.
+- `test_stream_yields_before_completion`.
+
+Cross-SDK parity check: a short doc table (in the plan's closing notes) mapping each TS
+contract test to its pytest twin, with gaps explained — parity is asserted by review,
+not tooling, and saying so is part of done.
+
+Deliberately untested: asyncio variant, Python versions below 3.11, Windows.
+
+## Solo-developer tradeoffs
+
+Commercial platforms generate both SDKs from the spec in CI and publish to npm/PyPI on
+tags with semver guarantees. You keep the packages in-repo and unpublished until the
+plan 12 demo needs to import them (a git or path dependency is fine for a learning
+platform and avoids premature registry ceremony). Skipping asyncio-first is deliberate:
+sync code keeps the demo harness readable, and the API's streaming already proves the
+hard part works.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="With Statement Context Managers — The Python Data Model"
+    href="https://docs.python.org/3/reference/datamodel.html#context-managers"
+  >
+    The exact `__enter__`/`__exit__` contract, including the return-value rule whose
+    violation (`__exit__` returning `True`) silently swallows harness exceptions.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="contextlib — Utilities for with-statement contexts"
+    href="https://docs.python.org/3/library/contextlib.html"
+  >
+    The standard toolkit around context managers — `closing`, `ExitStack`,
+    `@contextmanager` — useful when reviewing whether the generated ownership split is
+    idiomatic or reinvented.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="HTTPX QuickStart"
+    href="https://www.python-httpx.org/quickstart/"
+  >
+    Covers the streaming-response API (`client.stream`, `iter_lines`) that
+    `exec_stream` wraps, and what the library does and does not buffer for you.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Writing your pyproject.toml"
+    href="https://packaging.python.org/en/latest/guides/writing-pyproject-toml/"
+    by="Python Packaging Authority"
+  >
+    The authoritative reference for the metadata you review in the generated
+    `pyproject.toml` — dependencies, `requires-python`, and build backend fields.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="uv documentation"
+    href="https://docs.astral.sh/uv/"
+    by="Astral"
+  >
+    The `uv venv`/`uv sync` workflow the hints use, so environment setup for the
+    contract suite stays reproducible without global installs.
+  </Resource>
+</Resources>

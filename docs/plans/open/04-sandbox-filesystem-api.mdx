@@ -1,0 +1,305 @@
+# 04 — Sandbox filesystem operations
+
+Depends on: 03.
+
+## Summary
+
+Add file manipulation to the runtime: write a file into a sandbox, read one out, list a
+directory, delete a path. This is the second half of the workload contract agents need
+(exec + files); with it, an agent can drop source code in, run it, and read results
+back without shell-quoting tricks through `Exec`.
+
+## Industry context
+
+E2B exposes `sandbox.files.read/write/list`; Daytona and Vercel Sandbox have
+equivalents. Under the hood most container platforms use tar streams — Docker's
+copy API (`CopyToContainer`/`CopyFromContainer`) speaks tar because it predates any
+nicer transport, and tar preserves permissions and directory structure in one stream.
+You'll wrap that oddity behind a clean interface, which is precisely what the
+commercial SDKs do. In plan 07 these operations move into the guest agent (files served
+from inside the sandbox), but this interface — the seam callers depend on — survives
+that move unchanged. That continuity is the lesson.
+
+## What you'll learn
+
+- The tar format as an API: writing/reading `tar.Writer`/`tar.Reader` in Go.
+- Path handling in a hostile context: what happens with `../../etc/passwd`, absolute vs
+  relative paths, symlinks pointing outside the tree.
+- API shape choices for binary data: `[]byte` vs `io.Reader`, and size caps.
+- Interface stability across implementation swaps (the point above).
+
+### Concept: tar is the wire format, headers are the metadata channel
+
+Docker's copy API takes and returns tar archives because a tar stream is the one
+portable container for "files plus their metadata": each entry is a header (`Name`,
+`Mode`, `Size`, `Typeflag`) followed by the content bytes. That makes `WriteFile` a
+serialization exercise — build a `tar.Header` whose `Size` exactly matches
+`len(content)` (a mismatch corrupts the stream; tar trusts the header, not the bytes),
+write it with `tar.Writer.WriteHeader`, then the content, then `Close` so the trailing
+blocks flush. `ReadFile` is the inverse: `CopyFromContainer` hands back a tar stream
+even for a single file, so you `tar.Reader.Next()` to the entry and read its body. The
+header's `Mode` field is also how file permissions cross the boundary in both
+directions — which is why `TestWriteThenReadRoundTrip` asserts mode, not just bytes.
+
+<Figure caption="Both directions of the file contract ride on tar. The Go side owns serialization; Docker only moves archives.">
+  <svg viewBox="0 0 640 190" role="img" aria-label="WriteFile and ReadFile paths through tar archives and Docker's copy API">
+    <defs>
+      <marker id="arrow04" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+    </defs>
+    <rect x="10" y="20" width="140" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="80" y="40" textAnchor="middle" fontSize="12" fill="#18231f">WriteFile(path,</text>
+    <text x="80" y="56" textAnchor="middle" fontSize="12" fill="#18231f">content, mode)</text>
+    <rect x="240" y="20" width="150" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="315" y="40" textAnchor="middle" fontSize="12" fill="#18231f">tar.Writer</text>
+    <text x="315" y="56" textAnchor="middle" fontSize="10" fill="#405049">header: name, mode, size</text>
+    <rect x="480" y="20" width="140" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="550" y="40" textAnchor="middle" fontSize="12" fill="#18231f">CopyToContainer</text>
+    <text x="550" y="56" textAnchor="middle" fontSize="10" fill="#405049">extracts into sandbox</text>
+    <line x1="150" y1="42" x2="238" y2="42" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow04)" />
+    <line x1="390" y1="42" x2="478" y2="42" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow04)" />
+    <rect x="480" y="120" width="140" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="550" y="140" textAnchor="middle" fontSize="12" fill="#18231f">CopyFromContainer</text>
+    <text x="550" y="156" textAnchor="middle" fontSize="10" fill="#405049">tar stream + stat</text>
+    <rect x="240" y="120" width="150" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="315" y="140" textAnchor="middle" fontSize="12" fill="#18231f">tar.Reader</text>
+    <text x="315" y="156" textAnchor="middle" fontSize="10" fill="#405049">size cap enforced here</text>
+    <rect x="10" y="120" width="140" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="80" y="140" textAnchor="middle" fontSize="12" fill="#18231f">ReadFile → []byte</text>
+    <text x="80" y="156" textAnchor="middle" fontSize="10" fill="#405049">or ErrFileTooLarge</text>
+    <line x1="478" y1="142" x2="392" y2="142" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow04)" />
+    <line x1="238" y1="142" x2="152" y2="142" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow04)" />
+    <text x="315" y="98" textAnchor="middle" fontSize="10" fill="#8f3423">every path validated before it reaches an archive</text>
+  </svg>
+</Figure>
+
+### Concept: paths are hostile input
+
+Every `path` argument in this interface will eventually arrive from an HTTP query
+parameter (plan 05) typed by code you don't control. Treat it that way now:
+`../../etc/passwd`, `a/../../x`, empty strings, and relative paths are all requests to
+operate outside the intended tree or on an ambiguous target. The Go toolkit is small
+and pure: `path.IsAbs` to require absolute paths, `path.Clean` to collapse `.` and
+`..` segments, and the rule that a path which *changes meaning* under cleaning (or
+still escapes after it) is rejected before any I/O happens. Centralizing this in one
+validation helper — called by all four methods — is what makes the property testable
+in a table and durable when the implementation moves into the guest agent. Symlinks
+are the deeper version of the same attack (a link inside the sandbox pointing at a
+host path); this plan records them as deliberately untested rather than silently
+ignored, because with Docker's copy API the extraction happens inside the container's
+filesystem, not the host's.
+
+<Callout tone="warning" title="Validate before, not after">
+  Path validation must run before the path is embedded in a tar header, an exec
+  argument, or a Docker API call. A cleaned-then-checked path is a decision; a
+  checked-then-cleaned path is a bypass waiting for the right input.
+</Callout>
+
+### Concept: `[]byte` with a cap is an API promise, not a limitation
+
+Returning `[]byte` means the whole file lives in the control process's memory, so an
+unbounded `ReadFile` is a denial-of-service you wrote yourself — one 4 GiB core dump
+in a sandbox and the platform dies retrieving it. The cap turns that failure into a
+typed, testable contract: stat the file first (`ContainerStatPath` reports size
+without transferring content), refuse with `ErrFileTooLarge` above the cap, and guard
+the actual read too (a `stat`-then-read race can still oversize). The alternative
+shape — `io.Reader` streaming — is strictly more capable and strictly more expensive:
+every caller must manage lifecycles and partial reads, and both SDKs (plans 09/10)
+would inherit that burden. Committing to bytes-with-cap now, with the error in the
+signature, keeps the option to add a streaming method later without breaking anyone.
+
+## Design and interfaces
+
+```go
+type FileInfo struct {
+    Path  string
+    Size  int64
+    Mode  fs.FileMode
+    IsDir bool
+}
+
+var (
+    ErrPathNotFound = errors.New("path not found in sandbox")
+    ErrFileTooLarge = errors.New("file exceeds size cap")
+)
+
+type Runtime interface {
+    // ...plans 02–03...
+    WriteFile(ctx context.Context, id, path string, content []byte, mode fs.FileMode) error
+    ReadFile(ctx context.Context, id, path string) ([]byte, error)
+    ListDir(ctx context.Context, id, path string) ([]FileInfo, error)
+    RemovePath(ctx context.Context, id, path string) error
+}
+```
+
+Committed decisions:
+
+- Paths are absolute inside the sandbox; relative paths are rejected, and any path is
+  cleaned and validated before use.
+- `ReadFile` enforces a size cap (e.g. 10 MiB) with `ErrFileTooLarge`; bulk transfer is
+  out of scope until someone needs it.
+- `WriteFile` creates parent directories (agents expect this; E2B does it).
+
+## Tasks
+
+<TaskList>
+  <Task title="Add the methods and implement via the copy API">
+    Extend the `Runtime` interface with the four methods and implement them against
+    Docker's `CopyToContainer`/`CopyFromContainer`/`ContainerStatPath`.
+  </Task>
+  <Task title="Write the path validation helpers">
+    Pure functions with table-driven unit tests — no Docker needed, and every method
+    calls them first.
+  </Task>
+  <Task title="Wire the CLI verbs">
+    `quickspin sandbox cp`/`ls`/`rm` on top of the new methods.
+  </Task>
+  <Task title="Write the integration tests">
+    The `make test-docker` suite from Definition of done, including the binary
+    round-trip.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Start with the validation helper and its table"
+    check="TestPathValidationRejectsTraversal passes under make test, covering ../x, a/../../x, empty, and relative paths."
+  >
+    Write something like `validatePath(p string) (string, error)` that returns the
+    cleaned path or an error. The mechanics: reject empty and non-`path.IsAbs` input,
+    run `path.Clean` (not `filepath.Clean` — sandbox paths are always slash-separated
+    regardless of the host OS), and reject anything whose cleaned form still contains
+    a `..` escape. Decide and document whether a path that merely *changes* under
+    cleaning is rejected or normalized — either is defensible; ambiguity is not.
+  </Hint>
+  <Hint
+    title="WriteFile is a one-entry tar archive built in memory"
+    check="quickspin sandbox cp of a small file, then exec cat of it, prints the original content; stat -c '%a' shows the requested mode."
+  >
+    Build the archive with `bytes.Buffer` + `tar.NewWriter`: a `tar.Header` with
+    `Name`, `Mode: int64(mode)`, `Size: int64(len(content))`, then the bytes, then
+    `Close()` before handing the buffer to `CopyToContainer`. The classic corruption
+    is a `Size` that disagrees with the written byte count — the archive truncates or
+    errors, sometimes only for specific lengths.
+  </Hint>
+  <Hint
+    title="Parent directories come from the archive, not the destination"
+    check="Writing /work/a/b/c.txt into a fresh sandbox succeeds even though /work/a does not exist, and the nested case in TestWriteThenReadRoundTrip passes."
+  >
+    `CopyToContainer` extracts into a destination directory that must already exist —
+    it will not `mkdir -p` for you. The trick: extract relative to a root that always
+    exists (`/`) and carry the rest of the path inside the archive, adding explicit
+    directory-type headers (`Typeflag: tar.TypeDir`) for each missing parent so their
+    modes are deliberate. The alternative — a `mkdir -p` exec before every copy —
+    works but couples file writes to plan 03's exec path; pick one and be consistent.
+  </Hint>
+  <Hint
+    title="ReadFile stats first, then unwraps a one-entry tar"
+    check="TestReadMissingPath yields ErrPathNotFound; TestReadFileTooLarge yields ErrFileTooLarge without the test process ballooning in memory."
+  >
+    `ContainerStatPath` gives you existence and size before any content moves: map the
+    SDK's not-found (`errdefs.IsNotFound`) to `ErrPathNotFound`, and a size over the
+    cap to `ErrFileTooLarge` — before calling `CopyFromContainer`. Then read the
+    single entry via `tar.Reader.Next()`. Belt-and-braces: wrap the entry body in
+    `io.LimitReader` at cap+1 so a stat-then-read race still cannot oversize the
+    buffer.
+  </Hint>
+  <Hint
+    title="ListDir reads headers; RemovePath has no copy-API equivalent"
+    check="TestListDir reports correct names, sizes, and dir flags; rm of a validated path removes it and rm of a missing path behaves per your documented choice."
+  >
+    For `ListDir`, `CopyFromContainer` of a directory returns a tar of the whole tree
+    — iterate `tar.Reader.Next()` and collect the immediate children's headers
+    (`FileInfo()` on the header gives size, mode, dir flag) without buffering file
+    bodies. Note the cost honestly: content still crosses the wire; that is one reason
+    plan 07 moves this into the guest. Docker has no delete endpoint at all, so
+    `RemovePath` is built on plan 03's `Exec` with `rm -rf` — which is exactly why the
+    path must already be validated and cleaned before it becomes an argument vector
+    (pass it as a single argv element, never through `sh -c` string interpolation).
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: corrupted or truncated round-trips"
+    check="TestBinaryContentSurvives passes for a few KiB of crypto/rand bytes, byte-for-byte, mode intact."
+  >
+    If the binary round-trip fails, bisect the pipeline by dumping intermediate
+    artifacts: write your generated archive to a temp file and inspect it with `tar
+    -tvf` before blaming Docker, then `docker cp` the file out by hand and `cmp` it
+    against the original to isolate write-side from read-side. The usual culprits:
+    forgetting `tar.Writer.Close()` (truncated final block), a header `Size` mismatch,
+    reading past `tar.Reader.Next()` boundaries, or treating content as a string
+    somewhere (any `string(...)` conversion in the pipeline is a smell). If mode is
+    wrong but bytes are right, check that `Mode` was set on the header rather than
+    relying on defaults.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Pure unit tests (in `make test`):
+
+- `TestPathValidationRejectsTraversal` — table-driven: `../x`, `a/../../x`, empty,
+  relative paths all rejected.
+
+Integration tests (`make test-docker`):
+
+- `TestWriteThenReadRoundTrip` — content and mode survive, including a nested path
+  whose parents did not exist.
+- `TestWriteThenExecReadsFile` — write a script, `Exec` runs it: proves the two halves
+  of the contract compose.
+- `TestReadMissingPath` — `ErrPathNotFound`.
+- `TestReadFileTooLarge` — a file over the cap yields `ErrFileTooLarge`, not an OOM.
+- `TestListDir` — names, sizes, dir flags correct.
+- `TestBinaryContentSurvives` — random bytes round-trip unchanged (catches any
+  text-mode or encoding sloppiness early, before SDKs exist).
+
+Deliberately untested: symlink edge cases inside the container, ownership/uid mapping,
+concurrent writes to one path, large-file streaming.
+
+## Solo-developer tradeoffs
+
+Commercial platforms support streaming uploads, globbing, file watching, and
+presigned-URL bulk transfer. Byte-slice APIs with caps cover the agent-development use
+case (source files, logs, small artifacts) with a fraction of the surface. The
+size-cap-with-typed-error pattern means the limitation is explicit in the API rather
+than a silent failure — the habit that matters more than the feature.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="package tar — archive/tar"
+    href="https://pkg.go.dev/archive/tar"
+  >
+    The reference for `Header`, `Writer`, and `Reader`, including which header fields
+    round-trip and the format quirks (`USTAR` vs `PAX`) behind long-name handling.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Basic Tar Format — GNU tar manual"
+    href="https://www.gnu.org/software/tar/manual/html_node/Standard.html"
+  >
+    The on-disk layout itself — 512-byte blocks, the header struct, the trailing zero
+    blocks `Close` writes — for when you want to read the bytes, not the API.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Zip Slip Vulnerability"
+    href="https://security.snyk.io/research/zip-slip-vulnerability"
+    by="Snyk Security Research"
+  >
+    The archive-extraction traversal attack (`../../` entries) found across dozens of
+    real libraries — the exact failure mode this plan's path validation exists to block.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="filepath.IsLocal — package path/filepath"
+    href="https://pkg.go.dev/path/filepath#IsLocal"
+  >
+    The stdlib predicate added for precisely this problem: one call that rejects
+    absolute, `..`-escaping, and other non-local paths, worth comparing to your own check.
+  </Resource>
+</Resources>
