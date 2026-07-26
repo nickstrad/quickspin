@@ -85,6 +85,21 @@ closes the HTTP client. Because `kill()` is idempotent (the API promised that in
 "already dead". This create-owns / connect-borrows split is the documented behavior
 the contract tests pin.
 
+<Mermaid
+  caption="The constructor path, not the with syntax, decides what exit means: create returns an owning handle that kills on every exit including a raise, connect only borrows — and neither path may swallow the block's exception."
+  code={`
+flowchart TD
+    CR["Sandbox.create(...)"] --> O["owning handle<br/>_kill_on_exit = true"]
+    CN["Sandbox.connect(id)"] --> B["non-owning handle<br/>_kill_on_exit = false"]
+    O --> X1["with block exits<br/>normally or by raising"]
+    B --> X2["with block exits"]
+    X1 --> K["__exit__ kills unconditionally<br/>(idempotent kill makes this safe)"]
+    X2 --> C["__exit__ only closes<br/>the HTTP client"]
+    K --> P["__exit__ returns falsy:<br/>the exception propagates"]
+    C --> P
+`}
+/>
+
 ### Concept: sync streaming is a generator over a live response
 
 Where the TypeScript SDK exposed an async iterator, the Python SDK exposes a plain
@@ -146,6 +161,18 @@ for `connect` (attachment ≠ ownership — document this).
     extract the shared boot script into `hack/testplane.sh`.
   </Task>
 </TaskList>
+
+<Mermaid
+  caption="Extracting hack/testplane.sh gives both suites one boot path and one cleanup trap: a harness fix lands once, and the env-var convention is the only interface either test runner sees."
+  code={`
+flowchart TD
+    TS["make test-sdk-ts"] --> B["hack/testplane.sh<br/>temp SQLite, start plane,<br/>health poll, mint key, trap EXIT"]
+    PY["make test-sdk-py"] --> B
+    B --> ENV["QUICKSPIN_BASE_URL<br/>QUICKSPIN_API_KEY"]
+    ENV --> V["Vitest contract suite"]
+    ENV --> PT["pytest contract suite"]
+`}
+/>
 
 ## Hint steps
 

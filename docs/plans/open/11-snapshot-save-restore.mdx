@@ -53,6 +53,17 @@ env, and any bind-mount expectations from the source container — which is why 
 strips those at commit time (`docker commit` accepts config overrides) so the image
 stays a portable filesystem, restorable by any backend.
 
+<Mermaid
+  caption="Commit never squashes: each save seals another writable layer onto the stack, so a snapshot of a snapshot carries both — which is why the byte quota reads real docker image inspect sizes instead of assuming snapshots stay small."
+  code={`
+flowchart TD
+    RO["base image<br/>read-only layers"] --> W1["container writable layer<br/>agent's files; deletes are<br/>whiteouts, not reclaimed space"]
+    W1 -- "docker commit seals it<br/>(config stripped)" --> S1["snapshot image<br/>base layers + 1 commit layer"]
+    S1 -- "restore = ordinary create" --> W2["new container's fresh<br/>writable layer"]
+    W2 -- "commit again" --> S2["snapshot of a snapshot<br/>carries both commit layers"]
+`}
+/>
+
 ### Concept: save is a distributed write, and the order is the correctness
 
 "Save" performs three effects on two systems: commit the image (Docker), record the
@@ -114,6 +125,19 @@ snapshot amortizes* (the `pip install`) versus snapshot create — comparing bar
 create to snapshot create measures nothing, since the snapshot's whole value is the
 work it pre-paid. The CSV is checked in because a number you can't reproduce next
 month is a number you don't have.
+
+<Mermaid
+  caption="A fair comparison ends both arms at the same usable state: the cold arm's clock includes the setup work the snapshot pre-paid, and the per-phase timestamps let the CSV say where the saved time actually came from."
+  code={`
+flowchart LR
+    subgraph cold["cold arm - 20 iterations, interleaved"]
+        A1["API call<br/>returns"] --> A2["state reaches<br/>running"] --> A3["guest /healthz<br/>first succeeds"] --> A4["pip install completes<br/>(the work the snapshot amortizes)"]
+    end
+    subgraph warm["snapshot arm - 20 iterations, interleaved"]
+        B1["API call<br/>returns"] --> B2["state reaches<br/>running (no pull:<br/>image is local)"] --> B3["guest /healthz<br/>first succeeds"]
+    end
+`}
+/>
 
 <Callout tone="warning" title="Snapshots copy secrets as faithfully as code">
   Everything the agent wrote is in the image: tokens saved to `~/.netrc`, keys in

@@ -161,6 +161,31 @@ locked helper) with its own race test. It is also the seed of why real platforms
 obsess here: per-VM egress policy, MAC/IP spoofing prevention, and thousands of taps
 per host all live in this layer; your version is the minimal honest form of it.
 
+<Mermaid
+  caption="No bridge, no NAT, no DHCP: each VM gets its own tap plus a fixed /30, so guest reachability is plain IP routing — and the only shared, race-prone resource in the whole picture is the allocator handing out those subnets."
+  code={`
+flowchart LR
+    subgraph host["Lima VM (host network stack)"]
+        CP["control plane"]
+        AL["/30 allocator<br/>one locked helper"]
+        T1["tap-sbxA<br/>host addr 10.0.0.1/30"]
+        T2["tap-sbxB<br/>host addr 10.0.0.5/30"]
+    end
+    subgraph vma["microVM A (own kernel)"]
+        G1["eth0 10.0.0.2<br/>quickspin-guest"]
+    end
+    subgraph vmb["microVM B (own kernel)"]
+        G2["eth0 10.0.0.6<br/>quickspin-guest"]
+    end
+    AL -. "assigns one /30 per VM" .- T1
+    AL -. "assigns one /30 per VM" .- T2
+    CP -->|"curl guest addr directly"| T1
+    CP --> T2
+    T1 -->|"fd handed to the<br/>firecracker process"| G1
+    T2 --> G2
+`}
+/>
+
 <Callout tone="warning" title="Nested virtualization is a precondition, not a given">
   Everything in this plan needs `/dev/kvm` *inside* the Lima VM, which requires Lima's
   `vz` VM type with nested virtualization enabled — available on Apple Silicon (M3 or
@@ -197,6 +222,24 @@ real limit and the interesting difference to write up).
   "what is the guest's address". Exec, files, and limits arrive over the network
   exactly as they do for Docker — no second implementation of the workload API.
 </KeyPoint>
+
+The shape of the two lifecycle operations follows from the four-artifact footprint:
+
+<Mermaid
+  caption="Create is a supervised sequence where any failure unwinds everything acquired so far — the plan 02 create-gap discipline — and Destroy is the same removal list run unconditionally, with each step tolerating already-gone so a second destroy still exits 0."
+  code={`
+flowchart TD
+    A["allocate a /30<br/>(allocate and mark in one locked call)"] --> B["per-VM dir + rootfs copy"]
+    B --> C["spawn firecracker,<br/>stdout/stderr to a log file"]
+    C --> D["poll for the API socket file<br/>(created asynchronously)"]
+    D --> E["3 PUTs: boot-source,<br/>drive, network-interface"]
+    E --> F["PUT /actions InstanceStart"]
+    F --> G["poll guest /healthz<br/>with a context deadline"]
+    G --> H["sandbox running"]
+    G -. "any step fails or times out" .-> U["unwind everything so far:<br/>kill process, del tap,<br/>remove dir, free the /30"]
+    X["Destroy (or reconciler cleanup<br/>after kill -9 of the VMM)"] --> U
+`}
+/>
 
 ## Tasks
 

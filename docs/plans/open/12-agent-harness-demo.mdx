@@ -83,6 +83,23 @@ treats it as a claim to verify, not a verdict.
   </svg>
 </Figure>
 
+The same loop as control flow, keyed on stop_reason:
+
+<Mermaid
+  caption="Every deliberate exit — end_turn, task_done, even the iteration cap — lands in the same verification state, because the model's claim of success is an input to verification, never the verdict itself."
+  code={`
+stateDiagram-v2
+    [*] --> CallAPI: task prompt + tool schemas
+    CallAPI --> ExecuteTools: stop_reason is tool_use
+    CallAPI --> Verify: stop_reason is end_turn
+    CallAPI --> Verify: iteration cap hit (task failed)
+    ExecuteTools --> Verify: task_done claimed
+    ExecuteTools --> AppendResults: run every tool_use block
+    AppendResults --> CallAPI: all tool_result blocks in one user message
+    Verify --> [*]: check command runs in the sandbox - its exit code is the outcome
+`}
+/>
+
 ### Concept: verification lives in the environment, not the model
 
 A model's "the tests pass now" is a prediction, not evidence — models report success
@@ -105,6 +122,19 @@ blip against the plane is retryable. This mapping — which typed error becomes 
 agent-visible tool error, which aborts the task, which retries — is the harness's
 actual design content, and it only works because plans 09/10 made the errors types
 instead of message strings. The `--chaos` flag exists to prove the mapping under fire.
+
+<Mermaid
+  caption="Three fates for a failed SDK call: recoverable failures go back to the model as errors it can see and route around, fatal ones abort with a named outcome, and only transport blips retry — and both exits share the same idempotent kill in finally."
+  code={`
+flowchart TD
+    E["SDK error during<br/>a tool call"] --> T{"which type?"}
+    T -- "exec timeout /<br/>command failed" --> R["tool_result with<br/>is_error: true"]
+    T -- "SandboxNotFoundError /<br/>QuotaExceededError" --> A["throw TaskAborted<br/>carrying the outcome name"]
+    T -- "transient network blip<br/>against the plane" --> RT["retry the call"]
+    R --> L["loop continues -<br/>the model routes around it"]
+    A --> F["caught in run.ts:<br/>clean verdict, then finally<br/>calls sbx.kill() (idempotent)"]
+`}
+/>
 
 <Callout tone="warning" title="All results in one message, or the loop silently degrades">
   When the model emits several tool_use blocks in one turn, return every tool_result

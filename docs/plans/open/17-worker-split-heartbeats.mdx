@@ -59,6 +59,21 @@ network blips for 40 seconds goes unready, resumes heartbeating, and returns to
 `ready` with nothing killed. Naive single-threshold logic turns every blip into a
 mass sandbox failure — `TestFlappingHostRecovers` exists to pin the correct behavior.
 
+<Mermaid
+  caption="The host state machine the reconciler drives from heartbeat age alone. Every transition into unready is cheap and reversible; the single transition into dead is the only one that destroys anything, which is why it gets the long threshold."
+  code={`
+stateDiagram-v2
+    [*] --> ready: POST /register at boot
+    ready --> unready: no heartbeat for 30s — placement stops
+    unready --> ready: heartbeat resumes (the flapping budget)
+    unready --> dead: silence reaches 2m
+    dead --> ready: workerd restarts and re-registers
+    ready --> draining: admin host drain
+    note right of dead : sandboxes marked failed, events emitted — never migrated
+    note right of draining : no new placements, running sandboxes finish or expire
+`}
+/>
+
 <Figure caption="The split: workers push registration and heartbeats up; the plane pushes Runtime calls down to a placed host; the reconciler watches heartbeat age and demotes silent hosts.">
   <svg viewBox="0 0 620 268" role="img" aria-label="Control plane and worker split with registration, heartbeats, and placement">
     <defs>
@@ -113,6 +128,26 @@ inserts the sandbox row, with the host row locked (`SELECT ... FOR UPDATE`). The
 function remains the policy; the transaction is the arbiter.
 `TestConcurrentPlacementNeverOverfillsHost` must fail if the transactional re-check
 is deleted — if it still passes without it, the test is not exercising the race.
+
+<Mermaid
+  caption="Two creates race for host A's last slot. Both pure place() calls pick A from the same stale snapshot — that is allowed — because the FOR UPDATE re-check serializes them at the row write, where the second one discovers the slot is gone."
+  code={`
+sequenceDiagram
+    participant R1 as create request 1
+    participant R2 as create request 2
+    participant DB as Postgres
+    R1->>DB: read hosts snapshot
+    R2->>DB: read hosts snapshot
+    Note over R1,R2: both place() calls choose host A's last slot
+    R1->>DB: BEGIN, SELECT host A FOR UPDATE
+    R1->>DB: recount active sandboxes: slot free
+    R1->>DB: INSERT sandbox, COMMIT
+    R2->>DB: BEGIN, SELECT host A FOR UPDATE
+    Note over R2,DB: blocks until R1 commits
+    R2->>DB: recount active sandboxes: slot gone
+    R2-->>R2: abort with typed no_capacity
+`}
+/>
 
 <KeyPoint label="Invariant">
   The pure placement function may be wrong (stale snapshot); the reservation

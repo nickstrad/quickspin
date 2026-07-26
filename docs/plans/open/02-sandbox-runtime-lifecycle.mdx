@@ -98,6 +98,21 @@ the mapping survives even if your process crashes: any future process can list
 containers by label and rediscover what it owns. That rediscovery is the seed of plan
 06's reconciler.
 
+<Mermaid
+  caption="The label is the only join between the two identities, and it points in both directions: written once at create time, it lets any future process rediscover ownership from the daemon alone — no local state to lose in a crash."
+  code={`
+flowchart LR
+    subgraph QS["quickspin owns"]
+        ID["sbx_9f8e... ID<br/>durable, public, in URLs later"]
+    end
+    subgraph DK["Docker owns"]
+        CT["container ID<br/>backend detail, logs only"]
+    end
+    ID -- "Create writes label<br/>quickspin.id=sbx_..." --> CT
+    CT -- "List/Inspect filter on the label<br/>to recover the sandbox ID" --> ID
+`}
+/>
+
 <StudyPrompt question="Why not just use the container ID as the sandbox ID?">
   Ask what happens in plan 14 when the same sandbox is backed by a Firecracker microVM
   — there is no container ID. Any identity minted by the backend ties every caller to
@@ -114,6 +129,16 @@ depend on `RuntimeError`'s fields. Go's convention is sentinel values tested wit
 `errors.Is`, which walks the chain of wrapped errors. Your `RuntimeError` struct rides
 along as the diagnostic envelope (operation, message, stack) while the sentinel inside
 it remains the only thing callers may rely on.
+
+<Mermaid
+  caption="Why wrapping does not break the contract: errors.Is walks the Unwrap chain straight through every RuntimeError envelope, so diagnostics can accumulate at each layer while callers keep matching the one sentinel at the core."
+  code={`
+flowchart TD
+    CALL["caller:<br/>errors.Is(err, ErrNotFound)"] -- "Unwrap" --> W["Wrap at a higher layer<br/>adds Op and context"]
+    W -- "Unwrap" --> RE["RuntimeError built with E<br/>Op, Message, Stack"]
+    RE -- "Unwrap" --> S["ErrNotFound<br/>the sentinel — the contract"]
+`}
+/>
 
 ## Design and interfaces
 

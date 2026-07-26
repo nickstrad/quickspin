@@ -61,6 +61,29 @@ write path fails and the request context is canceled, and the guest must treat t
 "kill the child process," or every abandoned exec leaks a running process inside the
 sandbox.
 
+<Mermaid
+  caption="One exec, two endings. The exit event is written only after Wait returns — which itself must wait for both pipe readers to hit EOF — and a disconnect cancels the request context, which must kill the whole process group, not just the direct child."
+  code={`
+sequenceDiagram
+    participant C as caller
+    participant G as guest /exec handler
+    participant P as child (process group)
+    C->>G: POST /exec with cmd, timeout_s
+    G->>P: start with Setpgid: true
+    loop while the child runs
+        P-->>G: stdout/stderr chunks via pipes
+        G-->>C: typed ndjson event, Flush() per line
+    end
+    alt process exits
+        P-->>G: pipes EOF, then Wait returns the code
+        G-->>C: terminal exit event ends the stream
+    else caller disconnects mid-stream
+        C--xG: connection closed → r.Context() canceled
+        G->>P: SIGKILL to -pid: the whole group dies
+    end
+`}
+/>
+
 ### Concept: readiness is a different fact than running
 
 Docker will happily report a container as running the instant its entrypoint has a PID
@@ -74,6 +97,16 @@ guest that never answers within a bounded window means the sandbox can never do 
 so it goes to `failed` and its container is cleaned up, rather than sitting `pending`
 forever. This is the same readiness-vs-liveness distinction Kubernetes encodes as two
 separate probes.
+
+<Mermaid
+  caption="Both exits from pending are reconciler decisions on later ticks, driven by /healthz probes and the readiness window. A container with a PID but no answering guest is still pending — running now names the fact callers actually depend on."
+  code={`
+stateDiagram-v2
+    [*] --> pending: 202, row inserted
+    pending --> running: guest answers /healthz
+    pending --> failed: readiness window expires
+`}
+/>
 
 ### Concept: errors do not cross process boundaries — DTOs do
 

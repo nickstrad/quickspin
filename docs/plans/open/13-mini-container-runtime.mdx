@@ -80,6 +80,23 @@ exists to catch). Only after the pivot do you mount a fresh `proc`, because `/pr
 reflects the PID namespace of the process that mounts it; mounting it early or
 inheriting the host's would let `ps` see every host process again.
 
+<Mermaid
+  caption="The child's setup sequence is a chain of preconditions: each dashed branch shows exactly what breaks when the step above it is skipped, which is how the classic EINVAL and host-mount-leak failures are diagnosed."
+  code={`
+flowchart TD
+    A["Sethostname"] --> B["remount / with MS_PRIVATE + MS_REC"]
+    B --> C["bind-mount rootfs onto itself (MS_BIND)"]
+    C --> D["pivot_root(rootfs, rootfs/oldroot)"]
+    D --> E["chdir to /"]
+    E --> F["umount /oldroot with MNT_DETACH"]
+    F --> G["mount fresh proc on /proc"]
+    G --> H["syscall.Exec the command as PID 1"]
+    B -.->|"skipped"| X1["unmounts propagate back:<br/>host mount table mangled"]
+    C -.->|"skipped"| X2["pivot_root fails with EINVAL:<br/>new root is not a mount point"]
+    G -.->|"too early or inherited"| X3["/proc shows host processes:<br/>PID illusion broken"]
+`}
+/>
+
 ### Concept: cgroup v2 is a filesystem you write to, from the outside
 
 Namespaces control what the child can *see*; cgroups control what it can *use*, and
@@ -95,6 +112,24 @@ VM stays healthy, with the evidence in `memory.events` (`oom_kill 1`). The paren
 outside the sandbox — owns the group's lifecycle: it creates the directory before the
 child runs meaningful work, and it can only `rmdir` the group after every member
 process has exited, which is why sloppy teardown shows up as `EBUSY`.
+
+<Mermaid
+  caption="The parent owns the cgroup on both ends of the child's life: enrollment is one PID write after Start, enforcement is the kernel's job from then on, and rmdir only succeeds once every member has exited — so a persistent EBUSY points at a membership mistake, not a teardown bug."
+  code={`
+sequenceDiagram
+    participant P as parent (host namespaces)
+    participant CG as /sys/fs/cgroup/quickspin-id
+    participant C as child (PID 1 inside)
+    P->>C: cmd.Start() — clone into new namespaces
+    P->>CG: mkdir the group
+    P->>CG: write memory.max / pids.max / cpu.max
+    P->>CG: write child PID into cgroup.procs
+    Note over CG,C: membership inherited on fork —<br/>the kernel enforces limits on every descendant
+    C-->>P: exit (cmd.Wait returns)
+    P->>CG: remove the group directory
+    Note over P,CG: EBUSY here means a process is still in<br/>cgroup.procs — check whose PID you wrote
+`}
+/>
 
 ### Concept: the re-exec pattern, or why the program runs itself twice
 

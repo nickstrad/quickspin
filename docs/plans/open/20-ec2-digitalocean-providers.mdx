@@ -78,6 +78,18 @@ the EC2 adapter must implement it to pass. And tags applied in a second API call
 instead of atomically in `RunInstances` reintroduces plan 18's crash window where a
 server exists that no reaper can ever find.
 
+<Mermaid
+  caption="One suite, four implementations, three cost tiers. The fake keeps the contract in every make test run; the gated real-cloud runs are what make the suite mean something — a battery that has only ever seen the fake proves nothing about EC2's terminated-instance lingering or DO's tag model."
+  code={`
+flowchart LR
+    F["fake provider<br/>make test, every run"] --> S
+    H["hetzner<br/>existing env gate"] --> S
+    D["digitalocean<br/>QUICKSPIN_TEST_DO=1 — cents"] --> S
+    E["ec2, non-metal shape<br/>QUICKSPIN_TEST_EC2=1"] --> S
+    S["RunConformance(t, p, cleanup)<br/>one shared contract"] --> CL["create appears in list — bounded poll<br/>list sees ours-and-alive only<br/>labels at birth, in the create call<br/>delete twice returns nil<br/>user-data round-trips"]
+`}
+/>
+
 ### Concept: /dev/kvm is a property of the shape, not the cloud
 
 Firecracker opens `/dev/kvm`; a machine without it fails at the first sandbox, not at
@@ -94,6 +106,22 @@ preflight (`test -c /dev/kvm` equivalent in Go) — the truth from the machine i
 which catches everything the static table cannot know, including DO quietly changing
 its platform someday. A firecracker-pool host registering with `kvm: false` goes
 straight to a degraded state and is never placed on.
+
+<Mermaid
+  caption="The two-layer KVM defense for a firecracker pool. The static table fires before any money is spent and is allowed to be incomplete; the join-time preflight is the invariant, catching whatever the table could not know — at the cost of a booted, billing instance."
+  code={`
+flowchart TD
+    PC["admin pool create<br/>backend: firecracker"] --> S{"static shape table<br/>in the provider package"}
+    S -- "ec2, non-metal shape" --> R["typed error naming the shape<br/>and the constraint — costs nothing"]
+    S -- "ec2 *.metal" --> OK["pool created"]
+    S -- "digitalocean" --> WN["allowed, with a warning naming<br/>the undocumented nested-virt dependency"]
+    WN --> OK
+    OK --> B["server boots; workerd preflight<br/>stats /dev/kvm on the machine itself"]
+    B --> J{"kvm field in the<br/>register payload?"}
+    J -- "true" --> RD["ready — placement may use it"]
+    J -- "false" --> DG["degraded — registered,<br/>never placed on"]
+`}
+/>
 
 <StudyPrompt question="Why keep the static shape check at all, if the join-time preflight is authoritative?">
   Cost and distance. A wrong shape caught at pool create costs nothing; caught at

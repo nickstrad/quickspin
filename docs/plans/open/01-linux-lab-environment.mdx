@@ -232,6 +232,20 @@ No Go interfaces. The contracts are environmental:
 Negative check: the script fails with a clear message (not a stack trace) when the VM is
 stopped.
 
+<Mermaid
+  caption="The check order is the design: the VM-status guard runs before any docker command, because a docker client pointed at a stale socket hangs rather than fails — ordering is what turns a stopped VM into a named failure instead of a frozen script."
+  code={`
+flowchart TD
+    S["hack/validate-01.sh"] --> G{"limactl list: is the<br/>quickspin VM running?"}
+    G -- no --> X["exit non-zero, naming the fix:<br/>limactl start quickspin"]
+    G -- yes --> C1["docker version reports<br/>a Linux server"]
+    C1 --> C2["docker run --rm alpine<br/>uname -s prints Linux"]
+    C2 --> C3["cross-compiled binary<br/>runs via limactl shell"]
+    C3 --> C4["limactl shell quickspin true:<br/>non-interactive SSH works"]
+    C4 --> OK["exit 0 — one ok-line<br/>per contract"]
+`}
+/>
+
 Deliberately untested: x86_64 hosts, multiple VM instances, VM survival across macOS
 reboots.
 

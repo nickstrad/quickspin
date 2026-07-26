@@ -82,6 +82,21 @@ reconciler picks victims (fewest running sandboxes first), drains them, and only
 deletes a host that is drained *and* empty — the plan 17/18 primitives composed, not
 new machinery.
 
+<Mermaid
+  caption="One reconcile pass, per pool. Counting provisioning hosts as arriving capacity is what stops the loop from creating a new server on every pass while a slow boot completes; the drain-then-delete leg deliberately spans multiple passes so each pass stays a small, crash-safe step."
+  code={`
+flowchart TD
+    P["per pool: gap = target_size minus<br/>(ready + provisioning hosts)"] --> C{"gap?"}
+    C -- "under target" --> UP["provider create with pool labels<br/>(fire-and-forget; the new provisioning<br/>row shrinks the gap next pass)"]
+    C -- "at target" --> N["nothing to do"]
+    C -- "over target" --> V["pick victim: fewest running<br/>sandboxes, then lowest host ID"]
+    V --> DR["drain it — placement stops,<br/>running sandboxes continue"]
+    DR --> E{"drained and empty<br/>on a later pass?"}
+    E -- "yes" --> DEL["delete the host and its server"]
+    E -- "not yet" --> WAIT["wait — the pool stays<br/>over target until it empties"]
+`}
+/>
+
 <Figure caption="One admin surface, two ways capacity arrives: the reconciler realizes target_size through the pool's provider, while adopt registers machines created elsewhere. Placement only ever sees registered hosts.">
   <svg viewBox="0 0 640 250" role="img" aria-label="Pools drive the reconciler toward target size via a provider registry, while adopt registers externally created hosts; both paths end in registered hosts used by placement">
     <defs>
@@ -135,6 +150,16 @@ adopted hosts have no `provider_server_id`, so the plan 18 fleet reconciler must
 never bills-manages it. The `external` pool provider is a registry entry whose create
 and delete return typed errors, so a misconfigured `scale` on an adopted pool fails
 fast instead of silently doing nothing.
+
+<Mermaid
+  caption="How the fleet reconciler must treat adopted capacity. A NULL provider_server_id splits host management in two: the plane still judges health by heartbeats, but every money-touching decision — reaping, scaling — is off limits, because the platform did not create the machine and does not pay for it."
+  code={`
+flowchart TD
+    H["fleet reconciler examines a hosts row"] --> Q{"provider_server_id?"}
+    Q -- "set" --> M["provisioned: vanished-server and<br/>scale decisions apply — mine to<br/>create, reap, and delete"]
+    Q -- "NULL" --> A["adopted: never matches the<br/>vanished-server branch, never<br/>scaled — but plan 17's heartbeat<br/>thresholds still govern its health"]
+`}
+/>
 
 <StudyPrompt question="Why does scale-down drain the fewest-loaded host instead of the oldest?">
   Oldest-first is the cattle-rotation answer and right for *rollouts* (plan 18's

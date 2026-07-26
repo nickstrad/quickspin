@@ -141,6 +141,26 @@ the lookup-or-insert should share the create's transaction — though truly conc
 retries racing one key are explicitly out of scope until plan 08's quota work makes
 transactions load-bearing anyway.
 
+<Mermaid
+  caption="Both branches end in a read of the current record. The key deduplicates the side effect only — the retry sees the sandbox as it is now, not a replay of the original response."
+  code={`
+sequenceDiagram
+    participant C as client
+    participant H as create handler
+    participant DB as SQLite
+    C->>H: POST /v1/sandboxes<br/>Idempotency-Key: k1
+    H->>DB: look up k1 in idempotency_keys
+    DB-->>H: miss
+    H->>DB: create sandbox + record (k1, sandbox_id)<br/>in the create's transaction
+    H--xC: 201 — response lost to a network blip
+    C->>H: identical retry, same key k1
+    H->>DB: look up k1
+    DB-->>H: hit: sandbox_id
+    H->>DB: read that sandbox's current record
+    H-->>C: the record as of now, even if it since failed
+`}
+/>
+
 <StudyPrompt question="Why does the key map to a sandbox ID rather than a stored copy of the original response?">
   Ask what the retry should see if the sandbox failed after creation. Replaying a
   cached 201 body would report a healthy sandbox that no longer exists. Mapping to the

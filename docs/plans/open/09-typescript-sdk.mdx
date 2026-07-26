@@ -101,6 +101,27 @@ of the loop early, the underlying reader must be cancelled so the HTTP connectio
 the server-side exec are released. The Definition of done's liveness assertion exists
 to catch the second failure, which is by far the most common.
 
+<Mermaid
+  caption="Chunk boundaries never align with event boundaries: the parser buffers the partial tail, yields each complete line the moment it exists, and cancels the reader on early break — the three behaviors the liveness and teardown tests exist to pin."
+  code={`
+sequenceDiagram
+    participant C as consumer (for await)
+    participant P as ndjson parser
+    participant R as res.body reader
+    C->>P: next()
+    P->>R: read()
+    R-->>P: chunk: first half of event 1
+    P->>P: buffer - no complete line yet
+    P->>R: read()
+    R-->>P: chunk: rest of event 1 + all of event 2
+    P-->>C: yield event 1 immediately
+    C->>P: next()
+    P-->>C: yield event 2 from the buffer (no read)
+    C->>P: consumer breaks out of the loop
+    P->>R: cancel() in finally - connection and server exec released
+`}
+/>
+
 ### Concept: typed errors as the machine-readable half of the API
 
 Plan 05 committed to an error envelope with a stable `error.code`. The SDK converts
@@ -164,6 +185,21 @@ ndjson stream parsing in-house; errors map 1:1 from the API's `error.code` value
     runs the suite.
   </Task>
 </TaskList>
+
+The last task's harness owns the whole server lifecycle, not just the test run:
+
+<Mermaid
+  caption="One make target owns boot, readiness, credentials, and teardown; the EXIT trap kills the plane whether vitest passes, fails, or is interrupted, so contract runs never leave a server behind."
+  code={`
+flowchart TD
+    M["make test-sdk-ts"] --> T["mktemp -d<br/>throwaway SQLite file"]
+    T --> S["start control plane<br/>in the background"]
+    S --> H["poll health endpoint<br/>until ready"]
+    H --> K["mint a key via the<br/>plan 08 admin CLI"]
+    K --> V["export env vars,<br/>run npx vitest run"]
+    V --> E["trap ... EXIT kills the<br/>server on every outcome"]
+`}
+/>
 
 ## Hint steps
 

@@ -126,6 +126,20 @@ schema, or rollback after a migration is itself a broken state. For this plan's
 additive migrations that holds; the constraint is worth writing in the script's
 header comment.
 
+<Mermaid
+  caption="The health gate is the decision point that makes a deploy transactional: every red path ends with the previous binary serving and a nonzero exit, so a broken build is discovered by the script, not by a customer."
+  code={`
+flowchart TD
+    A["rsync artifact to quickspin.new"] --> B["mv current binary to quickspin.prev"]
+    B --> C["mv quickspin.new into place<br/>(mv is atomic on one filesystem)"]
+    C --> D["systemctl restart quickspin<br/>(migrations run at startup)"]
+    D --> E{"gate: /v1/status shows the new<br/>version with db: ok within<br/>a bounded retry window?"}
+    E -- "green" --> F["finalize — deploy done"]
+    E -- "red" --> G["restore quickspin.prev<br/>and restart again"]
+    G --> H["exit nonzero —<br/>old version still serving"]
+`}
+/>
+
 <StudyPrompt question="Why cross-compile from the Mac instead of building on the server?">
   Two reasons compound. First, the artifact you tested is byte-identical to the one
   you shipped — building on the host inserts an untested compile between validation

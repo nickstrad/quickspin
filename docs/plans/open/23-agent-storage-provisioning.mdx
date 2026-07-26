@@ -65,6 +65,22 @@ remote name, created-at) plus a secret it explicitly does not retain in plaintex
 Blurring this boundary is how platforms end up with support engineers who can read
 customer data.
 
+<Mermaid
+  caption="The ownership boundary in one picture: the plane's store records that a tenant database exists and how to find it by name, but only the tenant's workload ever holds a connection to it."
+  code={`
+flowchart LR
+    subgraph plane["platform state — the plane reads this on every request"]
+        S["plan 15 store<br/>sandbox rows, tenants, leases"]
+        Rows["storage rows<br/>ref, provider, remote name<br/>no plaintext DSN"]
+    end
+    subgraph tenant["tenant state — the platform never reads this"]
+        DB["provisioned database<br/>qs-tenant-hash(key)"]
+    end
+    Rows -->|"points at, by<br/>deterministic name"| DB
+    W["workload in the sandbox"] -->|"DSN read from<br/>the secret file"| DB
+`}
+/>
+
 ### Concept: Ensure is an upsert against a cloud you don't control
 
 `Ensure(ref)` must be safe to call any number of times, concurrently, across crashes —
@@ -129,6 +145,27 @@ abstraction was right. Inside the sandbox the workload reads the file and connec
 what the platform stores long-term is a design decision this plan makes explicitly:
 store the DSN encrypted at rest, or store nothing and re-fetch/rotate credentials from
 the vendor on each Ensure — the second is less code and the plan's default.
+
+<Mermaid
+  caption="The create path composes existing pieces in a fixed order: quota and the storage row share one transaction, an Ensure failure aborts before any sandbox exists, and the DSN reaches the workload only on plan 22's secret rail."
+  code={`
+sequenceDiagram
+    participant C as client
+    participant P as control plane
+    participant V as vendor API
+    participant R as runtime backend
+    C->>P: POST /v1/sandboxes with storage.key
+    P->>P: admission: quota check + storage row<br/>in one transaction (plan 08's shape)
+    P->>V: Ensure(ref) — create, 409 means lookup
+    alt Ensure fails
+        P-->>C: error — no sandbox was created
+    else Ensure returns StorageInfo
+        P->>P: DSN becomes the storage_dsn<br/>entry in Spec.Secrets
+        P->>R: normal sandbox create
+        R-->>C: sandbox running, DSN readable at<br/>/run/quickspin/secrets/storage_dsn
+    end
+`}
+/>
 
 ## Design and interfaces
 

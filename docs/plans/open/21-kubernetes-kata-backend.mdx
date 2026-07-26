@@ -146,6 +146,29 @@ kubernetes pool as elastic (no slot accounting); the cluster saying `Unschedulab
 is the backpressure signal, translated to `no_capacity` after a bounded pending
 window rather than modeled in advance.
 
+<Mermaid
+  caption="Pool create's admission test is a real kata pod through the backend's own Create/Destroy, and the pool row is written only after the smoke passes — the inverse of plan 18's row-first ordering, because here the remote resource is disposable and the row is the commitment."
+  code={`
+sequenceDiagram
+    participant O as operator
+    participant P as control plane
+    participant K as cluster API server
+    O->>P: pool create (kind kubernetes)
+    P->>K: reachability probe
+    P->>K: create smoke pod<br/>(runtimeClassName kata, distinctive label)
+    K-->>P: pod scheduled, pod IP
+    P->>P: poll guest /healthz within a short deadline
+    alt smoke pod turns healthy
+        P->>K: delete smoke pod
+        P->>P: insert pool row
+        P-->>O: pool created
+    else smoke fails or deadline lapses
+        P->>K: delete smoke pod
+        P-->>O: error naming the smoke-pod outcome, no pool row
+    end
+`}
+/>
+
 <StudyPrompt question="Why not run workerd as a DaemonSet and keep the plan 17 machinery?">
   You could — each node's workerd registering as a host — but you would be building
   a scheduler on top of a scheduler: your placement picking a node, then Kubernetes
@@ -196,6 +219,20 @@ Network reachability: the plane must reach pod IPs for exec/files. Committed dev
   node itself). The general answer (LB per sandbox, ingress, or a tunnel) is real
   future work, recorded not solved.
 ```
+
+The lifecycle mapping above, as the pure function the tests pin down:
+
+<Mermaid
+  caption="stateFromPod pins the foreign state machine: every observation on the left resolves to exactly one contract outcome, each arrow is a table-test row, and the failure rows are the ones that earn the table."
+  code={`
+flowchart LR
+    A["PodRunning and the<br/>guest answers /healthz"] --> R["running"]
+    B["Succeeded or Failed"] --> S["stopped"]
+    C["Pending + Unschedulable<br/>past the pending window"] --> N["typed no_capacity"]
+    D["ContainerStatuses waiting:<br/>ImagePullBackOff"] --> I["ErrImageMissing"]
+    E["no pod matches the<br/>quickspin.id label"] --> F["ErrNotFound"]
+`}
+/>
 
 Committed decisions: no CRDs and no operator — the plane's database stays the source
 of truth and pods are disposable actuals, exactly like containers and VMs before

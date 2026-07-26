@@ -122,6 +122,25 @@ being escorted. The alternative fixes — `SERIALIZABLE` isolation with retry lo
 a unique-index trick — are worth knowing and rejecting in the closing notes: row-lock
 admission is the smallest change that makes the race test meaningful.
 
+<Mermaid
+  caption="Under READ COMMITTED neither transaction does anything individually wrong — the fix is making the tenant row the admission mutex, so the loser recounts after the winner commits and sees the true total."
+  code={`
+sequenceDiagram
+    participant A as txn A
+    participant PG as Postgres (tenant row)
+    participant B as txn B
+    A->>PG: SELECT ... FOR UPDATE on the tenant
+    PG-->>A: row lock granted
+    B->>PG: SELECT ... FOR UPDATE on the tenant
+    Note over PG,B: B blocks at the select —<br/>without the lock, both would count cap-1 and both insert
+    A->>PG: count sandboxes → under cap
+    A->>PG: INSERT sandbox, COMMIT
+    PG-->>B: lock granted after A's commit
+    B->>PG: count sandboxes → sees the true total (cap)
+    B->>PG: reject over-quota, ROLLBACK
+`}
+/>
+
 ### Concept: advisory locks make startup migration safe to race
 
 The moment two control-plane instances exist (plan 17's whole premise), both may
@@ -138,6 +157,25 @@ grabbing it through a pool that hands the next statement a different connection 
 nothing; and PgBouncer's transaction-pooling mode breaks session-level locks for the
 same reason, which is why the migrator should use Neon's **direct** (unpooled)
 connection string while the application pool uses the pooled one.
+
+<Mermaid
+  caption="The lock is held by a session, so lock and DDL must share one dedicated connection — the loser blocks (rather than racing the DDL), wakes to find the schema version current, and applies nothing."
+  code={`
+sequenceDiagram
+    participant P1 as plane 1 migrator<br/>(dedicated direct conn)
+    participant PG as Postgres
+    participant P2 as plane 2 migrator<br/>(dedicated direct conn)
+    P1->>PG: SELECT pg_advisory_lock(key)
+    PG-->>P1: acquired
+    P2->>PG: SELECT pg_advisory_lock(key)
+    Note over PG,P2: blocks — the session lock is held<br/>by plane 1's connection
+    P1->>PG: apply pending migrations on the same connection
+    P1->>PG: pg_advisory_unlock(key)
+    PG-->>P2: acquired
+    P2->>PG: schema version already current — apply nothing
+    P2->>PG: pg_advisory_unlock(key)
+`}
+/>
 
 <Callout tone="warning" title="Two connection strings, two jobs">
   Neon hands you a pooled URL (through PgBouncer) and a direct one. The application's

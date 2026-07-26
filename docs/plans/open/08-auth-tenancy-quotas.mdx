@@ -46,6 +46,24 @@ without a salt or work factor is acceptable here precisely because the input is
 high-entropy random bytes, not a human password; brute-forcing 256 random bits is not
 a realistic attack, unlike a dictionary attack on `hunter2`.
 
+<Mermaid
+  caption="The raw key exists in exactly two transient places — the mint command's stdout and the request header. Everything persisted, and therefore everything a database leak exposes, is the clear prefix plus a digest of high-entropy bytes."
+  code={`
+sequenceDiagram
+    participant A as admin CLI (key mint)
+    participant DB as api_keys table
+    participant C as SDK caller
+    participant M as auth middleware
+    A->>A: crypto/rand bytes → qs_live_...
+    A->>DB: store prefix + SHA-256 digest only
+    A-->>A: print raw key once, never again
+    C->>M: Authorization: Bearer qs_live_...
+    M->>DB: find candidate row by clear prefix
+    M->>M: hash presented key,<br/>subtle.ConstantTimeCompare digests
+    M-->>C: 401 invalid / 403 revoked /<br/>tenant ID onto the context
+`}
+/>
+
 ### Concept: cross-tenant "no" must be indistinguishable from "does not exist"
 
 Returning 403 for another tenant's sandbox ID confirms the ID exists — an oracle that
@@ -79,6 +97,24 @@ clause re-checks the count. This is plan 06's lost-update lesson wearing a diffe
 hat: any read-then-write across a gap needs its assumption restated at write time.
 `TestQuotaRaceOnlyAdmitsCap` fires N goroutines at the cap to prove the window is
 closed.
+
+<Mermaid
+  caption="The race the two-step check leaves open: with one slot under the cap, both creates read the same stale count before either writes. Only making the count and insert one atomic write unit forces the second create to see the first."
+  code={`
+sequenceDiagram
+    participant A as create A
+    participant B as create B
+    participant DB as SQLite
+    Note over A,DB: broken: SELECT COUNT then INSERT as two steps
+    A->>DB: count → cap-1, admits
+    B->>DB: count → cap-1, admits too
+    A->>DB: INSERT — tenant at cap
+    B->>DB: INSERT — tenant over cap
+    Note over A,DB: fixed: BEGIN IMMEDIATE, or guarded<br/>INSERT ... SELECT re-checking the count
+    A->>DB: count + insert commit as one unit
+    B->>DB: re-checked count fails → 429 quota_exceeded
+`}
+/>
 
 ### Concept: a threat model is a list of decisions, not a list of fears
 

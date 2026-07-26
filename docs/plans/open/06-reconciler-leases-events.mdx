@@ -105,6 +105,23 @@ row without Docker, a clock, or sleeps. The orphan row of the table (labeled con
 no DB record) is only safe because plan 02 wrote `quickspin.managed` labels — without
 them, "destroy unknown containers" would eat the user's unrelated workloads.
 
+<Mermaid
+  caption="The drift cases the tasks name, each mapping to exactly one action. Every input is available in the pass's snapshot plus the injected clock, which is what keeps decideReconcileAction pure and lets TestDecideReconcileAction cover every leaf without Docker."
+  code={`
+flowchart LR
+    S["one (desired record,<br/>observed container) pairing<br/>+ now from the injected clock"] --> C1["row pending,<br/>no container"]
+    S --> C2["row past expires_at"]
+    S --> C3["labeled container,<br/>no DB row"]
+    S --> C4["row running,<br/>container vanished"]
+    S --> C5["row and container agree"]
+    C1 --> A1["create"]
+    C2 --> A2["reap: destroy + transition"]
+    C3 --> A3["destroy orphan —<br/>the DB is authoritative"]
+    C4 --> A4["mark failed"]
+    C5 --> A5["none — this leaf is why<br/>a pass is idempotent"]
+`}
+/>
+
 ### Concept: the lost update, and why the WHERE clause is the fix
 
 The reconciler cannot hold a database transaction across seconds of Docker I/O, so its
@@ -196,6 +213,30 @@ Committed decisions:
   column from different sources of truth, the lost-update bug stops being a test case
   and becomes a lottery.
 </Callout>
+
+End to end, these decisions compose into the new asynchronous create path:
+
+<Mermaid
+  caption="The request only records intent; a later tick converges. A crash at any point between the 202 and the guarded UPDATE costs one tick of latency, never a lost sandbox — the persisted row is the trigger, not the request."
+  code={`
+sequenceDiagram
+    participant C as client
+    participant API as POST /v1/sandboxes
+    participant DB as SQLite
+    participant R as reconciler
+    participant D as runtime (Docker)
+    C->>API: create request
+    API->>DB: insert row: desired_state running,<br/>observed pending, expires_at set
+    API-->>C: 202 Accepted, state pending
+    Note over R,D: next ticker pass
+    R->>DB: list all rows
+    R->>D: list labeled containers
+    R->>D: create container for the pending row
+    R->>DB: UPDATE state='running' WHERE id=? AND state='pending'<br/>+ event row, same transaction
+    C->>API: GET /v1/sandboxes/id (poll)
+    API-->>C: running
+`}
+/>
 
 ## Tasks
 

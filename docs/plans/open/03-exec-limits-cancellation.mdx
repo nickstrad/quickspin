@@ -60,7 +60,7 @@ the shell reports exit 137 (128 + SIGKILL); when `pids.max` is hit, `fork` fails
 <Mermaid
   caption="Every hop is a translation that can silently drop a field: the pure specToHostConfig table pins the first hop, the manual cgroup-file read pins the second, and the two kernel behaviors on the right are what the negative tests deliberately provoke."
   code={`
-flowchart LR
+flowchart TD
     SP["Spec<br/>CPULimit 0.5 cores<br/>MemoryLimit in bytes<br/>PidsLimit 64"] --> HC["container.HostConfig<br/>NanoCPUs 500000000<br/>Memory in bytes<br/>PidsLimit *int64 — nil is unlimited"]
     HC --> CG["cgroup v2 controller files<br/>cpu.max, memory.max, pids.max"]
     CG --> K1["memory.max exceeded:<br/>kernel OOM-kills, exit 137"]

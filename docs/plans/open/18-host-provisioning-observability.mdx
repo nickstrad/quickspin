@@ -129,6 +129,19 @@ because a wrong branch here either deletes a paying customer's capacity or leaks
 billed server — the two most expensive bugs in the plan, and both table-testable for
 free.
 
+<Mermaid
+  caption="decideFleetAction's truth table. The two drift directions are deliberately asymmetric: an orphan gets patience (it may still be mid-boot) while a vanished server gets immediate death, because a server that no longer exists at the provider can never heartbeat its way back."
+  code={`
+flowchart TD
+    A["compare a hosts row (desired) with the<br/>provider's quickspin.fleet-labeled list (actual)"] --> B{"row and server<br/>both present?"}
+    B -- "both" --> H["healthy — no action"]
+    B -- "server only: orphan" --> G{"older than the<br/>grace window?"}
+    G -- "no" --> W["wait — deleting now could<br/>eat a slow legitimate boot"]
+    G -- "yes" --> D["delete server + loud event<br/>(it bills whether or not it joined)"]
+    B -- "row only: vanished" --> V["mark host dead immediately,<br/>fail its sandboxes — skip the<br/>2-minute heartbeat wait"]
+`}
+/>
+
 <Callout tone="warning" title="Orphaned servers are silent money">
   Every code path that calls `CreateServer` must assume it can crash on the next
   line. The label goes on at creation (atomically, in the create request — never a
@@ -171,6 +184,23 @@ Observability: GET /metrics on plane (auth-exempt, IP-restricted via Caddy) and
   workerd; Grafana Cloud scrapes; dashboard JSON checked into hack/dashboard.json;
   alerts: zero-ready-hosts, failure-rate.
 ```
+
+The `host create` sequence is ordered for crash-safety, not convenience:
+
+<Mermaid
+  caption="Why the row is written before the provider call: every possible crash point leaves a state some reconciler branch already handles, so create needs no rollback code of its own — the reaper is the rollback."
+  code={`
+sequenceDiagram
+    participant A as admin host create
+    participant DB as hosts table
+    participant P as provider API
+    A->>DB: mint per-host token, insert row (provisioning)
+    A->>P: CreateServer with user-data(token, plane URL)<br/>and the quickspin.fleet label in the create call
+    P-->>A: server id
+    A->>DB: write provider_server_id back to the row
+    Note over A,P: crash between CreateServer and the write-back leaves<br/>a labeled server with no linked row — exactly the orphan<br/>the fleet reconciler's grace window exists to reap
+`}
+/>
 
 Committed decisions: creation is admin-triggered, not autoscaling — an autoscaler is
 a policy loop atop exactly these primitives and is left as the natural sequel; hosts

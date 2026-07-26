@@ -90,6 +90,21 @@ host path); this plan records them as deliberately untested rather than silently
 ignored, because with Docker's copy API the extraction happens inside the container's
 filesystem, not the host's.
 
+<Mermaid
+  caption="One pure helper, called first by all four methods. Rejection happens before any I/O, and every check below the Clean step is table-testable without Docker — which is what lets the same rules survive unchanged when plan 07 moves the implementation into the guest agent."
+  code={`
+flowchart TD
+    P["incoming path"] --> E1{"empty?"}
+    E1 -- yes --> R["reject — before any tar header,<br/>exec argv, or Docker call"]
+    E1 -- no --> A{"path.IsAbs?"}
+    A -- no --> R
+    A -- yes --> C["path.Clean collapses<br/>. and .. segments"]
+    C --> M{"meaning changed, or still<br/>escapes after cleaning?"}
+    M -- yes --> R
+    M -- no --> OK["cleaned path flows into<br/>WriteFile, ReadFile, ListDir, RemovePath"]
+`}
+/>
+
 <Callout tone="warning" title="Validate before, not after">
   Path validation must run before the path is embedded in a tar header, an exec
   argument, or a Docker API call. A cleaned-then-checked path is a decision; a
@@ -108,6 +123,20 @@ shape — `io.Reader` streaming — is strictly more capable and strictly more e
 every caller must manage lifecycles and partial reads, and both SDKs (plans 09/10)
 would inherit that burden. Committing to bytes-with-cap now, with the error in the
 signature, keeps the option to add a streaming method later without breaking anyone.
+
+<Mermaid
+  caption="The cap is enforced twice on purpose: the stat check keeps oversized files off the wire entirely, and the LimitReader catches the file that grew between stat and read — losing either guard reopens the self-inflicted denial-of-service."
+  code={`
+flowchart TD
+    RF["ReadFile(ctx, id, path)"] --> V["validatePath"]
+    V --> ST["ContainerStatPath<br/>size without moving content"]
+    ST -- "not found" --> NF["ErrPathNotFound"]
+    ST -- "size over cap" --> TL["ErrFileTooLarge —<br/>no bytes ever transferred"]
+    ST -- "within cap" --> CP["CopyFromContainer<br/>one-entry tar stream"]
+    CP --> LR["io.LimitReader at cap+1<br/>guards the stat-then-read race"]
+    LR --> B["at most cap bytes<br/>in process memory"]
+`}
+/>
 
 ## Design and interfaces
 
