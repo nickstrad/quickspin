@@ -1,0 +1,364 @@
+# 23 — Per-agent persistent storage provisioning
+
+Depends on: 05, 08, 22 (the DSN is delivered on plan 22's secret rail).
+
+## Summary
+
+Give agents durable state that outlives any sandbox: a `StorageProvisioner` interface
+that turns a caller-chosen storage key into a real cloud database, with two
+implementations — Turso (SQLite-compatible) and Neon (Postgres) — behind the same
+contract, proven equivalent by a shared conformance suite in the style of plan 20. The
+control plane wires it in: a sandbox create request may name a storage key, the plane
+ensures the database exists (idempotently), and the connection string arrives inside
+the sandbox as a plan 22 secret file. Storage lifecycle is deliberately independent of
+sandbox lifecycle — destroying a sandbox never deletes data; deletion is its own
+explicit, tenant-scoped API call.
+
+<KeyPoint label="Identity lives with the caller">
+  Quickspin sandboxes are ephemeral on purpose, and this plan does not add an "agent"
+  entity to change that. The durable identity is a caller-supplied opaque key: the
+  platform's whole promise is that the same (tenant, key) pair always resolves to the
+  same database. What an "agent" is remains the client's business — exactly where the
+  agent logic already lives (plan 12).
+</KeyPoint>
+
+## Industry context
+
+This is the platform-as-broker pattern: Heroku add-ons defined it, Vercel Marketplace
+storage (Neon, Upstash) is its current form — the platform provisions a third-party
+backing service via that vendor's management API and injects credentials into the
+workload's runtime. Sandbox vendors mostly stop at ephemeral disks and snapshots;
+pairing compute with brokered storage is what turns "run code" into "run a stateful
+agent," and Neon markets database-per-agent as a first-class use case (instant
+creation, scale-to-zero pricing makes thousands of small databases viable — Turso's
+model is the same bet). The engineering pattern under it all is the twelve-factor
+"backing services" rule: the workload receives a DSN and treats the database as an
+attached resource, so swapping Turso for Neon — or either for anything else — changes
+provisioning, never workload code. Note what this is *not*: plan 15's Postgres is the
+platform's own control-plane store; this plan provisions databases the platform never
+reads, owned by tenants and touched only by their workloads.
+
+## What you'll learn
+
+- Driving SaaS management APIs from Go: auth headers, pagination, error taxonomies,
+  and mapping two very different vendor vocabularies onto one interface.
+- Idempotency against someone else's cloud: `Ensure` semantics, deterministic naming
+  as the reconciliation key, and the create-then-crash window that turns "create" into
+  "create if not exists, then look it up."
+- A second rep of the conformance-suite pattern (after plan 20): one behavioral
+  contract, N implementations plus a fake, one shared proof.
+- Quota and scoping composition: the new resource inherits plan 08's tenant predicate
+  and admission-time quota discipline without new mechanisms.
+- Credential handoff: composing this plan with plan 22 so a DSN — which embeds a
+  password — never rides an env var or a log line.
+
+### Concept: two databases with nothing in common but SQL
+
+Plan 15's Postgres and this plan's Neon databases can even live on the same vendor,
+which is exactly why the distinction must be explicit: the control-plane store is
+*platform* state (sandbox rows, tenants, leases) that quickspin reads on every
+request, while provisioned storage is *tenant* state the platform must never read —
+it creates the database, hands over the credential, and forgets. The boundary shows
+up concretely in the code: the store from plan 15 is a dependency injected into the
+plane; provisioned databases appear only as rows *in* that store (ref, provider,
+remote name, created-at) plus a secret it explicitly does not retain in plaintext.
+Blurring this boundary is how platforms end up with support engineers who can read
+customer data.
+
+### Concept: Ensure is an upsert against a cloud you don't control
+
+`Ensure(ref)` must be safe to call any number of times, concurrently, across crashes —
+because the plane *will* crash between the vendor's create call and its own commit,
+and the caller *will* retry. Two mechanisms make it hold. First, deterministic naming:
+the remote database's name is derived from the ref (`qs-<tenant>-<hash-of-key>`), so a
+retry can find what a crashed attempt created — the name is the reconciliation key,
+the same role labels played for plan 18's servers. Second, treat the vendor's
+"already exists" conflict as success-with-lookup, not failure: create, and on a 409
+(or vendor equivalent) fetch the existing database and proceed. The local row is then
+written after the remote resource exists, which means the crash window leaves an
+*unrecorded remote database* — found again by name on the next Ensure — rather than a
+recorded phantom. Orphans in the other direction (created remotely, key never used
+again) are swept by a list-by-prefix audit script, the cost-safety lesson from plan 18
+applied to databases.
+
+<Figure caption="Ensure converges from either side of a crash: the deterministic name links the vendor's world to the store's row.">
+  <svg viewBox="0 0 640 210" role="img" aria-label="Ensure flow from ref through deterministic name to vendor create-or-lookup and then the local record">
+    <defs>
+      <marker id="arrow23" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+    </defs>
+    <rect x="10" y="30" width="140" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="80" y="50" textAnchor="middle" fontSize="12" fill="#18231f">Ensure(ref)</text>
+    <text x="80" y="66" textAnchor="middle" fontSize="10" fill="#405049">tenant + key</text>
+    <rect x="230" y="30" width="160" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="310" y="50" textAnchor="middle" fontSize="12" fill="#18231f">deterministic name</text>
+    <text x="310" y="66" textAnchor="middle" fontSize="10" fill="#405049">qs-tenant-hash(key)</text>
+    <rect x="470" y="30" width="160" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="550" y="50" textAnchor="middle" fontSize="12" fill="#18231f">vendor API</text>
+    <text x="550" y="66" textAnchor="middle" fontSize="10" fill="#405049">create; 409 → lookup</text>
+    <rect x="230" y="130" width="160" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="310" y="150" textAnchor="middle" fontSize="12" fill="#18231f">store row</text>
+    <text x="310" y="166" textAnchor="middle" fontSize="10" fill="#405049">written last</text>
+    <line x1="150" y1="52" x2="228" y2="52" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow23)" />
+    <line x1="390" y1="52" x2="468" y2="52" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow23)" />
+    <line x1="530" y1="74" x2="392" y2="144" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow23)" />
+    <text x="310" y="110" textAnchor="middle" fontSize="10" fill="#8f3423">crash here leaves an unrecorded database — re-found by name, never duplicated</text>
+  </svg>
+</Figure>
+
+### Concept: the storage key is a namespace decision, not a database decision
+
+The API takes any reasonable string as a key (`agent-42`, `research-bot/prod`), but
+vendor names have charset and length limits the key must not inherit — hence the hash
+in the remote name, with the human-readable ref kept in the store row. Scoping is the
+plan 08 rule applied on day one: the ref is always (tenant, key), every store query
+carries the tenant predicate, and one tenant's `agent-42` is a different database from
+another tenant's `agent-42`. Quota follows the same admission pattern — a
+`max_databases` column on tenants, checked in the same transaction that inserts the
+storage row, with the same race test shape as `TestQuotaRaceOnlyAdmitsCap`.
+
+### Concept: a DSN is a secret wearing a URL costume
+
+`postgres://user:password@host/db` embeds a credential, so every rule from plan 22
+applies to the whole string: it is a `Secret` in Go, `[REDACTED]` in logs, absent from
+inspect, and it enters the sandbox as `/run/quickspin/secrets/storage_dsn` — never as
+an env var, never echoed by the CLI. The composition is the point: this plan adds no
+new secrecy mechanism, it *reuses* the rail, which is the test of whether plan 22's
+abstraction was right. Inside the sandbox the workload reads the file and connects;
+what the platform stores long-term is a design decision this plan makes explicitly:
+store the DSN encrypted at rest, or store nothing and re-fetch/rotate credentials from
+the vendor on each Ensure — the second is less code and the plan's default.
+
+## Design and interfaces
+
+```go
+type StorageRef struct {
+    TenantID string
+    Key      string
+}
+
+type StorageInfo struct {
+    Ref       StorageRef
+    Provider  string // "turso" | "neon" | "fake"
+    RemoteName string
+    DSN       Secret // populated by Ensure; zero when listed
+    CreatedAt time.Time
+}
+
+var ErrStorageQuotaExceeded = errors.New("storage quota exceeded")
+
+type StorageProvisioner interface {
+    // Ensure is idempotent: same ref, same database, any number of calls.
+    Ensure(ctx context.Context, ref StorageRef) (StorageInfo, error)
+    // Delete is idempotent: deleting an absent ref is nil.
+    Delete(ctx context.Context, ref StorageRef) error
+    List(ctx context.Context, tenantID string) ([]StorageInfo, error)
+}
+```
+
+HTTP surface (all tenant-scoped per plan 08):
+
+```text
+POST /v1/sandboxes           body gains "storage": {"key": "agent-42"}  (optional)
+GET  /v1/storage             list this tenant's provisioned databases
+DELETE /v1/storage/{key}     explicit, idempotent; 429 quota on create path
+```
+
+Committed decisions:
+
+- Storage lifecycle is independent of sandbox lifecycle; nothing cascades from
+  sandbox destroy.
+- Remote names are `qs-<tenant>-<short-hash(key)>`; the readable key lives only in
+  the store.
+- The DSN reaches the workload exclusively as the plan 22 secret file
+  `storage_dsn`; the platform does not persist plaintext DSNs.
+- One region per provider, hardcoded in config; multi-region is out of scope.
+- Provider selection is per-request (`"provider": "turso"`) with a configured
+  default, mirroring the plan 19 pool/provider shape.
+
+## Tasks
+
+<TaskList>
+  <Task title="Define the interface and the fake">
+    `StorageProvisioner`, `StorageRef`/`StorageInfo`, and an in-memory fake with
+    injectable failures (including the create-then-crash window).
+  </Task>
+  <Task title="Write the conformance suite">
+    One exported function taking any provisioner plus a cleanup hook — idempotency,
+    concurrent Ensure, delete-twice, tenant-scoped List — run in-process against the
+    fake and env-gated against real vendors.
+  </Task>
+  <Task title="Implement the Turso adapter">
+    Platform API: create/get/delete database, mint a database auth token, assemble
+    the libsql DSN.
+  </Task>
+  <Task title="Implement the Neon adapter">
+    Projects/branches API: map one database per ref, extract the pooled connection
+    string.
+  </Task>
+  <Task title="Wire the control plane">
+    The create-request field, Ensure before sandbox create, DSN onto the secret rail,
+    quota in the insert transaction, the two storage endpoints, and
+    `quickspin storage ls/rm` CLI verbs.
+  </Task>
+  <Task title="Write the orphan audit script">
+    `hack/storage-orphans.sh`: list remote databases by prefix, diff against store
+    rows, report both directions — never delete automatically.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Start from the conformance suite, not an adapter"
+    check="The suite passes against the fake under make test, including TestEnsureIsIdempotent and TestEnsureConcurrentSameRefYieldsOne."
+  >
+    Write the behavioral contract first, the way `runtimetest` does for runtimes: a
+    function like `RunProvisionerConformance(t, newProvisioner, cleanup)`. The
+    concurrent case matters most — fire N goroutines at `Ensure` for one ref and
+    assert exactly one database results. Getting the fake to *fail* this (then fixing
+    it) teaches the locking the real adapters will need around create-or-lookup.
+  </Hint>
+  <Hint
+    title="Deterministic naming has vendor constraints"
+    check="TestRemoteNameStableAndValid shows the same ref always yields the same name, different refs collide only if the hash does, and names satisfy both vendors' documented length/charset rules."
+  >
+    A short hash (first 10–12 hex chars of SHA-256 over tenant+key) inside a fixed
+    prefix keeps names legal everywhere and makes ownership greppable in vendor
+    dashboards. Keep the function pure and table-tested; both adapters and the audit
+    script must share it — a second implementation that drifts is how orphan sweeps
+    go blind.
+  </Hint>
+  <Hint
+    title="Turso: two credentials, two steps"
+    check="Gated by TURSO_API_TOKEN + TURSO_ORG, the conformance suite passes live; the resulting DSN connects from a scratch Go program."
+  >
+    The *platform* API token (from your account) creates and deletes databases; each
+    database then needs its own *auth token* minted via the API for the DSN
+    (`libsql://<name>-<org>.turso.io` plus the token). Map their 409/404 responses
+    onto Ensure/Delete semantics. Watch the deletion→recreation window: recreating a
+    just-deleted name can briefly conflict — the conformance cleanup hook should
+    tolerate that with a short retry.
+  </Hint>
+  <Hint
+    title="Neon: decide what one ref maps to, then extract the right connection string"
+    check="Gated by NEON_API_KEY, the conformance suite passes live and the DSN uses the pooled endpoint."
+  >
+    Neon's hierarchy is project → branch → database. Simplest legal mapping: one
+    project per ref (their API returns the connection URI on create). One project per
+    *tenant* with a branch per key is cheaper at scale but drags in branch-management
+    edge cases — pick one, record it as a committed decision, and note the other as
+    the road not taken. Prefer the pooled connection string; agent workloads open
+    connections carelessly, and serverless Postgres punishes that without pgbouncer in
+    front.
+  </Hint>
+  <Hint
+    title="The plane composes existing pieces; the only new logic is ordering"
+    check="A create request with storage yields a sandbox whose /run/quickspin/secrets/storage_dsn connects; TestStorageQuotaRaceOnlyAdmitsCap passes; destroy leaves the database reachable on the next create with the same key."
+  >
+    Order inside the create path: admission (quota, in the same transaction as the
+    storage-row insert, plan 08's shape) → `Ensure` → put the DSN into the spec's
+    secrets → the normal sandbox create. An Ensure failure fails the request cleanly
+    — nothing was created yet. Sandbox destroy touches none of this. The 429 body
+    reuses plan 08's quota error shape with a distinct code.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: databases you pay for and cannot explain"
+    check="hack/storage-orphans.sh reports zero orphans after a full conformance run, and correctly reports one after you create a database by hand with the qs- prefix."
+  >
+    When live tests crash mid-run they strand remote databases — that is the failure
+    mode to rehearse, not avoid. The audit script lists vendor databases with the
+    `qs-` prefix, lists store rows, and prints both set differences. Plant an orphan
+    deliberately to prove the script sees it. If orphans recur in normal operation,
+    the bug is in Ensure's crash-window ordering — the row was written before the
+    remote resource existed.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Pure unit tests (in `make test`):
+
+- Conformance suite against the fake: `TestEnsureIsIdempotent`,
+  `TestEnsureConcurrentSameRefYieldsOne`, `TestDeleteTwiceIsNil`,
+  `TestListSeesOnlyTenant`.
+- `TestRemoteNameStableAndValid` — deterministic, both vendors' constraints,
+  table-driven.
+- `TestEnsureAfterPartialFailure` — the fake injects a crash between remote create
+  and local record; the retried Ensure converges to one database.
+- `TestStorageQuotaRaceOnlyAdmitsCap` — plan 08's race shape for `max_databases`.
+- `TestDSNIsRedacted` — the DSN rides the `Secret` type through logs and listings.
+
+Live tests (env-gated, one target per provider):
+
+- The same conformance suite against Turso (`TURSO_API_TOKEN`) and Neon
+  (`NEON_API_KEY`), each ending with a connect-and-`SELECT 1` through the returned
+  DSN, plus full cleanup.
+
+Scripts:
+
+- `hack/storage-orphans.sh` exits 0 with zero orphans after a clean run and detects a
+  planted orphan.
+
+Deliberately untested: data migration between providers, backup/restore, credential
+rotation, connection pooling behavior under load, vendor rate limits, and billing —
+recorded so they are debts, not surprises.
+
+## Solo-developer tradeoffs
+
+A commercial broker meters usage for billing, rotates credentials automatically,
+offers regions and size tiers, and runs the orphan sweep as a reconciler with alerts
+rather than a script run by hand. This plan keeps the part that generalizes — the
+provisioner contract, idempotent Ensure, conformance across vendors, tenant scoping —
+and accepts manual sweeps, single region, and fetch-don't-store credentials because
+one developer's blast radius is one bill. The deeper simplification to make knowingly:
+no "agent" entity. If agents later accumulate more platform state than a DSN, that is
+the moment to introduce one, with this plan's (tenant, key) refs migrating into it.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="Turso Platform API"
+    href="https://docs.turso.tech/api-reference/introduction"
+  >
+    The management API this plan's adapter drives — databases, per-database auth
+    tokens, and the org/group vocabulary the adapter must map onto refs.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Neon API reference"
+    href="https://neon.tech/docs/reference/api-reference"
+  >
+    Projects, branches, and connection URIs — the raw material for the
+    ref-mapping decision in the Neon hint.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Branching — Neon documentation"
+    href="https://neon.tech/docs/introduction/branching"
+  >
+    What Neon branches actually are (copy-on-write at the storage layer) — needed to
+    evaluate the project-per-ref vs branch-per-key mapping honestly.
+  </Resource>
+  <Resource
+    kind="article"
+    title="The Twelve-Factor App — Backing services"
+    href="https://12factor.net/backing-services"
+  >
+    The attached-resource rule that makes provider swapping possible: the workload
+    sees a DSN, never a vendor.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Designing robust and predictable APIs with idempotency"
+    href="https://stripe.com/blog/idempotency"
+    by="Stripe"
+  >
+    The canonical treatment of retry-safe mutation against remote systems — Ensure's
+    semantics, argued from the payments domain where duplicates cost money.
+  </Resource>
+</Resources>

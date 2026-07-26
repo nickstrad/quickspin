@@ -55,7 +55,11 @@ Repository-wide commands, all from the root:
 
 | Command | What it does |
 | --- | --- |
-| `make test` | every Go test in the module |
+| `make test` | every Go test in the module; needs no Docker |
+| `make test-docker` | the live Docker suite and CLI smoke against the dedicated test VM |
+| `make test-docker-clean` | removes managed containers a failed live run left behind |
+| `make test-docker-setup` | creates the dedicated test VM without running a test |
+| `make test-docker-teardown` | deletes the dedicated test VM |
 | `make fmt` | gofmt; must leave nothing to change |
 | `make vet` | `go vet`; must be clean before a change is done |
 | `make build` | builds the CLI into `bin/` |
@@ -74,10 +78,21 @@ Repository-wide commands, all from the root:
   watches the list it was given, not the directory.
 </Callout>
 
-Plan 02 introduces a second suite: daemon-free unit tests stay in `make test`, while
-tests that need the Lima Docker socket run separately under `make test-docker`. Keeping
-them apart is what lets the fast loop above stay fast, and lets `make test` work on a
-machine with no Docker at all.
+There are two suites. Daemon-free tests — pure helpers, the Docker adapter against an
+`httptest.Server`, and consumers driven by `runtimetest.Fake` — stay in `make test`, which
+works on a machine with no Docker at all and reports the live suite as skipped. Tests that
+need a real daemon run under `make test-docker`, which owns a dedicated
+`quickspin-runtime-test` Lima VM, passes its forwarded socket as `DOCKER_HOST`, and never
+touches your active Docker context or the development `quickspin` VM. Keeping them apart
+is what lets the fast loop above stay fast.
+
+`make test-docker` refuses to start if that VM already holds Quickspin containers: on a
+daemon only tests use, leftovers can only mean a previous run leaked, and cleaning them
+silently would erase the signal. `make test-docker-clean` is the explicit remedy. The
+rules behind both suites live in
+[`reference/runtime-backend-testing.mdx`](reference/runtime-backend-testing.mdx).
+
+`make test-docker` needs `limactl`, `docker`, `go`, and `jq`.
 
 ## Plans
 
@@ -105,7 +120,10 @@ Plans 01–12 build the platform incrementally; 13–14 are isolation deep dives
 run in parallel after their stated dependencies; 15–18 are the production track that
 takes the platform to live cloud hosts; 19–21 are the compute track that makes
 capacity a first-class subsystem — pools and the capacity admin surface, then one
-plan per new compute approach (Firecracker on cloud VMs; Kubernetes + Kata).
+plan per new compute approach (Firecracker on cloud VMs; Kubernetes + Kata); 22–23
+are the agent-workflow track that turns the platform toward its coding-agent
+customers — PR-capable sandboxes with secret injection, then brokered per-agent
+persistent storage.
 
 1. [`01-linux-lab-environment.mdx`](plans/open/01-linux-lab-environment.mdx) — Lima Linux
    VM, Docker socket, Go cross-compilation, environment validation script.
@@ -153,6 +171,12 @@ plan per new compute approach (Firecracker on cloud VMs; Kubernetes + Kata).
 21. [`21-kubernetes-kata-backend.mdx`](plans/open/21-kubernetes-kata-backend.mdx) —
     deep dive: Kata Containers pods on Kubernetes as a third `Runtime` backend,
     with capacity delegated to the cluster.
+22. [`22-git-capable-sandboxes-secrets.mdx`](plans/open/22-git-capable-sandboxes-secrets.mdx)
+    — dev image with git/gh, file-based secret injection with redaction, and a typed
+    git operations layer (clone/commit/push/PR) over `Exec`.
+23. [`23-agent-storage-provisioning.mdx`](plans/open/23-agent-storage-provisioning.mdx)
+    — per-agent persistent databases behind a `StorageProvisioner` interface: Turso
+    and Neon adapters, a shared conformance suite, tenant-scoped keys and quotas.
 
 Ordering: the spine is 01 → 02 → 03 → 04 → 05 → 06 → 07 and must be sequential (each
 extends the same interfaces). After 07, work can proceed in parallel batches: &#123;08&#125;
@@ -162,8 +186,11 @@ everything after 01 and can be slotted anywhere as a change of pace. The product
 tail 16 → 17 → 18 is sequential and needs 12, 14, and 15 complete. The compute track
 is 19 → &#123;20, 21&#125;: 19 needs 17 and 18, then 20 and 21 are mutually independent —
 and 21's runtime-backend half (tasks 1–4) needs only 07, so it can run in parallel
-with 14–18 as a second deep dive before its pool integration lands. Each plan's
-`Depends on:` header is authoritative where this summary is coarse.
+with 14–18 as a second deep dive before its pool integration lands. The
+agent-workflow track: 22 needs only 03 and 04, so it can slot in any time after the
+spine's filesystem work (12 is where it pays off, and 07/09 later expose its git
+layer); 23 needs 05, 08, and 22. Each plan's `Depends on:` header is authoritative
+where this summary is coarse.
 
 ## Reference
 
