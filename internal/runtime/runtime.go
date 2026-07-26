@@ -25,9 +25,9 @@ const (
 )
 
 type Info struct {
-	ID        string
-	State     State
-	CreatedAt time.Time
+	ID        string    `json:"id" yaml:"id"`
+	State     State     `json:"state" yaml:"state"`
+	CreatedAt time.Time `json:"created_at" yaml:"created_at"`
 }
 
 func NewInfo(id string, state State) Info {
