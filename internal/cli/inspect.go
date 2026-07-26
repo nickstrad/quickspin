@@ -12,6 +12,8 @@ func (app *application) newInspectCommand() *cobra.Command {
 		Short: "Inspect a sandbox",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			app.logCommand(cmd, "sandboxID", args[0])
+
 			info, err := app.runtime.Inspect(cmd.Context(), args[0])
 			if err != nil {
 				return fmt.Errorf("inspect sandbox %q: %w", args[0], err)

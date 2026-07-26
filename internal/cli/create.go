@@ -16,6 +16,8 @@ func (app *application) newCreateCommand() *cobra.Command {
 		Short: "Create a sandbox",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			app.logCommand(cmd, "image", args[0])
+
 			environment, err := parseEnvironment(env)
 			if err != nil {
 				return err

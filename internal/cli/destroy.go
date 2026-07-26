@@ -17,6 +17,8 @@ func (app *application) newDestroyCommand() *cobra.Command {
 		Short: "Destroy a sandbox",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			app.logCommand(cmd, "sandboxID", args[0])
+
 			if err := app.runtime.Destroy(cmd.Context(), args[0]); err != nil {
 				return fmt.Errorf("destroy sandbox %q: %w", args[0], err)
 			}

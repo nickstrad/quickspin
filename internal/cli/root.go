@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"fmt"
+	"log/slog"
+	"strings"
+
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/spf13/cobra"
 )
@@ -8,15 +12,26 @@ import (
 type application struct {
 	runtime  runtime.Runtime
 	renderer renderer
+	logger   *slog.Logger
 }
 
 // NewCommand builds the CLI around the backend-neutral runtime contract.
-func NewCommand(rt runtime.Runtime) *cobra.Command {
+// logLevel must also back the supplied logger's handler so the persistent flag
+// can change every child logger that shares that handler.
+func NewCommand(rt runtime.Runtime, logger *slog.Logger, logLevel *slog.LevelVar) *cobra.Command {
+	if logger == nil {
+		panic("cli.NewCommand: logger is required")
+	}
+	if logLevel == nil {
+		panic("cli.NewCommand: log level is required")
+	}
+
 	app := &application{
 		runtime: rt,
 		renderer: renderer{
 			format: outputTable,
 		},
+		logger: logger,
 	}
 
 	cmd := &cobra.Command{
@@ -27,6 +42,11 @@ func NewCommand(rt runtime.Runtime) *cobra.Command {
 		Args:          cobra.NoArgs,
 		RunE:          showHelp,
 	}
+	cmd.PersistentFlags().Var(
+		logLevelFlag{level: logLevel},
+		"log-level",
+		"log level: debug, info, warn, or error",
+	)
 	cmd.PersistentFlags().VarP(
 		&app.renderer.format,
 		"output",
@@ -37,6 +57,40 @@ func NewCommand(rt runtime.Runtime) *cobra.Command {
 	cmd.AddCommand(app.newSandboxCommand())
 
 	return cmd
+}
+
+type logLevelFlag struct {
+	level *slog.LevelVar
+}
+
+func (f logLevelFlag) Set(value string) error {
+	var level slog.Level
+	switch strings.ToLower(value) {
+	case "debug":
+		level = slog.LevelDebug
+	case "info":
+		level = slog.LevelInfo
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		return fmt.Errorf("invalid log level %q: expected debug, info, warn, or error", value)
+	}
+	f.level.Set(level)
+	return nil
+}
+
+func (f logLevelFlag) String() string {
+	return f.level.Level().String()
+}
+
+func (logLevelFlag) Type() string {
+	return "level"
+}
+
+func (app *application) logCommand(cmd *cobra.Command, attrs ...any) {
+	app.logger.DebugContext(cmd.Context(), "executing "+cmd.Name()+" command", attrs...)
 }
 
 func showHelp(cmd *cobra.Command, _ []string) error {

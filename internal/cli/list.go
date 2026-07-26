@@ -15,6 +15,8 @@ func (app *application) newListCommand() *cobra.Command {
 		Short: "List sandboxes",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			app.logCommand(cmd)
+
 			infos, err := app.runtime.List(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("list sandboxes: %w", err)

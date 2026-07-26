@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -13,11 +14,16 @@ import (
 
 type DockerRuntime struct {
 	Client *client.Client
+	logger *slog.Logger
 }
 
 var _ Runtime = (*DockerRuntime)(nil)
 
-func NewDockerRuntime(c *client.Client) (*DockerRuntime, error) {
+func NewDockerRuntime(c *client.Client, logger *slog.Logger) (*DockerRuntime, error) {
+	if logger == nil {
+		return nil, E("runtime.NewDockerRuntime", "logger is required", nil)
+	}
+
 	if c == nil {
 		fromEnv, err := client.New(client.FromEnv)
 		if err != nil {
@@ -28,6 +34,7 @@ func NewDockerRuntime(c *client.Client) (*DockerRuntime, error) {
 
 	return &DockerRuntime{
 		Client: c,
+		logger: logger,
 	}, nil
 }
 
@@ -71,6 +78,8 @@ func classifyNotFound(op, message string, sentinel, err error) error {
 func (d *DockerRuntime) List(ctx context.Context) ([]Info, error) {
 	const op = "runtime.DockerRuntime.List"
 
+	d.logger.DebugContext(ctx, "listing managed sandboxes")
+
 	result, err := d.Client.ContainerList(ctx, client.ContainerListOptions{
 		All:     true,
 		Filters: labelFilter(managedMarkerLabels()),
@@ -84,19 +93,23 @@ func (d *DockerRuntime) List(ctx context.Context) ([]Info, error) {
 		// A container we own but cannot name is skipped rather than fatal: one
 		// corrupt id label would otherwise hide every healthy sandbox, and the
 		// bad container is unreachable through the CLI precisely because it
-		// cannot be listed. Worth a log line once the constructor takes a logger.
+		// cannot be listed. The warning keeps that otherwise silent skip visible.
 		id, ok := managedSandboxID(c.Labels)
 		if !ok {
+			d.logger.WarnContext(ctx, "skipping managed container with invalid sandbox label", "containerID", c.ID)
 			continue
 		}
 		infos = append(infos, NewInfo(id, stateFromContainerState(string(c.State)), createdAtFromUnix(c.Created)))
 	}
 
+	d.logger.DebugContext(ctx, "listed managed sandboxes", "count", len(infos))
 	return infos, nil
 }
 
 func (d *DockerRuntime) Create(ctx context.Context, spec Spec) (Info, error) {
 	const op = "runtime.DockerRuntime.Create"
+
+	d.logger.DebugContext(ctx, "creating sandbox", "image", spec.Image)
 
 	if err := d.pullImage(ctx, spec.Image); err != nil {
 		return Info{}, Wrap(op, "", err)
@@ -115,6 +128,13 @@ func (d *DockerRuntime) Create(ctx context.Context, spec Spec) (Info, error) {
 		return Info{}, classifyNotFound(op, fmt.Sprintf("creating container from image %s", spec.Image), ErrImageMissing, err)
 	}
 
+	logger := d.logger.With(
+		"sandboxID", platformID,
+		"containerID", created.ID,
+		"image", spec.Image,
+	)
+	logger.DebugContext(ctx, "created container")
+
 	if _, err := d.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return Info{}, d.cleanupFailed(ctx, op, platformID, created.ID,
 			E(op, fmt.Sprintf("starting container %s for sandbox %s", created.ID, platformID), err))
@@ -127,7 +147,9 @@ func (d *DockerRuntime) Create(ctx context.Context, spec Spec) (Info, error) {
 	// CreatedAt is the local clock rather than the daemon's: the only handle in
 	// hand is the container id, and ContainerCreateResult carries no timestamp.
 	// The two differ by one round trip, and List and Inspect report the daemon's.
-	return NewInfo(platformID, StateRunning, time.Now().UTC()), nil
+	info := NewInfo(platformID, StateRunning, time.Now().UTC())
+	logger.InfoContext(ctx, "sandbox created", "state", info.State)
+	return info, nil
 }
 
 // cleanupFailed removes what an operation already made and returns the error to
@@ -151,6 +173,9 @@ func (d *DockerRuntime) cleanupFailed(ctx context.Context, op, platformID, conta
 func (d *DockerRuntime) pullImage(ctx context.Context, image string) error {
 	const op = "runtime.DockerRuntime.pullImage"
 
+	logger := d.logger.With("image", image)
+	logger.DebugContext(ctx, "pulling image")
+
 	resp, err := d.Client.ImagePull(ctx, image, client.ImagePullOptions{})
 	if err != nil {
 		return classifyNotFound(op, fmt.Sprintf("requesting pull of %s", image), ErrImageMissing, err)
@@ -161,6 +186,7 @@ func (d *DockerRuntime) pullImage(ctx context.Context, image string) error {
 		return classifyNotFound(op, fmt.Sprintf("pulling %s", image), ErrImageMissing, err)
 	}
 
+	logger.DebugContext(ctx, "pulled image")
 	return nil
 }
 
@@ -186,6 +212,7 @@ func (d *DockerRuntime) Destroy(ctx context.Context, platformID string) error {
 	// Absent is success. A malformed id is not absent — it is a caller bug — so
 	// ErrInvalidSandboxID still surfaces through the branch below.
 	if errors.Is(err, ErrNotFound) {
+		d.logger.DebugContext(ctx, "sandbox already absent", "sandboxID", platformID)
 		return nil
 	}
 	if err != nil {
@@ -196,6 +223,10 @@ func (d *DockerRuntime) Destroy(ctx context.Context, platformID string) error {
 		return Wrap(op, fmt.Sprintf("destroying sandbox %s", platformID), err)
 	}
 
+	d.logger.InfoContext(ctx, "sandbox destroyed",
+		"sandboxID", platformID,
+		"containerID", c.ID,
+	)
 	return nil
 }
 
@@ -210,7 +241,13 @@ func (d *DockerRuntime) Inspect(ctx context.Context, platformID string) (Info, e
 		return Info{}, Wrap(op, "", err)
 	}
 
-	return NewInfo(platformID, stateFromContainerState(string(c.State)), createdAtFromUnix(c.Created)), nil
+	info := NewInfo(platformID, stateFromContainerState(string(c.State)), createdAtFromUnix(c.Created))
+	d.logger.DebugContext(ctx, "inspected sandbox",
+		"sandboxID", platformID,
+		"containerID", c.ID,
+		"state", info.State,
+	)
+	return info, nil
 }
 
 func (d *DockerRuntime) getContainerByPlatformID(ctx context.Context, platformID string) (container.Summary, error) {

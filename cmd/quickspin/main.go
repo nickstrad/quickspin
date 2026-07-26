@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,20 +12,32 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	logLevel := new(slog.LevelVar)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: logLevel,
+	}))
+
+	if err := run(logger, logLevel); err != nil {
+		logger.Error("quickspin failed", "component", "quickspin", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(logger *slog.Logger, logLevel *slog.LevelVar) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	rt, err := runtime.NewDockerRuntime(nil)
+	rt, err := runtime.NewDockerRuntime(nil, logger.With(
+		"component", "runtime",
+		"backend", "docker",
+	))
 	if err != nil {
 		return err
 	}
 
-	return cli.NewCommand(rt).ExecuteContext(ctx)
+	return cli.NewCommand(
+		rt,
+		logger.With("component", "cli"),
+		logLevel,
+	).ExecuteContext(ctx)
 }
