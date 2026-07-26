@@ -37,3 +37,9 @@ go.work.sum
 # Local documentation reader
 /docs/node_modules/
 /docs/dist/
+
+# Agent workflow scratch, written at the worktree root by the do-next-plan and
+# judge-branch skills. Per-branch working notes, not project documentation —
+# what they conclude belongs in docs/ or a commit message.
+/CHANGE_SUMMARY.md
+/JUDGEMENT.md

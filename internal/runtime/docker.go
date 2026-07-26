@@ -152,13 +152,29 @@ func (d *DockerRuntime) Create(ctx context.Context, spec Spec) (Info, error) {
 	return info, nil
 }
 
+// cleanupTimeout bounds the detached rollback in cleanupFailed. It is generous
+// because a force-remove of a container that is starting can take a moment, and
+// short enough that a wedged daemon does not hang the caller indefinitely.
+const cleanupTimeout = 30 * time.Second
+
 // cleanupFailed removes what an operation already made and returns the error to
 // hand back. It addresses the container by id rather than by label because the
 // caller never received a sandbox id, so the container id is the only handle
 // anyone still holds. A cleanup failure is joined onto cause rather than
 // replacing it: cause explains the failure, the join reports the leak.
+//
+// The removal runs on a context detached from the caller's. WithoutCancel keeps
+// the caller's values — trace ids, log context — while shedding its
+// cancellation, because rolling back with an already-cancelled context is a
+// guaranteed leak: the caller cancelling mid-create is exactly when there is
+// something to clean up. The fresh deadline is what keeps a detached call from
+// outliving the process. This rule belongs to every backend, not just Docker;
+// see docs/reference/runtime-backend-testing.mdx.
 func (d *DockerRuntime) cleanupFailed(ctx context.Context, op, platformID, containerID string, cause error) error {
-	if err := d.removeContainer(ctx, containerID); err != nil {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+
+	if err := d.removeContainer(cleanupCtx, containerID); err != nil {
 		return Wrap(op,
 			fmt.Sprintf("sandbox %s leaked container %s", platformID, containerID),
 			errors.Join(cause, err))

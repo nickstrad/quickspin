@@ -26,9 +26,36 @@ build-linux: ## Build the linux binary into bin/
 run: ## Run the app (pass args with ARGS="...")
 	go run $(PKG) $(ARGS)
 
+# The dedicated live-test VM. It is a different instance from VM_NAME on
+# purpose: the live suite sweeps Quickspin containers, and the development VM
+# must be structurally out of reach. hack/test-runtime-docker.sh refuses to run
+# if these two ever name the same instance.
+TEST_VM_NAME ?= quickspin-runtime-test
+export TEST_VM_NAME
+
 .PHONY: test
-test: ## Run all tests
+test: ## Run all tests (no Docker needed; the live suite reports itself skipped)
 	go test ./...
+
+.PHONY: test-docker
+test-docker: ## Run the live Docker suite and CLI smoke against the dedicated test VM
+	./hack/test-runtime-docker.sh
+
+.PHONY: test-docker-clean
+test-docker-clean: ## Remove managed containers a failed live run left in the test VM
+	CLEAN_ONLY=1 ./hack/test-runtime-docker.sh
+
+# Both go through the script rather than calling limactl here. The script owns the
+# ownership marker that authorizes its container sweep, and it refuses to act when
+# TEST_VM_NAME equals VM_NAME — a recipe that deleted the instance directly would
+# be the one path with no such guard.
+.PHONY: test-docker-setup
+test-docker-setup: ## Create the dedicated test VM without running any test
+	SETUP_ONLY=1 ./hack/test-runtime-docker.sh
+
+.PHONY: test-docker-teardown
+test-docker-teardown: ## Delete the dedicated test VM
+	TEARDOWN_ONLY=1 ./hack/test-runtime-docker.sh
 
 .PHONY: fmt
 fmt: ## Format all Go code

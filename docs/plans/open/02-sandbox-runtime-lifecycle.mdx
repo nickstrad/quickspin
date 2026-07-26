@@ -425,8 +425,15 @@ developer, you have in vast surplus.
     The integration tests from Definition of done, hitting the real daemon.
   </Task>
   <Task title="Add make test-docker">
-    Daemon-dependent tests run under a separate build tag or environment gate so
-    `make test` stays fast and works without Docker.
+    Daemon-dependent tests run under an environment gate so `make test` stays fast and
+    works without Docker.
+
+    Superseded in part by the
+    [Docker runtime test one-off](../../docker-runtime-testing-plan.mdx): `make
+    test-docker` now targets a dedicated `quickspin-runtime-test` Lima VM rather than
+    the plan 01 socket, and the gate is `QUICKSPIN_TEST_DOCKER=1` rather than a build
+    tag. The requirement below — that `make test` stay fast and Docker-free — is
+    unchanged.
   </Task>
 </TaskList>
 

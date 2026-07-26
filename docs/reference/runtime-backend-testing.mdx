@@ -75,6 +75,13 @@ A small stateful runtime may test the conformance helper itself. That proves the
 recognizes compliant and broken behavior; it does not count as a backend conformance
 run.
 
+`RunConformance` takes `runtimetest.TB` — the four methods it uses — rather than
+`*testing.T`. A live backend passes its `*testing.T` unchanged, and the helper's own tests
+pass a recorder, which is the only way to assert that the suite *fails* for a
+non-compliant runtime without failing the test that asserts it. `testing.TB` cannot serve:
+it is sealed by an unexported method. Declaring the interface also keeps package
+`runtimetest` from importing `testing`.
+
 ## The core runtime contract
 
 The shared suite follows `runtime.Runtime`, not the capabilities of its first backend.
@@ -89,6 +96,12 @@ Its clauses are intentionally small:
 | Repeat destroy | Destroying an absent sandbox succeeds. |
 | Unknown ID | Inspect returns `ErrNotFound`; destroy still succeeds. |
 | Malformed ID | `runtime.ErrInvalidSandboxID` is returned before backend lookup. There is exactly one such sentinel; the suite imports it, and no backend mints its own. |
+
+The unknown-ID clauses are discharged with the id the suite just destroyed, not a minted
+one. A backend-neutral suite cannot mint a well-formed id without encoding the private
+format of the package it tests, and the tempting shortcut — take a real id and edit a
+character — quietly becomes a *malformed* id under any format with a checksum or a fixed
+suffix, turning a shared clause into a phantom violation no backend author can fix.
 
 “Becomes observable” is deliberate. Docker usually answers immediately; Kubernetes
 objects and cloud-mediated runtimes can be eventually consistent. The suite polls with a
@@ -202,6 +215,21 @@ thing that is broken. A Docker container with a malformed Quickspin ID is skippe
 rules apply to Firecracker work directories/processes/tap devices and Kubernetes labels
 or namespaces.
 
+The baseline snapshot and the final mop belong in `TestMain`, not in a test. Inside one
+test they are wrong in both directions: the baseline would see a sibling live test's
+sandbox and refuse a clean environment, and the mop would run while later tests still had
+resources in flight. `TestMain` also has no `*testing.T`, which is the right constraint —
+a harness that cannot establish the environment's state must stop the run rather than fail
+one test.
+
+<Callout tone="warning" title="Cleanups cannot use t.Context()">
+  The testing package cancels `t.Context()` immediately before cleanup functions run, so a
+  cleanup that reaches for it fails every single time there is something to clean up —
+  and the failure reads as a broken daemon rather than a broken test. Cleanup and
+  `TestMain` work derive their own bounded context from `context.Background()`. This is
+  the same rule as the rollback context below, arriving from a different direction.
+</Callout>
+
 ### Cleanup order
 
 Live tests use two cleanup layers:
@@ -264,6 +292,19 @@ orchestration cost.
 Never infer test ownership from a broad name prefix immediately before deletion. The
 harness should know whether it created the exact VM, namespace, server, or directory and
 refuse destructive cleanup when that proof is absent.
+
+The Docker harness makes that proof a marker file it writes into the instance's own
+directory at creation time. A name is a guess about who owns something; a file the harness
+placed there is knowledge, and only knowledge authorizes a sweep. An environment that
+exists without a marker is refused rather than adopted — adoption would make the check
+decorative. Future harnesses need the equivalent: a namespace annotation, a tag on a cloud
+resource, a file beside the work directory.
+
+A refusal has to name an escape that does not pass back through the refusal. The harness's
+own teardown is dispatched below the marker check, so advising it would have looped the
+user into the same message; the message names the underlying `limactl delete` instead.
+Whenever a guard sits above the command that would resolve it, the remediation text has to
+reach outside the harness.
 
 The Docker harness passes `DOCKER_HOST` directly rather than switching the global Docker
 context. Future harnesses should follow the same rule: connection configuration belongs
