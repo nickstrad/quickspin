@@ -90,11 +90,21 @@ not by itself authorize implementation.
 - [`plans/AGENTS.md`](plans/AGENTS.md) defines the required structure for every plan,
   including the verifiable definition-of-done requirement.
 
+### One-off implementation work
+
+[`Docker runtime test foundation`](docker-runtime-testing-plan.mdx) is an unnumbered,
+bounded coding plan for daemon-free Docker adapter coverage, shared runtime conformance,
+live tests through a reusable or fresh Lima VM, and one compiled-CLI lifecycle smoke.
+It is intentionally outside the platform learning sequence: implementing it strengthens
+the test seam used by later runtime plans without adding a new platform capability.
+
 ### The platform learning path (open)
 
 Plans 01–12 build the platform incrementally; 13–14 are isolation deep dives that can
 run in parallel after their stated dependencies; 15–18 are the production track that
-takes the platform to live cloud hosts.
+takes the platform to live cloud hosts; 19–21 are the compute track that makes
+capacity a first-class subsystem — pools and the capacity admin surface, then one
+plan per new compute approach (Firecracker on cloud VMs; Kubernetes + Kata).
 
 1. [`01-linux-lab-environment.mdx`](plans/open/01-linux-lab-environment.mdx) — Lima Linux
    VM, Docker socket, Go cross-compilation, environment validation script.
@@ -133,13 +143,25 @@ takes the platform to live cloud hosts.
 18. [`18-host-provisioning-observability.mdx`](plans/open/18-host-provisioning-observability.mdx)
     — hosts created/retired via the Hetzner API, Prometheus metrics, Grafana
     dashboard and alerts, orphan-server cost safety.
+19. [`19-compute-pools-capacity-admin.mdx`](plans/open/19-compute-pools-capacity-admin.mdx)
+    — compute pools as first-class data, the provider registry, `quickspin admin
+    pool` scale/adopt verbs, pool-aware placement.
+20. [`20-ec2-digitalocean-providers.mdx`](plans/open/20-ec2-digitalocean-providers.mdx)
+    — EC2 and DigitalOcean provider adapters for Firecracker pools, a shared
+    provider conformance suite, the `/dev/kvm` preflight.
+21. [`21-kubernetes-kata-backend.mdx`](plans/open/21-kubernetes-kata-backend.mdx) —
+    deep dive: Kata Containers pods on Kubernetes as a third `Runtime` backend,
+    with capacity delegated to the cluster.
 
 Ordering: the spine is 01 → 02 → 03 → 04 → 05 → 06 → 07 and must be sequential (each
 extends the same interfaces). After 07, work can proceed in parallel batches: &#123;08&#125;
 alongside finishing touches on 07; then &#123;09 → 10, 11, 14, 15&#125; are mutually independent
 (15 needs 08; 14 and 11 need only 07); 12 needs 09 and 11; 13 is independent of
 everything after 01 and can be slotted anywhere as a change of pace. The production
-tail 16 → 17 → 18 is sequential and needs 12, 14, and 15 complete. Each plan's
+tail 16 → 17 → 18 is sequential and needs 12, 14, and 15 complete. The compute track
+is 19 → &#123;20, 21&#125;: 19 needs 17 and 18, then 20 and 21 are mutually independent —
+and 21's runtime-backend half (tasks 1–4) needs only 07, so it can run in parallel
+with 14–18 as a second deep dive before its pool integration lands. Each plan's
 `Depends on:` header is authoritative where this summary is coarse.
 
 ## Reference
@@ -157,12 +179,15 @@ Current reference documents:
 - [`reference/code-structure-and-testing.mdx`](reference/code-structure-and-testing.mdx)
   proposes separating decisions from Docker/HTTP plumbing, when to extract a pure
   function, what to test at each layer, and which comments earn their place.
+- [`reference/runtime-backend-testing.mdx`](reference/runtime-backend-testing.mdx)
+  defines the reusable test layers, core runtime conformance contract, live harness
+  responsibilities, and the checklist every later runtime plan should extend.
 - [`reference/concurrency-and-state.mdx`](reference/concurrency-and-state.mdx) proposes how
   the future control plane and workers should guard shared state around slow Docker I/O —
   the four helper categories, the upsert pattern for read-modify-write with I/O between,
   and how to race-test them.
 
-These three are adapted from a sibling Go learning project and describe conventions to
-adopt, not current behavior. They are intended as a lens for a second pass over the plans.
+These references describe conventions to adopt, not current behavior. They are intended
+as a lens for a second pass over the plans.
 
 Update this index whenever documentation is added, moved, or removed.

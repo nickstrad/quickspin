@@ -1,0 +1,404 @@
+# 19 — Compute pools and the capacity admin surface
+
+Depends on: 17, 18.
+
+## Summary
+
+Promote compute from an implementation detail to a first-class subsystem. This plan
+will introduce `internal/compute`: a `pools` table where every host belongs to a named
+pool, a provider **registry** so a pool names which cloud realizes it, and an admin
+surface — `quickspin admin pool create|list|scale|delete` and
+`quickspin admin host adopt` — that is the one way capacity enters or leaves the
+platform. `scale` records a desired host count that the fleet reconciler realizes
+through the pool's provider; `adopt` is the "I just gave the platform more EC2
+capacity" verb — it registers a machine that was provisioned outside Quickspin
+(cloud-console knob-twisting included) so placement can use it. Plan 18's
+Hetzner-only fleet logic becomes the first pool rather than a special case; plans 20
+and 21 plug new providers and a Kubernetes-shaped pool into the seams built here.
+
+<KeyPoint label="Why this plan matters">
+  Until now "where do sandboxes run" was one hard-coded fleet. After this plan it is
+  data: a pool row names a provider, a backend, an arch, and a desired size, and every
+  later compute decision — placement, scaling, adoption, retirement — reads that row.
+  This is the difference between "we threw Firecracker in at the end" and a platform
+  whose compute story has a front door.
+</KeyPoint>
+
+## Industry context
+
+Every serious platform separates *what runs sandboxes* from *how that capacity is
+obtained*. EC2 Auto Scaling groups, Kubernetes node pools, Nomad node classes, and
+Fly's regions are all the same object: a named group of interchangeable machines with
+a desired count, a template for making more, and membership the scheduler can filter
+on. E2B and Modal describe their fleets the same way in engineering posts — pools per
+instance type and region, scaled by changing a number, not by SSHing anywhere. The
+second pattern copied here is **adoption**: Kubernetes lets a node join by presenting
+credentials regardless of who created the VM, which is what lets managed node groups,
+Karpenter, and hand-built machines coexist in one cluster. Your `host adopt` is that
+move at minimum size — the platform does not need to have *created* capacity to *use*
+it, it needs the capacity to be registered, labeled, and heartbeating.
+
+<Compare>
+  <CompareItem eyebrow="What you build" title="Pools as data, one admin front door">
+    A pool row names provider, backend, arch, and target size. Scaling is an UPDATE
+    the reconciler notices. Externally created machines enter through `adopt` and are
+    indistinguishable from provisioned ones once registered.
+  </CompareItem>
+  <CompareItem eyebrow="The anti-pattern" title="Capacity as tribal knowledge">
+    Hosts hard-wired to one provider, scale-up as a runbook of console clicks plus
+    SSH, and a placement function that assumes every host is the same shape. Adding a
+    second cloud then means rewriting placement — the exact coupling plan 02's
+    interface avoided one layer down.
+  </CompareItem>
+</Compare>
+
+## What you'll learn
+
+- The registry pattern for pluggable backends: a `map[string]provider.Provider`
+  populated at startup, looked up by name from data — and why the registry is
+  constructed in `main`, not `init()`.
+- Desired-count reconciliation: `target_size` vs observed ready hosts as one more
+  desired/actual pair for the plan 18 reconciler, and why scale-*down* must drain
+  before delete while scale-*up* is fire-and-forget.
+- Adoption as a trust decision: what the platform must verify before treating an
+  unknown machine as capacity (token possession, arch/backend claims, a first
+  heartbeat) and what it deliberately does not verify.
+- Capacity accounting as pure functions over rows: pool headroom, pool pressure, and
+  the `admin pool list` view as a query, not a cache.
+- Schema evolution on a live table: adding `pool_id` to `hosts` with a backfill
+  migration, the first migration that rewrites existing rows rather than creating
+  fresh tables.
+
+### Concept: a pool is a desired state, not a group chat
+
+The pools table stores intent: "pool `fc-hetzner` should have 3 ready hosts of shape
+X." Nothing about that row makes machines exist. The fleet reconciler — the same loop
+plan 18 built — gains one comparison per pool: count ready+provisioning hosts, compare
+to `target_size`, and issue provider creates or drain-then-deletes to close the gap.
+That framing keeps `scale` trivially safe: the admin verb writes a number and returns;
+all cloud calls happen in the reconciler with its existing crash-safety, labels, and
+orphan reaping. It also makes the scale-down policy an explicit decision: the
+reconciler picks victims (fewest running sandboxes first), drains them, and only
+deletes a host that is drained *and* empty — the plan 17/18 primitives composed, not
+new machinery.
+
+<Figure caption="One admin surface, two ways capacity arrives: the reconciler realizes target_size through the pool's provider, while adopt registers machines created elsewhere. Placement only ever sees registered hosts.">
+  <svg viewBox="0 0 640 250" role="img" aria-label="Pools drive the reconciler toward target size via a provider registry, while adopt registers externally created hosts; both paths end in registered hosts used by placement">
+    <defs>
+      <marker id="arrow19" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+      <marker id="arrow19g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#caa552" />
+      </marker>
+    </defs>
+    <rect x="10" y="20" width="170" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="95" y="41" textAnchor="middle" fontSize="12" fill="#18231f">admin pool scale</text>
+    <text x="95" y="58" textAnchor="middle" fontSize="10" fill="#405049">writes target_size, returns</text>
+    <rect x="10" y="100" width="170" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="95" y="121" textAnchor="middle" fontSize="12" fill="#18231f">admin host adopt</text>
+    <text x="95" y="138" textAnchor="middle" fontSize="10" fill="#405049">external machine + token</text>
+    <rect x="250" y="20" width="170" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="335" y="41" textAnchor="middle" fontSize="12" fill="#18231f">fleet reconciler</text>
+    <text x="335" y="58" textAnchor="middle" fontSize="10" fill="#405049">ready count vs target_size</text>
+    <rect x="250" y="100" width="170" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="335" y="121" textAnchor="middle" fontSize="12" fill="#18231f">provider registry</text>
+    <text x="335" y="138" textAnchor="middle" fontSize="10" fill="#405049">hetzner · ec2 · do · none</text>
+    <rect x="480" y="60" width="150" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="555" y="81" textAnchor="middle" fontSize="12" fill="#18231f">registered hosts</text>
+    <text x="555" y="98" textAnchor="middle" fontSize="10" fill="#405049">heartbeating, pool_id set</text>
+    <line x1="180" y1="44" x2="248" y2="44" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow19)" />
+    <line x1="335" y1="68" x2="335" y2="98" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow19)" />
+    <text x="415" y="86" textAnchor="middle" fontSize="10" fill="#8f3423">create / drain+delete</text>
+    <line x1="420" y1="110" x2="478" y2="94" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow19)" />
+    <text x="452" y="118" textAnchor="middle" fontSize="10" fill="#8f3423">cloud-init join (18)</text>
+    <line x1="180" y1="124" x2="478" y2="94" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow19g)" />
+    <text x="300" y="168" textAnchor="middle" fontSize="10" fill="#7f5d43">adopt skips the provider entirely — register, then the same heartbeat path</text>
+    <rect x="20" y="192" width="600" height="44" fill="none" stroke="#405049" strokeWidth="1" strokeDasharray="6 4" />
+    <text x="320" y="211" textAnchor="middle" fontSize="10" fill="#405049">placement (plan 17) filters hosts by pool → backend → arch → headroom;</text>
+    <text x="320" y="226" textAnchor="middle" fontSize="10" fill="#405049">it never learns whether a host was provisioned or adopted</text>
+  </svg>
+</Figure>
+
+### Concept: adoption is registration without provenance
+
+"Alert the platform it has more EC2 capacity" decomposes into what the platform
+actually needs to know: an address it can reach workerd on, a token proving the admin
+authorized this machine, and the claims placement filters on (pool, arch, backend).
+`host adopt` mints the token and prints the exact workerd invocation (or a
+`cloud-init` snippet) for the operator to run on the machine; the host then joins
+through plan 17's ordinary registration path. Nothing else about the machine is
+trusted or inspected — if the operator lies about the arch, the first placed sandbox
+fails loudly, which is the honest outcome. The design consequence worth writing down:
+adopted hosts have no `provider_server_id`, so the plan 18 fleet reconciler must treat
+"no server id" as *not mine to reap or scale* — the platform uses adopted capacity but
+never bills-manages it. The `external` pool provider is a registry entry whose create
+and delete return typed errors, so a misconfigured `scale` on an adopted pool fails
+fast instead of silently doing nothing.
+
+<StudyPrompt question="Why does scale-down drain the fewest-loaded host instead of the oldest?">
+  Oldest-first is the cattle-rotation answer and right for *rollouts* (plan 18's
+  runbook). Scale-down's goal is different: shed capacity while killing as little as
+  possible. Draining the fewest-loaded host strands the fewest sandboxes waiting for
+  natural expiry, so the pool converges to the new target fastest. Note what both
+  policies share: neither ever deletes an undrained host — the policy chooses the
+  victim, the drain-then-empty guard makes any choice safe.
+</StudyPrompt>
+
+## Design and interfaces
+
+```go
+// internal/compute
+type PoolKind string
+
+const (
+    PoolKindHost       PoolKind = "host"       // workerd fleet; capacity = hosts * slots
+    PoolKindKubernetes PoolKind = "kubernetes" // plan 21: capacity delegated to a cluster
+)
+
+type Pool struct {
+    ID         string
+    Name       string   // unique; the admin-facing handle
+    Kind       PoolKind
+    Provider   string   // registry key: "hetzner", "ec2", "digitalocean", "external"
+    Backend    string   // runtime backend its hosts serve: "docker" | "firecracker" | "kata"
+    Arch       string
+    TargetSize int      // desired hosts; meaningless for kubernetes and external kinds
+    ServerType string   // provider-specific shape, opaque to the plane
+}
+```
+
+```text
+Schema: pools(id, name, kind, provider, backend, arch, target_size, server_type,
+        created_at); hosts gains pool_id (backfill migration assigns existing hosts
+        to a default pool wrapping plan 18's fleet).
+
+Provider registry: map[string]provider.Provider built in main; a pool row's
+        Provider field is looked up at reconcile time; unknown name ⇒ typed error,
+        pool marked degraded in admin pool list, never a panic.
+
+Admin surface:
+  quickspin admin pool create --name --provider --backend --arch --server-type
+  quickspin admin pool list            # per pool: target, ready, provisioning, headroom
+  quickspin admin pool scale --name --target N     # writes intent only
+  quickspin admin pool delete --name               # refuses while hosts remain
+  quickspin admin host adopt --pool --addr         # mints token, prints join command
+
+Reconciler additions (per pool, inside plan 18's loop):
+  ready+provisioning < target ⇒ provider create with pool labels
+  ready > target              ⇒ drain fewest-loaded, delete when drained+empty
+  provider == "external"      ⇒ no provider calls ever; adoption-only pool
+
+Placement (plan 17) filters pool first: Spec gains optional Pool; unset means any
+  pool whose backend matches. place() signature widens to (spec, []Pool, []Host).
+```
+
+Committed decisions: the admin verbs write intent and return — every cloud call stays
+in the reconciler; pool names are the public handle and IDs never appear in CLI
+output; provider labels gain `quickspin.pool=<name>` at create so the orphan reaper
+can attribute leaks; scale-down never deletes an undrained host even under `--force`
+(force belongs to `host delete`, not `pool scale`); autoscaling stays out — a policy
+loop writing `target_size` is the recorded natural sequel, and this plan builds
+exactly the knob it would turn.
+
+<Callout tone="warning" title="The backfill migration runs against live rows">
+  Adding `hosts.pool_id NOT NULL` fails on existing rows unless the migration creates
+  the default pool and backfills in the same transaction. Write the migration against
+  a copy of the prod schema with rows in it — the empty-database test that plan 15's
+  suite runs by default cannot catch a backfill bug.
+</Callout>
+
+## Tasks
+
+<TaskList>
+  <Task title="Add the pools schema and the hosts.pool_id backfill">
+    Migration creating `pools`, a default pool wrapping the existing fleet, and the
+    backfill; conformance-suite green on both stores.
+  </Task>
+  <Task title="Build the provider registry and the external provider">
+    Registry keyed by name, constructed in main; `external` returns typed errors from
+    create/delete; unknown-provider lookups surface as degraded pools.
+  </Task>
+  <Task title="Write the capacity accounting helpers">
+    Pure functions per the code-structure reference: pool headroom, ready/target gap,
+    and the scale-down victim ordering — table-tested before any wiring.
+  </Task>
+  <Task title="Generalize the fleet reconciler to per-pool targets">
+    Scale-up creates through the pool's provider with pool labels; scale-down
+    drains fewest-loaded and deletes only drained+empty hosts.
+  </Task>
+  <Task title="Add the admin pool verbs and host adopt">
+    The five verbs above; `adopt` mints a token and prints the join command;
+    `pool list` shows target vs ready vs provisioning per pool.
+  </Task>
+  <Task title="Make placement pool-aware">
+    `Spec.Pool` optional field through API + SDKs; `place` filters pool → backend →
+    arch → headroom; typed `no_capacity` now names the pool it failed in.
+  </Task>
+  <Task title="Write hack/validate-19.sh">
+    The live check from the definition of done, including the adopt path exercised
+    with a plain Lima-side workerd as the "external machine."
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Start with the migration and the default pool"
+    check="After migrating a database that already has hosts rows, every host has a pool_id and admin pool list shows one pool whose ready count matches the old fleet."
+  >
+    Write the migration as: create `pools`, insert the default pool (provider
+    `hetzner`, backend `firecracker`, target = current host count), then
+    `UPDATE hosts SET pool_id = ...` — all one transaction. Run it against a database
+    seeded with plan 17-era rows, not just empty. The default pool's target equalling
+    the current count is what makes the first post-migration reconcile a no-op; a
+    target of zero would drain your fleet on deploy.
+  </Hint>
+  <Hint
+    title="The registry is a map built in main, resolved at reconcile time"
+    check="A pool row naming a provider absent from the registry shows as degraded in pool list, and the reconciler logs one typed error per pass without crashing."
+  >
+    `map[string]provider.Provider` populated in `main` from configured credentials —
+    a provider with no credentials simply isn't registered, which is how the same
+    binary runs in Lima (fake or none) and prod (hetzner). Resolve at reconcile time,
+    not pool-create time: credentials can appear or vanish across restarts, and a
+    pool must survive its provider being temporarily unconfigured. The lookup miss is
+    a typed error the reconciler records on the pool, not a panic.
+  </Hint>
+  <Hint
+    title="Write the accounting and victim-ordering as pure functions first"
+    check="TestPoolGapCountsProvisioningAsArriving and TestScaleDownPicksFewestLoaded pass with no store or provider in sight."
+  >
+    The gap function must count `provisioning` hosts as arriving capacity or every
+    reconcile pass during a slow boot creates another server — the classic
+    thundering-herd bug of desired-count loops. Victim ordering: filter to ready,
+    sort by running-sandbox count then host ID for determinism. Both take slices and
+    return values; the reconciler executes what they decide.
+  </Hint>
+  <Hint
+    title="Scale-down is a two-pass convergence, and the test must show it"
+    check="TestScaleDownDrainsBeforeDelete shows pass one draining the victim and only a later pass (victim now empty) deleting it — never both in one pass."
+  >
+    Do not loop-until-converged inside one reconcile pass. Pass N drains the victim;
+    the pool is over target until the drained host empties; pass N+K deletes it. The
+    reconciler stays a level-triggered loop where each pass moves one step toward
+    target — the same property that made plan 06's reconciler crash-safe. If your
+    test converges in one pass, the reconciler is doing too much per pass.
+  </Hint>
+  <Hint
+    title="Adopt mints a token and prints instructions — it does not reach out"
+    check="admin host adopt prints a workerd invocation; running exactly that in Lima produces a ready host in the right pool, with no provider_server_id."
+  >
+    Reuse plan 17's token minting and 18's user-data template for the printed
+    snippet. The row is inserted in a `provisioning`-like state with `pool_id` set
+    and `provider_server_id` NULL; registration flips it ready as usual. Then audit
+    the plan 18 reconciler for the NULL case: an adopted host must never match the
+    vanished-server branch (`decideFleetAction` needs a third input state), or the
+    reconciler will mark every adopted host dead on its first pass.
+  </Hint>
+  <Hint
+    title="Placement widens by one filter, not a rewrite"
+    check="TestPlacementHonorsRequestedPool and TestPlacementAnyPoolMatchesBackend pass; a spec naming a missing pool fails with the typed error naming it."
+  >
+    `place(spec, pools, hosts)`: resolve the requested pool name (or all pools
+    matching the backend), then the existing host filter within the survivors. The
+    transactional capacity re-check from plan 17 is untouched — pool membership
+    narrows candidates but capacity is still enforced at the row write. The
+    `no_capacity` error gains the pool name so SDK users can tell "wrong pool name"
+    from "pool full."
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: the reconciler over-creates during scale-up"
+    check="hack/validate-19.sh's scale-up step creates exactly target-minus-ready servers even when boots are slow, verified against the fake provider's create count."
+  >
+    If the fake provider records more creates than the gap: either `provisioning`
+    hosts aren't counted as arriving (the gap function bug), or the hosts row is
+    written *after* the provider call so a crash-free but slow pass can't see its own
+    in-flight work — plan 18's ordering (row first, then CreateServer, then
+    write-back) exists precisely so the next pass sees the provisioning row. Log the
+    computed gap each pass; a gap that doesn't shrink as servers boot points at the
+    row-visibility ordering.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Unit tests (`make test`, fake provider, fake clock):
+
+- `TestPoolGapCountsProvisioningAsArriving` — no over-create while hosts boot.
+- `TestScaleDownPicksFewestLoaded` and `TestScaleDownDrainsBeforeDelete` — victim
+  policy and the two-pass drain/delete convergence.
+- `TestExternalProviderRefusesScale` — `scale` on an adoption-only pool is a typed
+  error, not a no-op.
+- `TestAdoptedHostSurvivesFleetReconcile` — NULL `provider_server_id` never matches
+  the vanished-server branch.
+- `TestPlacementHonorsRequestedPool` / `TestPlacementAnyPoolMatchesBackend` /
+  `no_capacity` carries the pool name.
+- Migration test: backfill against a seeded database leaves no NULL `pool_id`.
+
+Integration `hack/validate-19.sh` (Lima, plane + workerd, fake provider for cloud
+calls):
+
+- `pool create` + `pool scale --target 2` → fake provider shows exactly 2 labeled
+  creates; hosts reach ready; `pool list` shows 2/2.
+- `pool scale --target 1` with one sandbox running → the loaded host survives, the
+  empty one drains then deletes; the sandbox never dies.
+- `host adopt` → the printed command run by hand yields a ready host in its pool;
+  a sandbox placed with `--pool` lands on it; the fleet reconciler leaves it alone.
+- Negative: create with a pool name that does not exist fails fast with the typed
+  error, and `pool delete` on a pool with hosts refuses.
+
+Deliberately untested: autoscaling policy (the sequel this plan enables), concurrent
+admins scaling the same pool, pool migration of running sandboxes (sandboxes stay
+where placed; pools change *future* placement only).
+
+## Solo-developer tradeoffs
+
+A commercial platform's pool layer adds bin-packing across instance shapes, spot/
+preemptible mixing, capacity forecasting, and per-pool pricing — all policy atop
+these primitives. You also skip pool-level quotas (plan 08's tenant quotas remain
+global): real platforms sell "dedicated pools" as an enterprise feature, and the
+seam for it (pool as a placement filter) now exists, which is the point. The one
+deliberate strictness: `external` pools refusing provider calls. It would be easy to
+let `scale` silently no-op on adopted capacity, and it would produce the worst kind
+of bug — an admin who believes capacity is coming while nothing anywhere is making
+it exist.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="Kubernetes: Cluster Autoscaler — how it works"
+    href="https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md"
+  >
+    The desired-count reconciliation this plan builds, at industrial scale — note how
+    much of the FAQ is about not over-creating while nodes boot, your gap-function
+    bug writ large.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="AWS Auto Scaling groups"
+    href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/auto-scaling-groups.html"
+  >
+    The canonical pool object: desired/min/max counts, launch templates as the
+    server-type field, and instance lifecycle hooks as the grown-up drain.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Nomad: node pools"
+    href="https://developer.hashicorp.com/nomad/docs/other-specifications/node-pool"
+  >
+    The closest analogue to this plan's shape — named pools as a scheduler filter,
+    decoupled from how machines are created.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Karpenter: node lifecycle and disruption"
+    href="https://karpenter.sh/docs/concepts/disruption/"
+  >
+    A modern take on scale-down victim selection and drain-before-delete —
+    the policy space your fewest-loaded-first choice sits inside.
+  </Resource>
+</Resources>

@@ -1,0 +1,407 @@
+# 21 — Deep dive: a Kubernetes + Kata Containers backend
+
+Depends on: 07, 19 (tasks 1–4 need only 07 and can run in parallel with 14–18;
+the pool integration in tasks 5–6 needs 19).
+
+## Summary
+
+Add a third `Runtime` backend, `internal/runtime/kata`: a sandbox becomes a
+Kubernetes **Pod** whose `runtimeClassName` selects Kata Containers, so the pod's
+containers run inside a microVM instead of sharing the node's kernel. The backend
+talks to the cluster's API server via client-go — create pod, poll ready, delete pod
+— and the guest agent from plan 07 runs as the pod's single container, so exec and
+files arrive over the pod IP exactly as they do for Docker and Firecracker. On the
+capacity side, a pool of kind `kubernetes` delegates: no workerd, no per-host
+heartbeats, no target size — the cluster's own scheduler and whatever node scaling
+you configure in the cloud console are the capacity mechanism, and the plane's job
+shrinks to "is the cluster reachable and does it admit kata pods."
+
+<KeyPoint label="Why this plan matters">
+  This is the interface's third and hardest test. Docker and Firecracker were both
+  "processes on a host I control"; Kubernetes inverts control — you submit intent
+  and a scheduler you don't own realizes it. If `Runtime` and the pool model survive
+  that inversion without leaking Kubernetes types upward, the abstractions are real.
+</KeyPoint>
+
+## Industry context
+
+Kata is the industry's answer to "I want Kubernetes economics with VM isolation":
+an OCI runtime where each pod gets its own guest kernel under a lightweight VMM
+(QEMU by default, Firecracker as an option — the same VMM you drove by hand in plan
+14, one layer down the stack). Kubernetes selects it per-pod through the
+RuntimeClass mechanism — the CRI generalization this project has been echoing since
+plan 02. Commercially this is the "bring your own cluster" deployment shape:
+platforms run sandbox workloads inside customers' or managed Kubernetes (AKS ships
+Kata-based pod sandboxing as a feature) because someone else then owns node
+lifecycle, upgrades, and autoscaling. The tradeoff is equally standard: you inherit
+a scheduler you cannot reason about locally, admission latency you don't control,
+and a capacity model that is a black box with knobs — which is exactly why this
+plan's pool kind *delegates* instead of pretending to manage.
+
+<Compare>
+  <CompareItem eyebrow="Plans 14, 20" title="You are the scheduler">
+    The plane picks a host, reserves a slot transactionally, and supervises a
+    process. Total control, total responsibility — every crash branch in plans
+    17–18 is yours.
+  </CompareItem>
+  <CompareItem eyebrow="This plan" title="You submit intent to a scheduler">
+    The plane creates a Pod object and watches what the cluster decides. Placement,
+    restarts, and node choice belong to Kubernetes; your code's job becomes mapping
+    *its* states (Pending, Unschedulable, Ready) onto *your* contract.
+  </CompareItem>
+</Compare>
+
+## What you'll learn
+
+- client-go fundamentals: kubeconfig loading, typed clientsets, creating and
+  deleting Pods, label selectors as the list mechanism — plan 02's label discipline
+  landing in a third ecosystem unchanged.
+- The RuntimeClass mechanism end to end: what `runtimeClassName: kata` actually
+  dispatches through (kubelet → CRI → containerd → kata-shim → VMM), and
+  kata-deploy as the way a stock cluster grows the capability.
+- Mapping a foreign state machine onto your contract: Pod phases and conditions →
+  `State`, Unschedulable events → `no_capacity`, image pull failures →
+  `ErrImageMissing` — sentinel translation at a boundary you don't control.
+- Packaging the guest agent as an OCI image for the first time: a scratch/distroless
+  image around the static binary, pushed to a registry the cluster can pull from.
+- Delegated capacity as a design stance: what the plane checks (reachability, a
+  kata smoke pod) versus what it deliberately does not track (nodes, slots).
+
+### Concept: RuntimeClass is the cluster-shaped version of Spec.Backend
+
+Your `Spec.Backend` field selects an implementation behind one interface;
+Kubernetes' `runtimeClassName` is the same move standardized. A RuntimeClass object
+maps a name to a CRI handler; kubelet passes the handler down to containerd, whose
+kata shim starts a VMM and boots a guest kernel, then runs the pod's containers
+inside it. Nothing about the Pod spec above that line changes — which is why kata
+can be installed onto a running cluster by a DaemonSet (kata-deploy) that drops
+binaries on each node and registers the handler. The lesson worth extracting: the
+*pod author* opts into isolation per-workload, exactly as your API's `backend`
+field does, and the cluster owner controls which classes exist — the same
+two-party split as your pool admin versus sandbox creator.
+
+### Concept: the pod is running when *your* guest answers, not when Kubernetes says Ready
+
+Kubernetes has its own opinion of readiness, and you should wire it — a
+`readinessProbe` on `/healthz` makes `kubectl get pods` honest — but your backend's
+`Create` must hold to the plan 07 contract: the sandbox is `running` when the guest
+agent answers over the network. Deriving "running" from pod phase alone recreates
+the bug plan 02 warned about with Docker states: a foreign state machine's
+vocabulary silently becoming your public contract. The mapping is a pure function,
+`stateFromPod(pod) State`, with the same table-test treatment as
+`stateFromContainerState` — and the interesting rows are the failures: `Pending`
+with an `Unschedulable` condition is your typed `no_capacity` (the cluster's
+version of plan 17's full host); `ImagePullBackOff` inside container statuses is
+`ErrImageMissing`; a pod that vanishes between polls is `ErrNotFound`.
+
+<Figure caption="The kata path: the plane submits a labeled Pod with runtimeClassName kata; the cluster schedules it onto a kata-capable node where the shim boots a microVM; readiness is still the plan 07 guest answering /healthz over the pod IP.">
+  <svg viewBox="0 0 640 240" role="img" aria-label="Control plane creates a pod via the API server; kubelet dispatches through containerd to the kata shim which boots a microVM running quickspin-guest; the plane polls the guest healthz over the pod IP">
+    <defs>
+      <marker id="arrow21" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
+      </marker>
+      <marker id="arrow21g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#caa552" />
+      </marker>
+    </defs>
+    <rect x="10" y="24" width="150" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="85" y="45" textAnchor="middle" fontSize="12" fill="#18231f">kata Runtime</text>
+    <text x="85" y="62" textAnchor="middle" fontSize="10" fill="#405049">client-go, labels quickspin.id</text>
+    <rect x="230" y="24" width="150" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="305" y="45" textAnchor="middle" fontSize="12" fill="#18231f">API server</text>
+    <text x="305" y="62" textAnchor="middle" fontSize="10" fill="#405049">Pod + runtimeClassName</text>
+    <rect x="450" y="24" width="180" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="540" y="45" textAnchor="middle" fontSize="12" fill="#18231f">scheduler → kubelet</text>
+    <text x="540" y="62" textAnchor="middle" fontSize="10" fill="#405049">picks a kata-capable node</text>
+    <line x1="160" y1="48" x2="228" y2="48" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow21)" />
+    <text x="194" y="38" textAnchor="middle" fontSize="10" fill="#8f3423">create Pod</text>
+    <line x1="380" y1="48" x2="448" y2="48" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow21)" />
+    <rect x="230" y="120" width="400" height="76" fill="none" stroke="#405049" strokeWidth="1" strokeDasharray="5 4" />
+    <text x="430" y="114" textAnchor="middle" fontSize="10" fill="#405049">on the node — inside a kata microVM (its own kernel)</text>
+    <rect x="250" y="136" width="160" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="330" y="156" textAnchor="middle" fontSize="12" fill="#18231f">containerd → kata shim</text>
+    <text x="330" y="172" textAnchor="middle" fontSize="10" fill="#405049">boots VMM + guest kernel</text>
+    <rect x="450" y="136" width="160" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="530" y="156" textAnchor="middle" fontSize="12" fill="#18231f">quickspin-guest</text>
+    <text x="530" y="172" textAnchor="middle" fontSize="10" fill="#405049">the plan 07 image</text>
+    <line x1="540" y1="72" x2="430" y2="118" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow21)" />
+    <line x1="410" y1="158" x2="448" y2="158" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow21)" />
+    <path d="M 530 196 L 530 222 L 85 222 L 85 76" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow21g)" />
+    <text x="300" y="214" textAnchor="middle" fontSize="10" fill="#7f5d43">GET /healthz on the pod IP — running means the guest answered, same as plans 07/14</text>
+  </svg>
+</Figure>
+
+### Concept: a kubernetes pool has no target size, and that is the design
+
+Plan 19's `PoolKind` split exists for this moment. A `kubernetes` pool row carries a
+kubeconfig reference and a namespace instead of a provider and target size; `pool
+scale` on it returns the typed refusal (like `external` pools), because the honest
+scaling story is the one you named at the start: twist the node-pool knobs in the
+cloud console, or let a cluster autoscaler do it. What the plane *does* own is
+admission truth: the pool's health check is a periodic reachability probe plus, on
+pool create, a **smoke pod** — a real kata pod created, health-checked, and deleted
+— because a cluster can be perfectly reachable while its RuntimeClass is broken,
+and the only way to know kata works is to run kata. Placement treats a healthy
+kubernetes pool as elastic (no slot accounting); the cluster saying `Unschedulable`
+is the backpressure signal, translated to `no_capacity` after a bounded pending
+window rather than modeled in advance.
+
+<StudyPrompt question="Why not run workerd as a DaemonSet and keep the plan 17 machinery?">
+  You could — each node's workerd registering as a host — but you would be building
+  a scheduler on top of a scheduler: your placement picking a node, then Kubernetes
+  placing your pod, with the two disagreeing under pressure. Every system that
+  embeds Kubernetes eventually chooses between "wrap it" and "trust it," and
+  wrapping means re-implementing headroom tracking the cluster already does better.
+  Delegation keeps one owner per decision — the rule that has organized this whole
+  project — at the cost of a black-box capacity model, which the smoke pod and the
+  pending-window timeout make observable at the edges you care about.
+</StudyPrompt>
+
+<Callout tone="warning" title="Kata needs virtualization on the nodes">
+  Kata's VMM needs `/dev/kvm` on each node, so the cluster's nodes have the same
+  constraint as plan 20's hosts: bare-metal nodes, or VMs with nested
+  virtualization. The committed lab environment is a single-node k3s on a
+  DigitalOcean droplet (nested virt per plan 20's finding) with kata installed via
+  kata-deploy; a managed cluster with kata support is an alternative if you accept
+  its cost. Verify with a kata smoke pod comparing `uname -r` against the node
+  kernel before writing any Go — if they match, kata is not actually engaged and
+  everything downstream is a lie.
+</Callout>
+
+## Design and interfaces
+
+No new interface — `internal/runtime/kata` implements plan 02's `Runtime`; that is
+the headline. New surface and commitments:
+
+```text
+Backend: Spec.Backend gains "kata". Pod template: one container running the
+  quickspin-guest image; labels quickspin.id / quickspin.managed as pod labels;
+  runtimeClassName from pool config (default "kata"); readinessProbe on /healthz;
+  restartPolicy Never (a dead sandbox is dead — plan 17's no-migration rule; the
+  reconciler observes the failure, nothing silently restarts it).
+Lifecycle mapping (pure, table-tested):
+  stateFromPod: PodRunning+guest-healthy → running; Succeeded/Failed → stopped;
+  Pending+Unschedulable past window → no_capacity; ImagePullBackOff →
+  ErrImageMissing; absent → ErrNotFound.
+  Destroy: delete by label-resolved name, IsNotFound → nil, idempotent as always.
+Guest image: build/quickspin-guest.Dockerfile — FROM scratch + the static binary
+  (plan 07's static build paying off a third time); pushed to a registry the
+  cluster pulls from; tag pinned in pool config, never :latest.
+Pool integration (needs 19):
+  pools of kind "kubernetes": kubeconfig_ref + namespace + runtime_class instead of
+  provider/target_size; scale → typed refusal; health = reachability probe +
+  smoke pod at pool create; placement treats healthy pools as elastic.
+Network reachability: the plane must reach pod IPs for exec/files. Committed dev
+  answer: the plane runs inside the cluster's network reach (single-node k3s: the
+  node itself). The general answer (LB per sandbox, ingress, or a tunnel) is real
+  future work, recorded not solved.
+```
+
+Committed decisions: no CRDs and no operator — the plane's database stays the source
+of truth and pods are disposable actuals, exactly like containers and VMs before
+them (an operator inverts that ownership; worth understanding, deliberately not
+built); polling over informers for state (the reconciler already polls; informers
+are an optimization with a large conceptual surface, deferred); one namespace per
+pool, created by pool create, so `kubectl get pods -n <pool>` is the operator view
+and namespace deletion is the disaster-recovery cleanup.
+
+## Tasks
+
+<TaskList>
+  <Task title="Stand up the kata-capable lab cluster">
+    `hack/setup-kata-cluster.sh`: k3s on a nested-virt droplet (or equivalent),
+    kata-deploy, RuntimeClass present, and the uname smoke check proving pods get
+    their own kernel.
+  </Task>
+  <Task title="Package and push the guest image">
+    `build/quickspin-guest.Dockerfile` from scratch + static binary; a make target
+    builds and pushes; a hand-written kata pod running it answers /healthz.
+  </Task>
+  <Task title="Write the pure mapping layer">
+    `stateFromPod`, the pod-template builder, and label helpers — table-tested with
+    fabricated Pod structs, no cluster required.
+  </Task>
+  <Task title="Implement the kata Runtime">
+    create/inspect/list/destroy via client-go against the lab cluster; sentinel
+    translation at the boundary; the pending-window timeout on create.
+  </Task>
+  <Task title="Add the kubernetes pool kind">
+    Plan 19 schema variant, scale refusal, reachability probe, and the smoke pod on
+    pool create.
+  </Task>
+  <Task title="Route backend kata through the stack and validate">
+    Spec validation, placement's elastic-pool path, one SDK field value, and
+    `hack/validate-21.sh`.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Prove kata before any Go"
+    check="kubectl apply of a busybox pod with runtimeClassName kata runs, and uname -r inside it differs from the node's kernel."
+  >
+    k3s installs with one script; kata-deploy is a DaemonSet plus RuntimeClass
+    manifests from the kata-containers repo. On k3s specifically, containerd config
+    lives in a templated path — kata-deploy handles current k3s, but if pods stay
+    in `ContainerCreating`, `kubectl describe pod` and the node's containerd log
+    name the missing handler. The uname comparison is the only proof that matters;
+    a pod that runs with the node's kernel is runc wearing kata's name.
+  </Hint>
+  <Hint
+    title="The guest image is FROM scratch and two lines"
+    check="A kata pod running your pushed image answers /healthz on its pod IP from the node."
+  >
+    `FROM scratch`, `COPY quickspin-guest /`, `ENTRYPOINT ["/quickspin-guest"]` —
+    static linking means no base image, which also means no shell inside, so debug
+    via pod logs, not exec. Push to any registry the cluster can pull from
+    (Docker Hub or GHCR are fine); imagePullSecrets if private. Pin by tag or
+    digest in pool config — `:latest` on a learning cluster is how a week-old bug
+    resurrects after a node re-pull.
+  </Hint>
+  <Hint
+    title="Build the pod template and stateFromPod as pure functions first"
+    check="TestStateFromPodTable covers running, succeeded, failed, unschedulable-pending, image-pull-backoff, and absent — green with no cluster."
+  >
+    The template builder takes (spec, pool config) and returns a `*corev1.Pod` —
+    fabricating expected Pods in tests is verbose but mechanical. For state: pod
+    phase alone is not enough; Unschedulable lives in `PodScheduled` condition
+    reasons, ImagePullBackOff in `ContainerStatuses[].State.Waiting.Reason`. Every
+    one of those paths is a table row, and this table is where the foreign state
+    machine gets pinned — the kata equivalent of plan 02's seven-states-to-two
+    decision.
+  </Hint>
+  <Hint
+    title="client-go's boilerplate is front-loaded; the verbs are small"
+    check="TestCreateThenInspect (gated on a live cluster env var) creates a kata pod, reports running after the guest answers, and destroy twice returns nil."
+  >
+    `clientcmd.BuildConfigFromFlags("", kubeconfigPath)` →
+    `kubernetes.NewForConfig` → `client.CoreV1().Pods(ns)`. List and inspect use
+    `ListOptions.LabelSelector` with `quickspin.id=<id>` — never get-by-name from
+    user input, the same prefix-match trap as plan 02's ContainerInspect warning.
+    Create polls your `stateFromPod` until running or the pending window lapses;
+    on lapse, delete the pod before returning `no_capacity` — the create-gap
+    cleanup discipline, third incarnation. Destroy maps
+    `k8serrors.IsNotFound` to nil.
+  </Hint>
+  <Hint
+    title="The smoke pod is pool create's admission test"
+    check="pool create against a cluster with kata broken (delete the RuntimeClass to simulate) fails with a message naming the smoke-pod outcome, and creates no pool row."
+  >
+    Reuse the backend's own Create/Destroy for the smoke pod — the point is to
+    exercise the real path, not a parallel one. Run it with a short deadline and a
+    distinctive label so a crashed smoke test is reaped by the ordinary orphan
+    sweep. Order matters for crash-safety: smoke pod first, pool row only on
+    success — the inverse of plan 18's row-first ordering, because here the
+    external resource is disposable and the row is the commitment.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: created pods stick in Pending"
+    check="hack/validate-21.sh's negative path — a pod requesting impossible resources — surfaces as typed no_capacity within the pending window, with the pod cleaned up."
+  >
+    `kubectl describe pod` is the oracle: an Unschedulable event names the reason
+    (no kata nodes, insufficient memory, missing RuntimeClass). If your backend
+    reports it as a hang instead of `no_capacity`, the pending-window branch isn't
+    firing — log the parsed conditions each poll. If the pod schedules but never
+    turns ready, split the failure with pod logs: no log output means the image or
+    entrypoint (wrong arch is the classic — the droplet is amd64, plan 01's
+    cross-compile habit finally flips direction); guest logs but probe failing
+    means the readinessProbe port disagrees with the guest's listen address.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Unit tests (`make test`, no cluster):
+
+- `TestStateFromPodTable` — all six rows from the hints, including both typed
+  errors.
+- `TestPodTemplateCarriesLabelsAndRuntimeClass` — both quickspin labels, the
+  RuntimeClass, restartPolicy Never, and the readiness probe present.
+- `TestKubernetesPoolRefusesScale`.
+
+Gated live tests + `hack/validate-21.sh` against the lab cluster:
+
+- Isolation proof: `uname -r` in a sandbox differs from the node kernel.
+- Via the control plane with `"backend": "kata"`: create reaches running (guest
+  answered), exec streams and exit codes work, file round-trip works, destroy is
+  idempotent, and `kubectl get pods` shows no quickspin pods after.
+- Negative: impossible resource request → typed `no_capacity` within the window,
+  pod cleaned up; deleting the RuntimeClass makes `pool create` fail its smoke pod.
+- Crash check: `kubectl delete pod` behind the plane's back → the reconciler marks
+  the sandbox failed with an event (the plan 06 loop observing a third backend).
+- Create-to-ready latency recorded in `docs/reference/demo-latency.mdx` beside
+  Docker's and Firecracker's numbers — the three-way table is the artifact.
+
+Deliberately untested: multi-node clusters, informer-based watching, pod networking
+beyond the single-node reach commitment, kata's Firecracker VMM variant
+(`kata-fc` — noted as the bridge between this plan and plan 14, left as an
+experiment), operators/CRDs.
+
+## Solo-developer tradeoffs
+
+A commercial platform on Kubernetes would run an operator with CRDs, informers,
+admission webhooks, and per-tenant namespaces with NetworkPolicies — the full
+cloud-native toolchain. You stop at "pods as disposable actuals under your own
+control plane" because the learning target is the backend boundary and the
+delegated-capacity stance, not the Kubernetes ecosystem itself; each omitted piece
+is a well-documented industry pattern you can now place. The genuinely load-bearing
+shortcut is network reachability: real platforms put a routing layer between plane
+and sandbox (plan 07's address abstraction is where it would slot in), and
+single-node reach is the recorded debt that makes this plan honest rather than
+production-shaped.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="Kata Containers: architecture"
+    href="https://github.com/kata-containers/kata-containers/blob/main/docs/design/architecture/README.md"
+  >
+    The shim-to-VMM path under runtimeClassName — where plan 14's VMM concepts
+    reappear one layer down, including the Firecracker option.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Kubernetes: Runtime Class"
+    href="https://kubernetes.io/docs/concepts/containers/runtime-class/"
+  >
+    The per-pod runtime selection mechanism, and its scheduling implications when
+    only some nodes carry a handler.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="kata-deploy"
+    href="https://github.com/kata-containers/kata-containers/tree/main/tools/packaging/kata-deploy"
+  >
+    The DaemonSet installer the lab uses — worth reading for how it patches
+    containerd config per distro, which is also where k3s quirks live.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="client-go examples"
+    href="https://github.com/kubernetes/client-go/tree/master/examples"
+  >
+    The canonical create/list/delete patterns this backend's verbs follow,
+    including out-of-cluster kubeconfig loading.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Pod Sandboxing with AKS"
+    href="https://learn.microsoft.com/en-us/azure/aks/use-pod-sandboxing"
+    by="Microsoft Azure docs"
+  >
+    A managed cloud shipping exactly this plan's shape as a product feature —
+    useful for comparing their stated isolation claims against what you built.
+  </Resource>
+  <Resource
+    kind="book"
+    title="Programming Kubernetes"
+    by="Hausenblas &amp; Schimanski, ch. 1–3 (API basics, client-go)"
+  >
+    The deeper treatment of the API machinery — and of the operator pattern this
+    plan deliberately declines, so the decision is informed.
+  </Resource>
+</Resources>

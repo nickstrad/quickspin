@@ -1,0 +1,354 @@
+# 20 — EC2 and DigitalOcean providers for Firecracker pools
+
+Depends on: 14, 19 (the Firecracker guest artifacts from 14 are what these hosts run).
+
+## Summary
+
+Fill the provider registry: implement plan 18's `Provider` interface twice more —
+`internal/provider/ec2` over the AWS SDK and `internal/provider/digitalocean` over
+godo — so a Firecracker pool can be realized on either cloud with
+`quickspin admin pool create --provider ec2|digitalocean`. The plan's second
+deliverable is a **provider conformance suite**: one shared test that every
+implementation (hetzner, ec2, digitalocean, and the fake) must pass, so a new cloud
+is proven equivalent before the reconciler ever touches it. The hard constraint that
+shapes everything is `/dev/kvm`: Firecracker needs bare-metal-grade virtualization,
+which each cloud exposes differently, so pool creation gains a preflight that fails
+fast on shapes that cannot run the backend.
+
+## Industry context
+
+Multi-cloud capacity is table stakes for sandbox platforms — E2B and Modal publish
+that they run across providers, and the mechanism is always the same: a thin
+per-cloud adapter behind a shared interface, with tags/labels as the ownership
+marker and cloud-init/user-data as the join mechanism. The engineering pattern this
+plan copies from mature codebases is the **conformance suite** — Kubernetes proves
+every CRI runtime and CSI driver against one shared test battery rather than
+trusting each implementation's own tests. The KVM constraint is also an industry
+fact, not a quickspin quirk: AWS only exposes KVM on `*.metal` instances (Firecracker
+was built by AWS for exactly that hardware), while DigitalOcean droplets are KVM
+guests that have historically exposed nested virtualization — usable, but an
+implementation detail of DO's platform rather than a documented guarantee.
+
+<Compare>
+  <CompareItem eyebrow="What you build" title="One contract, N adapters, one proof">
+    Each provider file is ~200 lines of SDK translation. The conformance suite is
+    the real asset: create-appears-in-list, delete-twice-is-nil, labels-at-birth,
+    list-sees-only-ours — passed by the fake and every real cloud alike.
+  </CompareItem>
+  <CompareItem eyebrow="The anti-pattern" title="Per-cloud beliefs">
+    Each adapter tested only against its own mocks, encoding its own idea of what
+    delete-of-absent returns. The reconciler then works on Hetzner and leaks servers
+    on EC2, and nothing said the two disagreed until the invoice did.
+  </CompareItem>
+</Compare>
+
+## What you'll learn
+
+- Two more cloud SDKs from Go (`aws-sdk-go-v2/service/ec2`, `godo`) and how their
+  vocabularies map onto one interface: tags vs labels, base64 user-data vs plain,
+  terminate vs delete, eventual consistency vs read-your-writes.
+- Writing an interface conformance suite: a function taking any `Provider` plus a
+  cleanup hook, run in-process against the fake and behind an env gate against real
+  clouds.
+- Virtualization capability as a placement-time constraint: which instance shapes
+  have `/dev/kvm`, checking it at pool create (static shape knowledge) and at host
+  join (a workerd preflight that reports the truth).
+- Cost-tiered validation: structuring live tests so the cheap cloud runs routinely
+  and the expensive one (`*.metal` at dollars per hour) runs rarely, deliberately,
+  and with a teardown trap that cannot be skipped.
+
+### Concept: the interface is portable; the semantics need proving
+
+Plan 18's `Provider` looks trivially portable — create, list, delete — but each verb
+hides a per-cloud judgment call, and the conformance suite exists to pin them:
+
+| Contract clause | Hetzner | EC2 | DigitalOcean |
+| --- | --- | --- | --- |
+| Ownership marker at birth | `Labels` in create | `TagSpecifications` on `RunInstances` — never a second `CreateTags` call | `Tags` in the create request |
+| List sees only ours | label selector | `Filters: tag:quickspin.fleet` — and must exclude `terminated` instances, which linger visibly for ~an hour | `ListByTag` |
+| Delete of absent → nil | 404 mapped | `InvalidInstanceID.NotFound` mapped; terminating an already-terminating instance also succeeds | 404 mapped |
+| User-data encoding | plain string | base64, and size-capped at 16 KB | plain string |
+| Create returns | server with ID | reservation containing instances — unwrap exactly one | droplet with ID |
+
+The EC2 rows carry the two classic traps. Terminated instances remaining in
+`DescribeInstances` output means a naive list makes the fleet reconciler count
+corpses as orphans forever — the state filter is part of the *contract* ("list
+returns ours **and alive**"), so the conformance suite asserts it via the fake, and
+the EC2 adapter must implement it to pass. And tags applied in a second API call
+instead of atomically in `RunInstances` reintroduces plan 18's crash window where a
+server exists that no reaper can ever find.
+
+### Concept: /dev/kvm is a property of the shape, not the cloud
+
+Firecracker opens `/dev/kvm`; a machine without it fails at the first sandbox, not at
+boot — the worst possible distance between mistake and symptom. The capability is
+determined by instance shape: on AWS, only `*.metal` instances (e.g. `c5.metal`,
+`m6g.metal`) expose KVM, because everything else is itself a guest without nested
+virtualization; on DigitalOcean, regular droplets are KVM guests that do expose
+nested virt in practice — it works and is widely used, but it is undocumented
+behavior you re-verify rather than assume. That asymmetry produces the plan's
+two-layer defense. At `pool create`, a static table rejects shapes known not to
+carry KVM (`t3.micro` for a firecracker pool fails immediately with a message naming
+the constraint). At host join, workerd's registration payload gains a `kvm: bool`
+preflight (`test -c /dev/kvm` equivalent in Go) — the truth from the machine itself,
+which catches everything the static table cannot know, including DO quietly changing
+its platform someday. A firecracker-pool host registering with `kvm: false` goes
+straight to a degraded state and is never placed on.
+
+<StudyPrompt question="Why keep the static shape check at all, if the join-time preflight is authoritative?">
+  Cost and distance. A wrong shape caught at pool create costs nothing; caught at
+  join time it has already billed a `*.metal` hour and burned the minutes a metal
+  instance takes to boot. The static check is a fast-fail heuristic that is allowed
+  to be incomplete; the preflight is the invariant. The pairing — cheap early check
+  plus authoritative late check — is the same structure as plan 02's ID validation
+  in front of the daemon lookup.
+</StudyPrompt>
+
+<Callout tone="warning" title="Metal instances bill like metal">
+  A `c5.metal` is on the order of $4/hour with a metal-boot time of several minutes.
+  Nothing in the routine test path may create one: the EC2 conformance run sits
+  behind an explicit env var (`QUICKSPIN_TEST_EC2=1`), uses the smallest metal shape
+  available, and wraps everything in a trap that terminates on any exit. The
+  DigitalOcean path (a $6/month droplet, per-hour billed) is the routine live test.
+  This tiering is part of the plan, not an optimization to add later.
+</Callout>
+
+## Design and interfaces
+
+No new interface — both adapters implement plan 18's `internal/provider.Provider`
+unchanged, which is the point. New surface:
+
+```go
+// internal/provider/conformance
+// RunConformance exercises any Provider against the shared contract.
+// Real-cloud runs pass a cleanup func that force-deletes stragglers.
+func RunConformance(t *testing.T, p provider.Provider, cleanup func())
+```
+
+```text
+internal/provider/ec2:  aws-sdk-go-v2; RunInstances with TagSpecifications +
+  base64 user-data; DescribeInstances filtered by tag AND instance-state-name
+  (pending|running|stopping|stopped); TerminateInstances with NotFound→nil.
+internal/provider/digitalocean: godo; Droplets.Create with Tags + UserData;
+  Droplets.ListByTag; Droplets.Delete with 404→nil.
+
+Registry (plan 19's main): providers registered only when credentials are present
+  (AWS default chain; DIGITALOCEAN_TOKEN). Absent credentials ⇒ absent registry
+  entry ⇒ pools naming it show degraded, per plan 19.
+
+KVM constraint:
+  pool create: static shape check per provider (ec2: *.metal only for backend
+    firecracker; digitalocean: allowed with a warning naming the undocumented
+    dependency; hetzner: allowed, established in plan 16).
+  host join: registration payload gains kvm bool from a workerd preflight;
+    firecracker-pool host with kvm=false ⇒ degraded, never placed.
+
+Cloud-init: plan 18's template reused verbatim — both clouds execute standard
+  cloud-init user-data; only the delivery encoding differs, inside each adapter.
+```
+
+Committed decisions: adapters own all SDK vocabulary — no AWS or godo type appears
+outside its package (plan 02's rule, third application); regions are per-pool
+configuration (`server_type` widens to shape+region, still opaque to the plane);
+spot/preemptible instances are out of scope (interruption handling is a real
+subsystem, recorded as future work); the DO nested-virt dependency is documented in
+the pool-create warning text itself, not only in this plan.
+
+## Tasks
+
+<TaskList>
+  <Task title="Write the conformance suite against the fake">
+    `RunConformance` covering create-in-list, ours-only+alive list, labels at birth,
+    idempotent delete, and user-data round-trip; the plan 18 fake and hetzner
+    provider pass it unchanged — or the suite found a real bug.
+  </Task>
+  <Task title="Implement the DigitalOcean provider">
+    godo behind the interface; conformance green against a real droplet behind
+    QUICKSPIN_TEST_DO=1 with a teardown trap.
+  </Task>
+  <Task title="Implement the EC2 provider">
+    aws-sdk-go-v2 behind the interface; state-filtered list; conformance green
+    against the fake always, and against real EC2 behind QUICKSPIN_TEST_EC2=1.
+  </Task>
+  <Task title="Add the KVM shape check and join preflight">
+    Static per-provider shape validation at pool create; `kvm` in the registration
+    payload; degraded state for firecracker-pool hosts without it.
+  </Task>
+  <Task title="Wire credentials-gated registration into main">
+    Registry entries appear only with credentials; `admin pool list` shows degraded
+    pools for missing providers (plan 19 behavior, now with three real entries).
+  </Task>
+  <Task title="Write hack/validate-20.sh">
+    The DO-tier live validation from the definition of done; the EC2 metal run is a
+    separate documented manual procedure, not part of the script.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Extract the conformance suite from what plan 18 already asserts"
+    check="RunConformance passes against the fake and the hetzner provider with no changes to either — or fails on a real divergence worth fixing first."
+  >
+    Start by reading plan 18's fake-provider contract test and generalizing it into
+    a function taking `provider.Provider`. Add the clause the fake probably missed:
+    list must not return deleted servers (delete one, list, assert absence) — this
+    is the clause EC2's terminated-instance lingering will trip if unhandled. Run it
+    against hetzner behind the existing env gate before writing any new adapter; a
+    suite that has only ever seen the fake proves nothing yet.
+  </Hint>
+  <Hint
+    title="DigitalOcean first — it is the cheap, forgiving cloud"
+    check="QUICKSPIN_TEST_DO=1 go test ./internal/provider/digitalocean passes conformance against a real droplet and leaves zero droplets tagged quickspin behind."
+  >
+    `godo.NewFromToken`, `Droplets.Create` with `Tags: []string{"quickspin-fleet"}`
+    (DO tags are flat strings, not key=value — the pool name needs a second tag like
+    `quickspin-pool-<name>`; write the encoding once in the adapter),
+    `Droplets.ListByTag`, `Droplets.Delete` mapping 404 to nil. User-data goes in
+    `UserData` as a plain string. The teardown trap: `t.Cleanup` that lists by tag
+    and deletes anything remaining, but still fails the test if it found anything —
+    plan 18's mop-loudly rule.
+  </Hint>
+  <Hint
+    title="EC2: one RunInstances call, tags inside it, states filtered out"
+    check="Conformance against the fake passes with the EC2 adapter's list logic; a unit test feeding a DescribeInstances response containing a terminated instance shows it excluded."
+  >
+    `RunInstances` with `MinCount=MaxCount=1`, `TagSpecifications` for
+    `ResourceTypeInstance` carrying both tags, `UserData` base64-encoded
+    (`base64.StdEncoding` — the SDK does not encode for you). List:
+    `DescribeInstances` with two filters, `tag:quickspin.fleet` and
+    `instance-state-name` in pending/running/stopping/stopped. Delete:
+    `TerminateInstances`, mapping `InvalidInstanceID.NotFound` (match the code via
+    the smithy API error, not string parsing) to nil. Unwrap the reservation:
+    exactly one instance or it is an `E`-wrapped internal error.
+  </Hint>
+  <Hint
+    title="The KVM preflight is five lines in workerd and one field in a DTO"
+    check="A firecracker-pool workerd on a machine without /dev/kvm registers, shows degraded in host list, and receives no placements; a docker-pool host on the same machine is unaffected."
+  >
+    In workerd: `os.Stat("/dev/kvm")` and a char-device check, reported as `kvm`
+    in the register payload. On the plane: the degraded decision is a pure function
+    of (pool backend, host claims) — extend plan 17's registration handler, add the
+    state, and make placement's filter exclude it. The static shape table lives in
+    each provider package (it is cloud knowledge), consulted by `pool create`
+    validation with a typed error naming shape and constraint.
+  </Hint>
+  <Hint
+    title="Region belongs to the pool, encoded in server_type, decoded by the adapter"
+    check="Two DO pools in different regions create droplets in the right regions with no plane code mentioning regions."
+  >
+    Keep the plane blind: define per-adapter parsing of `server_type` (e.g.
+    `s-1vcpu-1gb@nyc3`, `c5.metal@us-east-1`) with a validate function the pool
+    admin verb calls. The plane stores and passes the string; only the adapter
+    splits it. Resist a `region` column — the moment the plane knows regions it
+    will grow opinions about them, and cross-region placement policy is explicitly
+    future work.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: conformance flakes on real clouds"
+    check="Conformance passes 3 consecutive runs against DO; failures print which contract clause and which observed state, not just a diff."
+  >
+    Real clouds are eventually consistent where the fake is not: a droplet can be
+    absent from ListByTag for seconds after create returns, and EC2 instances sit
+    in `pending`. Give the create-appears-in-list clause a bounded poll (a few
+    seconds, then fail) rather than a single read — and state in the suite's
+    comment that the contract is "appears promptly," not "appears instantly." If
+    the delete-twice clause flakes on EC2, you are asserting on instance state
+    instead of the call's error mapping; the contract is about the second call's
+    return value, nothing else.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Unit tests (`make test`, no cloud):
+
+- `RunConformance` green against the fake provider.
+- EC2 list-state filtering: terminated instances excluded (canned response test).
+- User-data encoding round-trips per adapter; EC2 asserts base64.
+- `TestPoolCreateRejectsNonMetalEC2ForFirecracker` and the DO warning-path test.
+- `TestHostWithoutKVMInFirecrackerPoolIsDegraded` — registers, degraded, never
+  placed (fake clock + fake worker client).
+
+Gated live tests:
+
+- `QUICKSPIN_TEST_DO=1`: conformance against real DigitalOcean; zero tagged
+  droplets remain (asserted, with the loud-mop trap).
+- `QUICKSPIN_TEST_EC2=1`: conformance against real EC2 on a non-metal shape
+  (contract semantics need no KVM); zero tagged instances remain outside the
+  lingering-terminated window, which the final assertion filters by state.
+
+Integration `hack/validate-20.sh` (spends cents on DO, says so):
+
+- `admin pool create --provider digitalocean` + `scale --target 1` → a real droplet
+  boots via cloud-init, self-joins with `kvm: true`, turns ready with zero SSH.
+- A `backend: firecracker` sandbox placed on it passes exec/files end-to-end.
+- `scale --target 0` → drain, delete, DO API confirms gone; final loud
+  no-leaked-droplets assertion.
+- The EC2 metal equivalent is documented as a manual runbook procedure in
+  `docs/reference/runbook.mdx` with its cost stated, run once, and its date and
+  outcome recorded there.
+
+Deliberately untested: spot/preemptible interruption, AWS/DO rate limits and
+outages, cross-region behavior, DO's nested-virt guarantee (there is none — that is
+the finding).
+
+## Solo-developer tradeoffs
+
+A commercial platform would add capacity brokers (spot fleets, savings plans),
+per-region redundancy, and an abstraction over instance shapes; all remain policy
+atop the registry + conformance seam. The honest tradeoff to sit with: this plan's
+Firecracker-on-EC2 story costs metal-instance money, which is exactly why the
+industry runs high-density fleets on metal rather than one microVM per small
+instance — density is the economic argument for Firecracker, and your latency table
+from plan 14 plus this plan's per-hour prices are the two numbers that argument
+needs. DigitalOcean's undocumented nested virt is the opposite tradeoff: cheap and
+real, but a platform dependency no SLA backs — fine for a learning fleet, named as
+unacceptable for the hypothetical v2.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="aws-sdk-go-v2: EC2 RunInstances"
+    href="https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/service/ec2"
+  >
+    The SDK surface behind the adapter — TagSpecifications, user-data, and the
+    smithy error types the delete mapping matches on.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="godo — the DigitalOcean API client for Go"
+    href="https://pkg.go.dev/github.com/digitalocean/godo"
+  >
+    Droplet create/list-by-tag/delete, and DO's flat-string tag model that forces
+    the pool-name encoding decision.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Amazon EC2 instance lifecycle"
+    href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-lifecycle.html"
+  >
+    The state machine behind the list filter — pending, stopping, and why
+    terminated instances remain describable after death.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Firecracker: getting started — host requirements"
+    href="https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md"
+  >
+    The upstream statement of the KVM requirement the preflight enforces, including
+    the exact access check to mirror in Go.
+  </Resource>
+  <Resource
+    kind="article"
+    title="CRI validation testing (critest)"
+    href="https://github.com/kubernetes-sigs/cri-tools/blob/master/docs/validation.md"
+    by="Kubernetes SIG Node"
+  >
+    The industrial model for this plan's conformance suite: one battery every
+    runtime implementation must pass to claim the interface.
+  </Resource>
+</Resources>
