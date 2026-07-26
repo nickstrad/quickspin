@@ -3,6 +3,7 @@ package runtime
 import (
 	"maps"
 	"slices"
+	"time"
 )
 
 // Docker reports seven statuses — created, running, paused, restarting,
@@ -25,6 +26,17 @@ func stateFromContainerState(s string) State {
 		return StateRunning
 	}
 	return StateStopped
+}
+
+// createdAtFromUnix converts Docker's creation timestamp, which arrives as Unix
+// seconds. Zero becomes the zero Time rather than 1970: the daemon never
+// legitimately reports the epoch, so a zero means the field was absent, and
+// IsZero is a more honest answer than a date fifty years in the past.
+func createdAtFromUnix(sec int64) time.Time {
+	if sec == 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0).UTC()
 }
 
 // envToArgs sorts the keys, not the joined strings, which are different orders:

@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 )
 
 func TestStateFromContainerState(t *testing.T) {
@@ -117,5 +118,38 @@ func TestEnvToArgsDoesNotMutateItsInput(t *testing.T) {
 
 	if !reflect.DeepEqual(env, before) {
 		t.Errorf("envToArgs mutated its argument: got %v, want %v", env, before)
+	}
+}
+
+func TestCreatedAtFromUnix(t *testing.T) {
+	tests := []struct {
+		name string
+		sec  int64
+		want time.Time
+	}{
+		{
+			name: "a real timestamp",
+			sec:  1753444800,
+			want: time.Date(2025, 7, 25, 12, 0, 0, 0, time.UTC),
+		},
+		{
+			// Docker never reports the epoch, so zero means the field was absent.
+			// The zero Time answers IsZero honestly; 1970 would not.
+			name: "absent",
+			sec:  0,
+			want: time.Time{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := createdAtFromUnix(tt.sec)
+			if !got.Equal(tt.want) {
+				t.Errorf("createdAtFromUnix(%d) = %v, want %v", tt.sec, got, tt.want)
+			}
+			if tt.sec != 0 && got.Location() != time.UTC {
+				t.Errorf("createdAtFromUnix(%d) location = %v, want UTC so formatted output is stable", tt.sec, got.Location())
+			}
+		})
 	}
 }

@@ -179,3 +179,66 @@ func TestManagedLabelsRoundTripsThroughSandboxIDFromLabels(t *testing.T) {
 		t.Errorf("round trip of %q = %q, want the original id", id, got)
 	}
 }
+
+func TestManagedSandboxID(t *testing.T) {
+	id := newSandboxID()
+
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "managed with a valid id",
+			labels: managedLabels(id),
+			want:   id,
+			wantOK: true,
+		},
+		{
+			name:   "not ours",
+			labels: map[string]string{"com.example.app": "web"},
+		},
+		{
+			// Ours, but unnameable: no caller can Inspect or Destroy it, so it
+			// must not appear in a listing that implies it can be.
+			name:   "managed with a malformed id",
+			labels: map[string]string{labelManaged: labelManagedValue, labelSandboxID: "not-a-sandbox"},
+		},
+		{
+			name:   "id present without the marker",
+			labels: map[string]string{labelSandboxID: id},
+		},
+		{
+			name: "no labels at all",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := managedSandboxID(tt.labels)
+			if ok != tt.wantOK {
+				t.Fatalf("managedSandboxID(%v) ok = %v, want %v", tt.labels, ok, tt.wantOK)
+			}
+			if got != tt.want {
+				t.Errorf("managedSandboxID(%v) = %q, want %q", tt.labels, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestManagedMarkerLabelsMatchesManagedLabels(t *testing.T) {
+	// The filter used by List must agree with what Create writes, or List sees
+	// nothing it created.
+	marker := managedMarkerLabels()
+	written := managedLabels(newSandboxID())
+
+	for k, v := range marker {
+		if written[k] != v {
+			t.Errorf("managedMarkerLabels()[%q] = %q, but managedLabels writes %q", k, v, written[k])
+		}
+	}
+	if !isManaged(marker) {
+		t.Error("isManaged(managedMarkerLabels()) = false, want true")
+	}
+}

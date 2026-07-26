@@ -26,6 +26,28 @@ func isManaged(m map[string]string) bool {
 	return m[labelManaged] == labelManagedValue
 }
 
+// managedMarkerLabels returns the ownership marker alone, for the lookups that
+// want every sandbox rather than a named one. It exists so the marker's key and
+// value are still spelled only in this file.
+func managedMarkerLabels() map[string]string {
+	return map[string]string{labelManaged: labelManagedValue}
+}
+
+// managedSandboxID answers "is this container mine, and what is it called?" in
+// one step, which is the only form either caller wants. A container we own whose
+// id label is unreadable reports false: it cannot be named, so it cannot be
+// acted on.
+func managedSandboxID(labels map[string]string) (string, bool) {
+	if !isManaged(labels) {
+		return "", false
+	}
+	id, err := sandboxIDFromLabels(labels)
+	if err != nil {
+		return "", false
+	}
+	return id, true
+}
+
 func sandboxIDFromLabels(labels map[string]string) (string, error) {
 	id := labels[labelSandboxID]
 	if err := validateSandboxID(id); err != nil {

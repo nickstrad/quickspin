@@ -63,6 +63,22 @@ The new branch makes the empty-input behavior explicit.
   remove.
 - Report validation performed and anything that remains untested.
 
+### Length
+
+Be brief. Density beats completeness — a report the user skims is worse than a shorter
+one they read.
+
+- Two or three sentences per finding. One is often enough.
+- Prefer the shortest form that still teaches: a table or a one-line list beats
+  paragraphs when the content is a set of similar items.
+- Say a thing once. Do not restate a point in the summary that a finding already made,
+  and do not re-explain a mechanism explained earlier in the same response.
+- Cut throat-clearing, recaps of the request, and transitions between findings.
+- Skip the closing reflection. Findings, an unnumbered cleanup note, and validation are
+  the whole report.
+- Spend the words where they earn it: a subtle failure mode or a tradeoff the user
+  should challenge deserves a paragraph. A rename does not.
+
 ## Validation
 
 Use the repository's existing commands where applicable:

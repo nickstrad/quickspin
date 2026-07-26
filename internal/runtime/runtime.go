@@ -30,11 +30,15 @@ type Info struct {
 	CreatedAt time.Time `json:"created_at" yaml:"created_at"`
 }
 
-func NewInfo(id string, state State) Info {
+// NewInfo takes createdAt rather than reading the clock: the backend knows when
+// the sandbox was actually created, and a constructor that stamps time.Now()
+// reports the moment of observation instead — making every Info in a listing
+// look microseconds apart and any sort by age meaningless.
+func NewInfo(id string, state State, createdAt time.Time) Info {
 	return Info{
 		ID:        id,
 		State:     state,
-		CreatedAt: time.Now(),
+		CreatedAt: createdAt,
 	}
 }
 
