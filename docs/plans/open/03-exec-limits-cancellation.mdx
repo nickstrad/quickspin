@@ -57,11 +57,34 @@ must match the Spec. When the memory limit trips, the kernel OOM-kills the proce
 the shell reports exit 137 (128 + SIGKILL); when `pids.max` is hit, `fork` fails with
 `EAGAIN` — the fork bomb doesn't get killed, it simply cannot spawn.
 
+<Mermaid
+  caption="Every hop is a translation that can silently drop a field: the pure specToHostConfig table pins the first hop, the manual cgroup-file read pins the second, and the two kernel behaviors on the right are what the negative tests deliberately provoke."
+  code={`
+flowchart LR
+    SP["Spec<br/>CPULimit 0.5 cores<br/>MemoryLimit in bytes<br/>PidsLimit 64"] --> HC["container.HostConfig<br/>NanoCPUs 500000000<br/>Memory in bytes<br/>PidsLimit *int64 — nil is unlimited"]
+    HC --> CG["cgroup v2 controller files<br/>cpu.max, memory.max, pids.max"]
+    CG --> K1["memory.max exceeded:<br/>kernel OOM-kills, exit 137"]
+    CG --> K2["pids.max hit: fork fails<br/>with EAGAIN — nothing is killed"]
+`}
+/>
+
 <KeyPoint label="Invariant">
   A limit that exists in `Spec` but not in the container's cgroup files is worse than
   no limit: callers will trust it. `TestSpecToHostConfigMapsEveryLimit` plus one manual
   cgroup read is the honest check.
 </KeyPoint>
+
+The general form of that invariant outlives Docker, so it is committed here rather than
+discovered by the third backend: **a backend that cannot enforce a `Spec` limit must
+reject the spec, not silently ignore the field.** Every limit in `Spec` is stated in
+neutral units — cores, bytes, a process count — but the backends do not all have a
+mechanism for each one. Firecracker sizes a VM at boot (`CPULimit` becomes a vCPU
+*count*, so 0.5 has no equivalent without cgrouping the VMM process; `PidsLimit` is a
+guest-side concern the VMM API cannot set). A Kata pod expresses memory and fractional
+CPU as Kubernetes resource limits, but has no standard pod-level field for a process
+count — `podPidsLimit` is a kubelet node setting. So validation is not one shared pure
+function: `validateSpec` checks that values are *sane*, and each backend additionally
+rejects the fields it cannot honor. Plans 14 and 21 inherit that obligation.
 
 ### Concept: cancellation must cross the wire
 
@@ -76,6 +99,16 @@ directly) and whether it is still running; a second exec can run a kill command 
 the container; polling `ContainerExecInspect` after the kill confirms the reap. The
 timeout path is the same machinery with `context.WithTimeout` upstream, translated to
 `ErrExecTimeout` at the boundary.
+
+That machinery has a Docker-shaped lifetime; the behavior it produces does not. The
+kill-by-second-exec dance exists because Docker's API offers no handle on the exec'd
+process — plan 07's guest agent supervises its own children in their own pid namespace
+and kills them directly, and plans 14 and 21 inherit that path rather than rebuilding
+this one. What is permanent is the contract: cancellation kills the process, the call
+does not return before the reap, and a deadline is distinguishable from a plain cancel
+via `errors.Is`. Build the Docker version knowing it is scaffolding for the contract,
+the same way this plan's `stdcopy` demux is scaffolding for the guest agent's native
+stream split.
 
 <Figure caption="The exec request path. Cancellation closes the attach connection for free, but killing the remote process is a separate, deliberate step.">
   <svg viewBox="0 0 640 210" role="img" aria-label="Exec path: ExecCreate, ExecAttach with demux, ExecInspect; cancel path kills the process in the container">
@@ -113,6 +146,32 @@ timeout path is the same machinery with `context.WithTimeout` upstream, translat
   </svg>
 </Figure>
 
+As a sequence, the two ways an exec can end order like this:
+
+<Mermaid
+  caption="The two orderings the tests exist to pin: the happy path never reads the exit code before the stream reaches EOF, and the cancel path never returns before the reap loop confirms the process is actually gone."
+  code={`
+sequenceDiagram
+    participant E as Exec(ctx, id, cmd)
+    participant D as Docker daemon
+    E->>D: ContainerExecCreate (Tty false, attach both streams)
+    E->>D: ContainerExecAttach (hijacked connection)
+    D-->>E: multiplexed frames, stdcopy splits into 2 capped buffers
+    alt stream reaches EOF
+        E->>D: ContainerExecInspect (poll until Running is false)
+        D-->>E: exit code
+        E-->>E: return ExecResult
+    else ctx cancelled or deadline passes
+        E-->>E: close the attach conn (unblocks the read, orphans the process)
+        E->>D: second exec: kill the process inside the container
+        loop until Running is false
+            E->>D: ContainerExecInspect
+        end
+        E-->>E: return ErrExecTimeout on deadline, ctx.Err() on plain cancel
+    end
+`}
+/>
+
 ## Design and interfaces
 
 Extend `internal/runtime`:
@@ -124,7 +183,8 @@ type Spec struct {
     CPULimit     float64 // cores, e.g. 0.5
     MemoryLimit  int64   // bytes
     PidsLimit    int64
-    AllowNetwork bool    // false => no outbound network (Docker "none" network)
+    AllowNetwork bool    // false => no outbound network; see the note below on what
+                         // that means once the guest agent needs the network
 }
 
 type ExecResult struct {
@@ -153,6 +213,17 @@ type ExecOpts struct {
 Committed decision: output is **buffered** with a size cap (e.g. 1 MiB per stream,
 truncation flagged in the result). Streaming is deliberately deferred to the guest-API
 plan (07) so it is built once, in the right place.
+
+Committed decision: `AllowNetwork: false` means **no egress**, not "no network
+interface" — even though this plan implements it with Docker's `none` network, which
+happens to deliver both. The distinction matters one plan later. Plan 07 moves exec and
+files onto a guest agent the plane reaches over the network, and plan 21's Kata pods
+always receive a pod IP; an interface-less sandbox and a reachable guest agent are
+mutually exclusive there. Fixing the *meaning* now keeps three backends from
+implementing three different flags: later backends satisfy it with a filter — firewall
+rules, a Kubernetes `NetworkPolicy` — while control-plane traffic still reaches the
+guest. Egress allowlists and DNS filtering remain deferred to the isolation capstones;
+only the binary flag's definition is settled here.
 
 ## Tasks
 
