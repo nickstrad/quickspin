@@ -1,0 +1,261 @@
+# One-off coding plan — Docker runtime test foundation
+
+This is a bounded implementation plan, not a numbered step in Quickspin's platform
+learning path. It closes the testing gap left around the existing Docker runtime and
+establishes the harness later runtime plans will extend. The durable rules live in
+[`reference/runtime-backend-testing.mdx`](reference/runtime-backend-testing.mdx); if the
+implementation teaches a different rule, update that reference in the same change.
+
+Scope decision (recorded): the six approved lanes are pure table tests, adapter
+protocol tests, `runtimetest.Fake` consumer tests, live `RunConformance`, the CLI
+smoke as the full-stack script, and the dedicated reusable Lima harness. The fresh
+disposable-VM lane is deferred until CI exists.
+
+## Outcome
+
+After this work, Quickspin will have two deliberately separate ways to test runtime
+behavior:
+
+```text
+make test
+  pure helpers + Docker SDK adapter tests + CLI tests using runtimetest.Fake
+
+make test-docker
+  shared Runtime conformance + CLI smoke against a dedicated Lima daemon,
+  with a native leak check every run
+```
+
+The fast suite will still work on a machine with no Docker. Live tests will exercise the
+real Moby client, forwarded Unix socket, image pull, daemon state, and cleanup. One CLI
+smoke flow will prove that the compiled entrypoint and runtime compose correctly without
+duplicating the CLI's existing fake-backed test matrix.
+
+A third lane — a fresh disposable VM built from the checked-in template, run, leak-checked,
+and deleted — is **deferred until CI exists**. Its payoff is reproducibility for a machine
+that isn't yours; the reusable VM plus the clean-baseline assertion provides the same
+leak-detection signal for the daily loop at a fraction of the wall-clock and orchestration
+cost.
+
+<KeyPoint label="Boundary">
+  `runtimetest.Fake` proves consumers call `Runtime` correctly.
+  `runtimetest.RunConformance` proves a real implementation honors `Runtime`.
+  The CLI smoke script proves those pieces are wired together in the shipped process.
+</KeyPoint>
+
+## Decisions this plan commits to
+
+Gating, `DOCKER_HOST` hygiene, cleanup order, and the leak-check rules follow the
+[runtime testing reference](reference/runtime-backend-testing.mdx) and are not restated
+here. Specific to this change:
+
+- Existing Moby-client-over-`httptest.Server` tests are the Docker adapter seam. Do not
+  introduce a hand-written Docker client interface or Testcontainers for this work.
+- The core conformance suite covers only behavior promised by `runtime.Runtime` and its
+  shared sentinels. Image-specific and future exec/files/isolation clauses remain
+  separate suites.
+- Live assertions tolerate bounded convergence. Docker is usually immediate, but the
+  same suite must later accommodate Kubernetes deletion and other asynchronous backends.
+- A dedicated Lima instance owns its whole Docker daemon. Tests may sweep Quickspin
+  resources there, but never on the developer's ordinary `quickspin` VM or active Docker
+  context.
+- **Rollback after a failed operation uses a detached bounded context**
+  (`context.WithoutCancel` plus a short deadline), never the caller's possibly-cancelled
+  context — otherwise a cancelled create is guaranteed to leak its container. The
+  negative test asserts cleanup runs after caller cancellation. Every future backend
+  inherits this rule; see the reference's cancellation section.
+- **A dirty dedicated daemon is refused, not cleaned.** Dirt on a test-owned VM can only
+  mean a prior run leaked; auto-cleaning would normalize away the one signal the harness
+  exists to produce. The run fails printing every survivor; `make test-docker-clean` is
+  the explicit, separate mop.
+- A pinned multi-architecture image with a long-running default process drives the happy
+  lifecycle. Missing-image and partial-create failures are deterministic adapter tests;
+  live registry failure is not required for this plan.
+- This repoints `make test-docker` from plan 02's "the plan 01 Lima socket" to the
+  dedicated test VM; plan 02's wording and `docs/index.mdx` are updated in the same
+  change so the two do not disagree.
+
+## Proposed file layout
+
+| File | Responsibility |
+| --- | --- |
+| `internal/runtime/docker_test.go` | Pure Docker config and daemon-free SDK adapter tests. |
+| `internal/runtime/docker_live_test.go` | Environment-gated Docker construction, native leak checks, and invocation of shared conformance. Use external package `runtime_test` so it can import both `runtime` and `runtimetest`. |
+| `internal/runtime/runtimetest/conformance.go` | Exported core lifecycle conformance helper for real runtime implementations. |
+| `internal/runtime/runtimetest/conformance_test.go` | Two focused harness tests only: delayed visibility proves the suite polls; a deliberately broken runtime proves the suite can fail. Not a fourth runtime implementation. |
+| `hack/test-runtime-docker.sh` | Reusable-VM orchestration, `DOCKER_HOST`, traps, test execution, and native leak reporting. |
+| `hack/validate-runtime-cli.sh` | One compiled-binary lifecycle smoke flow; assumes the caller supplied a working `DOCKER_HOST`. |
+| `Makefile` | Explicit reusable, fresh, setup, and teardown targets. |
+
+The in-memory runtime in `conformance_test.go` stays minimal: enough state to delay an
+observation and to misbehave on demand, nothing more. If it grows a config surface or its
+own helper tests, it has become a fourth backend and should be cut back.
+
+## Conformance contract for this change
+
+`RunConformance` should accept a real `runtime.Runtime`, one backend-valid `runtime.Spec`,
+and a bounded observation timeout. Keep backend-native setup and leak detection in the
+calling live test: the shared suite must not import Docker, client-go, or Firecracker
+types.
+
+The initial suite should assert:
+
+1. `Create` returns a nonempty ID, `StateRunning`, and a nonzero UTC `CreatedAt`.
+2. `Inspect` converges on the created sandbox and preserves its identity.
+3. `List` converges on a result containing that identity; it need not contain exactly one
+   result because a backend may contain pre-existing resources.
+4. Repeated observations return a stable creation time, allowing for the documented
+   difference between `Create`'s local timestamp and Docker's second-resolution
+   timestamp. Do not require exact equality across those two sources in this change.
+5. `Destroy` converges on `Inspect` returning `ErrNotFound`.
+6. Destroying the same ID again succeeds.
+7. Inspecting an unknown, well-formed sandbox ID returns `ErrNotFound`.
+8. Inspecting a malformed ID returns `ErrInvalidSandboxID`.
+
+Register cleanup immediately after a successful create. A failed assertion after create
+must not skip destroy. Polling uses a deadline and reports the last observed value and
+error; fixed multi-second sleeps make failures slow without making them informative.
+
+<Callout tone="warning" title="Do not overfit the first backend">
+  Docker can list and delete immediately. Kubernetes and cloud-backed runtimes may only
+  converge within a deadline. The shared contract should say “observable within the
+  harness timeout,” while a Docker-specific test may still pin an immediate SDK request.
+</Callout>
+
+## Tasks
+
+<TaskList>
+  <Task title="Expand Docker's daemon-free adapter tests">
+    Add direct tests for `newContainerConfigs`, `labelFilter`, and error classification.
+    Exercise `Create`, `Inspect`, `List`, and `Destroy` through the real Moby client
+    pointed at `httptest.Server`. Pin request order and bodies where they are Quickspin
+    decisions, and inject response failures for rollback and sentinel translation.
+  </Task>
+  <Task title="Introduce runtimetest.RunConformance">
+    Add the shared core lifecycle suite plus its two harness self-tests (delayed
+    visibility, broken runtime). Keep `Fake` unchanged in purpose: it remains the
+    function-field double for CLI, control-plane, and reconciler consumers.
+  </Task>
+  <Task title="Add gated Docker conformance">
+    Add `docker_live_test.go`, skipped unless `QUICKSPIN_TEST_DOCKER=1`. Construct the
+    runtime from the supplied Docker environment, run core conformance with the pinned
+    long-running image, and query Docker directly for before/after ownership snapshots.
+  </Task>
+  <Task title="Add the reusable Lima test environment">
+    Teach `hack/test-runtime-docker.sh` to own a dedicated `quickspin-runtime-test` VM.
+    Create or start it, derive `DOCKER_HOST` from `limactl list`, refuse a dirty
+    baseline, run uncached live tests, fail loudly on leaked managed containers, and
+    leave the healthy VM running for the next development loop. Add
+    `make test-docker-clean` as the explicit mop.
+  </Task>
+  <Task title="Add one CLI lifecycle smoke script">
+    Build the real binary and run create → inspect → list → destroy → destroy through
+    separate processes using JSON output. Extract the created ID, register a trap before
+    later assertions, verify post-destroy inspect fails, and leave detailed parsing,
+    rendering, and sentinel cases in the existing fake-backed CLI tests.
+  </Task>
+  <Task title="Document and validate the test lanes">
+    Add Make targets and concise help text, update the running-tests section in
+    `docs/index.mdx`, and align plan 02's `make test-docker` wording with the dedicated
+    test VM. Confirm both skipped and enabled behavior. Keep
+    [`reference/runtime-backend-testing.mdx`](reference/runtime-backend-testing.mdx)
+    aligned with any harness decision made during implementation.
+  </Task>
+</TaskList>
+
+## Adapter test inventory
+
+The daemon-free Docker tests should cover the paths whose failures are hard or unsafe to
+manufacture against a live daemon:
+
+| Area | Required behavior |
+| --- | --- |
+| Config translation | Image, sorted environment, both managed labels, restart policy, and port policy reach the create request. |
+| Pull | The response stream is waited and closed; request and stream failures retain their cause and map not-found to `ErrImageMissing`. |
+| Create order | Pull precedes create; create precedes start. |
+| Partial failure | Start failure force-removes the exact newly created container. If removal also fails, the returned chain retains both causes and names the leak. |
+| Cancellation | A create cancelled after allocation still removes its container: cleanup runs on the detached bounded context, asserted by test. |
+| Lookup | Malformed IDs stop before a daemon request; valid IDs use both exact labels and `All=true`. |
+| List | Only managed, valid IDs become `Info`; state and timestamps translate; malformed owned resources warn and do not hide healthy results. |
+| Destroy | Lookup absence and removal not-found are success; other list/remove errors retain their cause. |
+
+Do not assert incidental Moby details such as every header or generated API-version
+prefix. Assert the request properties Quickspin relies on and let the SDK own the rest.
+
+## Lima lifecycle
+
+One mode: a fixed, test-owned `quickspin-runtime-test` VM that stays running between
+runs and must hold zero managed containers at both ends of every run. (The fresh
+disposable mode is deferred until CI exists; see the outcome section.)
+
+1. Preflight `limactl`, `docker`, and `go`.
+2. Prove the VM is test-owned before any destructive cleanup.
+3. Export the forwarded socket as `DOCKER_HOST`.
+4. Wait for the daemon with a bounded readiness check.
+5. **Refuse a dirty baseline**: any pre-existing managed container fails the run with
+   the survivor list printed; `make test-docker-clean` is the explicit remedy.
+6. Run `go test -count=1` with `QUICKSPIN_TEST_DOCKER=1`.
+7. Run the CLI smoke against the same `DOCKER_HOST`.
+8. Query Docker directly with `label=quickspin.managed=true`, report every survivor, and
+   remove survivors only after recording the test as failed.
+
+The trap must run on ordinary failure, interrupt, and successful completion, and the VM
+is always left running for the next loop.
+
+## CLI smoke boundary
+
+The smoke script should prove composition, not repeat unit tests:
+
+```text
+compiled quickspin
+  → Cobra argument handling
+  → runtime.NewDockerRuntime(nil, ...)
+  → DOCKER_HOST forwarded socket
+  → real daemon lifecycle
+```
+
+One successful JSON lifecycle plus the idempotent second destroy is enough. Do not repeat
+the YAML/table snapshots, invalid environment matrix, sorting, or log-level cases already
+covered through `runtimetest.Fake`.
+
+## Definition of done
+
+- `make test` passes with no Docker daemon and reports the live Docker suite as skipped.
+- The new daemon-free tests cover every row in the adapter inventory.
+- `runtimetest.RunConformance` has focused tests for delayed visibility, deadline
+  diagnostics, list membership, and registered cleanup; live Docker is still the proof
+  that an actual backend passes the whole suite.
+- `make test-docker` runs uncached core conformance against the reusable dedicated Lima
+  VM and leaves zero managed containers; a dirty starting baseline is refused with the
+  survivors printed, and `make test-docker-clean` removes them.
+- The CLI smoke uses the compiled binary and succeeds against that same forwarded socket.
+- Interrupting the orchestration runs cleanup and prints what, if anything, remains.
+- Neither live mode changes the developer's active Docker context or touches the normal
+  `quickspin` Lima VM.
+- `make vet`, `make build`, and `make docs-build` pass.
+
+Negative checks:
+
+- A simulated start failure removes the created container.
+- A create cancelled mid-operation still removes its container (the detached-cleanup
+  rule made visible).
+- A simulated start-plus-cleanup failure returns both causes and identifies the leaked
+  container.
+- A delayed in-memory observation proves the harness polls rather than assuming immediate
+  visibility, and its timeout helper reports the last observation.
+- A deliberately leaked managed container makes the live harness fail before it removes
+  the survivor.
+
+Deliberately untested in this one-off: Docker daemon restart during create, concurrent
+live creates, registry outages, Firecracker/Kata behavior, reconciler recovery, and the
+fresh-VM reproducibility lane (deferred until CI). The rest belong to the
+backend-specific and crash layers described in the runtime testing reference.
+
+## Question to settle while implementing
+
+- Does Docker `Create` promise only that `ContainerStart` accepted the request, or that
+  the container remains running long enough to observe? Use a long-running image for
+  core conformance, then record short-lived-image behavior in a Docker-specific test
+  rather than silently deciding through fixture choice.
+
+(The rollback-context and dirty-daemon questions from earlier drafts are settled above:
+detached bounded cleanup context; refuse and print.)

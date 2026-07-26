@@ -94,7 +94,8 @@ not by itself authorize implementation.
 
 [`Docker runtime test foundation`](docker-runtime-testing-plan.mdx) is an unnumbered,
 bounded coding plan for daemon-free Docker adapter coverage, shared runtime conformance,
-live tests through a reusable or fresh Lima VM, and one compiled-CLI lifecycle smoke.
+live tests through a dedicated reusable Lima VM, and one compiled-CLI lifecycle smoke
+(a fresh disposable-VM lane is deferred until CI exists).
 It is intentionally outside the platform learning sequence: implementing it strengthens
 the test seam used by later runtime plans without adding a new platform capability.
 

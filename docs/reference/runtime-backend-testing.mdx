@@ -1,0 +1,388 @@
+# Runtime Backend Testing
+
+This reference defines how Quickspin tests implementations of `runtime.Runtime`. Future
+plans that add or widen a runtime backend should link here, state what they add to each
+layer, and name any clause they cannot yet satisfy. The code remains authoritative; when
+the interface contract changes, update the conformance suite and this document together.
+
+The foundation is introduced by the
+[`Docker runtime test one-off`](../docker-runtime-testing-plan.mdx). This document is the
+lasting extension guide, not a claim that every described harness exists already.
+
+## The five layers
+
+No single test can be fast, deterministic, infrastructure-faithful, and full-stack at
+once. Each layer owns a different question:
+
+| Layer | Question | Normal command | Failure locality |
+| --- | --- | --- | --- |
+| Pure mapping tests | Did Quickspin make the right decision or translation? | `make test` | Exact helper and table row |
+| Adapter protocol tests | Did the backend issue the right external operations and handle their failures? | `make test` | Exact SDK/API operation |
+| Consumer tests with `runtimetest.Fake` | Did the CLI, plane, or reconciler call `Runtime` correctly? | `make test` | Consumer behavior |
+| Live runtime conformance | Does a real backend honor the shared lifecycle contract? | Backend-gated target | Contract clause + backend |
+| Full-stack validation | Does the built system work across process, kernel, network, and infrastructure boundaries? | `hack/validate-*.sh` | End-to-end stage |
+
+<KeyPoint label="Diagnostic rule">
+  Test a behavior at the lowest layer that can observe it honestly. Repeat it at a higher
+  layer only when the integration itself is the behavior under test.
+</KeyPoint>
+
+A sixth piece — the dedicated reusable test environment described below — is not a
+layer but the vehicle the top two layers run in; it owns readiness, ownership proof,
+and the leak check, so the tests themselves stay about the contract.
+
+Examples:
+
+- Sorting environment keys belongs in a pure table test.
+- Pull → create → start ordering belongs in a Docker adapter test.
+- `--env KEY=VALUE` becoming `Spec.Env` belongs in a CLI test using
+  `runtimetest.Fake`.
+- Create → inspect → list → destroy belongs in live conformance.
+- A Kata sandbox reporting a different kernel from its Kubernetes node belongs in a
+  full-stack isolation validation.
+
+## Two jobs inside `runtimetest`
+
+The package contains test support for both sides of the interface boundary, but the
+tools must not be confused.
+
+### `Fake` tests consumers
+
+`runtimetest.Fake` answers each method through a function field. It is appropriate when
+the subject is code that holds a `runtime.Runtime`:
+
+- CLI argument forwarding and output
+- control-plane error translation
+- reconciler decisions and retry behavior
+- cancellation propagation from a caller
+
+The fake does not own lifecycle state unless a particular test gives it state. It cannot
+prove that a backend's create appears in list or that destroy is idempotent.
+
+### `RunConformance` tests implementations
+
+`runtimetest.RunConformance` receives a real implementation and exercises only the
+behavior shared by all runtimes. Every runtime backend must eventually pass it in a live
+environment.
+
+```text
+CLI / plane / reconciler ──tested with──> runtimetest.Fake
+
+Docker / Firecracker / Kata ──tested by──> runtimetest.RunConformance
+```
+
+A small stateful runtime may test the conformance helper itself. That proves the helper
+recognizes compliant and broken behavior; it does not count as a backend conformance
+run.
+
+## The core runtime contract
+
+The shared suite follows `runtime.Runtime`, not the capabilities of its first backend.
+Its clauses are intentionally small:
+
+| Operation | Shared assertion |
+| --- | --- |
+| Create | Success returns a nonempty Quickspin identity, running state, and meaningful creation time. |
+| Inspect | A created sandbox becomes observable with the same identity. |
+| List | A created sandbox becomes one member of the result; unrelated resources may also exist. |
+| Destroy | The sandbox becomes absent within the harness deadline. |
+| Repeat destroy | Destroying an absent sandbox succeeds. |
+| Unknown ID | Inspect returns `ErrNotFound`; destroy still succeeds. |
+| Malformed ID | `runtime.ErrInvalidSandboxID` is returned before backend lookup. There is exactly one such sentinel; the suite imports it, and no backend mints its own. |
+
+“Becomes observable” is deliberate. Docker usually answers immediately; Kubernetes
+objects and cloud-mediated runtimes can be eventually consistent. The suite polls with a
+deadline and reports the last observation rather than imposing Docker's timing on every
+future implementation.
+
+### What core conformance should not assume
+
+- `List` contains exactly the resources created by the current test.
+- `Create.CreatedAt` exactly equals `Inspect.CreatedAt`; sources may have different
+  precision.
+- Every backend pulls OCI images in the same way.
+- Destroyed infrastructure disappears from its provider's native list immediately.
+- A successful lifecycle proves workload execution, filesystem behavior, network
+  policy, or kernel isolation.
+
+Those are either backend-adapter details or separate capability suites.
+
+## Capability suites
+
+When `Runtime` grows, prefer one suite per coherent shared capability:
+
+```text
+RunConformance             lifecycle identity and cleanup
+RunImageConformance        image resolution and ErrImageMissing
+RunExecConformance         streams, exit status, context cancellation
+RunFilesystemConformance   path rules and file round-trips
+RunNetworkConformance      allowed and denied connectivity
+RunSnapshotConformance     save, restore, and identity semantics
+```
+
+Do not build one configuration struct with a growing list of `SupportsX` booleans. A
+backend either implements a capability interface and runs its suite, or its plan records
+that the capability is unsupported. Separate suites keep failures named after the
+contract they violate.
+
+Only `RunConformance` exists until the plans that add each capability (exec in 03, files
+in 04, snapshots in 11) are implemented. Do not scaffold empty capability suites ahead
+of the interface they test — each suite is created by the plan that creates its
+capability.
+
+When adding a method to `runtime.Runtime`:
+
+1. Decide whether it is universal or a separate capability interface.
+2. Update `runtimetest.Fake` so unexpected consumer calls remain loud.
+3. Add consumer tests for argument and error propagation.
+4. Extend the appropriate conformance suite.
+5. Make every existing live backend compile against the changed suite in the same
+   change, even if an expensive run remains gated.
+6. Update this reference with timing, error, and cleanup semantics that code alone does
+   not express.
+
+## What every backend plan must specify
+
+A plan that introduces a runtime backend should include this table, filled with concrete
+answers:
+
+| Requirement | The plan must name |
+| --- | --- |
+| Valid fixture | The smallest deterministic spec that reaches running. |
+| Pure decisions | State mapping, config/template construction, identity, resource allocation, and validation helpers. |
+| Adapter seam | The real SDK/client used with a fake server, fake socket, generated fake client, or process runner. |
+| Live environment | How it is created, checked for readiness, and destroyed. |
+| Gate | The environment variable and Make target that opt into cost or host requirements. |
+| Native ownership query | How resources owned by Quickspin are found without trusting `Runtime.List`. |
+| Teardown | What is registered immediately after allocation and what the final mop catches. |
+| Special positive proof | The backend property core conformance cannot see, such as guest health or kernel isolation. |
+| Special negative proof | A characteristic failure such as start rollback, no capacity, dead VMM, or missing RuntimeClass. |
+| Deliberate gap | What remains untested and why. |
+
+Link to this document instead of re-explaining the five layers in every plan. The plan
+should spend its detail on the backend-specific rows.
+
+## Adapter test seams by backend
+
+The adapter test should retain the real serialization and error-decoding layer whenever
+that can be done cheaply.
+
+| Backend | Daemon-free seam | What it can prove | What still needs live infrastructure |
+| --- | --- | --- | --- |
+| Docker | Real Moby client pointed at `httptest.Server` | Request options and bodies, pull stream handling, response classification, partial-create cleanup | Daemon state, Unix socket, real pull/start/list/remove |
+| Firecracker | HTTP server on a temporary Unix socket plus a controllable process launcher | API sequence, socket readiness timeout, rollback order, joined cleanup failures | KVM boot, tap networking, guest health, process death |
+| Kubernetes/Kata | Pure Pod builders plus client-go fake/reactors | Object shape, labels/selectors, requested verbs, fabricated status mapping | API validation/defaulting, scheduler, RuntimeClass, Kata VMM, pod networking |
+| Cloud-hosted worker | Provider SDK client pointed at a fake HTTP endpoint | Request encoding, pagination, provider error mapping | Cloud-init, host join, KVM, runtime operation |
+
+Generated Kubernetes fakes intentionally do not reproduce all API-server validation,
+defaulting, status, or selector behavior. They are an adapter test tool, not a small
+cluster. A live RuntimeClass path remains mandatory for Kata.
+
+<Callout tone="note" title="Provider conformance is a separate boundary">
+  EC2, DigitalOcean, or Hetzner conformance answers whether Quickspin can obtain and
+  release a host. Runtime conformance answers whether a ready host can manage a sandbox.
+  The full-stack script connects the two; neither shared suite should absorb the other's
+  contract.
+</Callout>
+
+## Live harness requirements
+
+Each live backend supplies a fixture around the shared suite:
+
+- A constructed runtime implementation
+- A deterministic valid `Spec`
+- A bounded observation timeout appropriate to the backend
+- Native before/after ownership snapshots
+- Cleanup for every resource created, registered as soon as its identity is known
+- A final mop that reports survivors, marks the test failed, then removes them
+
+The native ownership query matters because the implementation under test may be the
+thing that is broken. A Docker container with a malformed Quickspin ID is skipped by
+`Runtime.List`, but Docker's `label=quickspin.managed=true` query still finds it. Similar
+rules apply to Firecracker work directories/processes/tap devices and Kubernetes labels
+or namespaces.
+
+### Cleanup order
+
+Live tests use two cleanup layers:
+
+1. **Precise cleanup:** destroy the sandbox ID returned by the operation.
+2. **Backend-native mop:** compare the native resource set against the pre-test
+   baseline, report every survivor, then remove only test-owned additions.
+
+Deleting an entire disposable VM or namespace happens after the mop. Otherwise a
+product leak is indistinguishable from successful infrastructure teardown.
+
+### Context cancellation
+
+Cancellation tests must distinguish operation cancellation from cleanup cancellation.
+If an operation has allocated an external resource, using the already-cancelled caller
+context for rollback guarantees a leak.
+
+**The project default: rollback uses a detached bounded context**
+(`context.WithoutCancel(ctx)` plus a short deadline), and every backend tests that a
+cancelled create still removes what it allocated. The alternative — stop with the
+caller's context and report the leaked native identity for a reconciler to recover — is
+principled but requires the reconciler to exist; revisit it as a deliberate change once
+plan 06 is live, never as an accident of which context was in scope.
+
+## Gating and commands
+
+Live files should compile during the normal suite and skip at runtime:
+
+| Backend | Suggested gate | Suggested target |
+| --- | --- | --- |
+| Docker | `QUICKSPIN_TEST_DOCKER=1` | `make test-docker` |
+| Firecracker | `QUICKSPIN_TEST_FIRECRACKER=1` | `make test-firecracker` |
+| Kubernetes/Kata | `QUICKSPIN_TEST_KATA=1` | `make test-kata` |
+
+Rules:
+
+- Do not use build tags merely to hide missing infrastructure.
+- Live targets use `go test -count=1`; Go cannot know that external state changed.
+- A skipped test states the gate and the required environment.
+- Shared environments do not use `t.Parallel`.
+- Tests set explicit context deadlines rather than relying on the outer command to hang
+  forever.
+- Expensive cloud gates state the expected spend before provisioning.
+
+## Dedicated reusable environments
+
+Each live backend runs against a fixed, test-owned environment — a VM, cluster, or
+cloud account scope that exists only for tests. It stays running across attempts, must
+hold zero Quickspin resources at both ends of every run, and refuses a dirty starting
+baseline with the survivors printed rather than cleaning silently. This keeps the
+feedback loop short while keeping the developer's ordinary environment structurally out
+of reach.
+
+A fresh disposable mode — build the environment from checked-in configuration, run,
+assert cleanup, delete — is **deferred until CI exists**. Its payoff is reproducibility
+on a machine that isn't yours; until there is such a machine, the reusable environment
+plus the dirty-baseline refusal carries the leak-detection signal at a fraction of the
+orchestration cost.
+
+Never infer test ownership from a broad name prefix immediately before deletion. The
+harness should know whether it created the exact VM, namespace, server, or directory and
+refuse destructive cleanup when that proof is absent.
+
+The Docker harness passes `DOCKER_HOST` directly rather than switching the global Docker
+context. Future harnesses should follow the same rule: connection configuration belongs
+to the child test process, not mutable developer-wide state.
+
+## Polling, time, and flakes
+
+Use bounded polling only for genuinely asynchronous observations:
+
+- Kubernetes scheduling and deletion
+- guest health after VM boot
+- cloud instance visibility
+- reconciler convergence
+
+A polling failure should print:
+
+- the contract clause
+- elapsed time and deadline
+- the last observed state
+- the last error
+- the backend-native identity needed for diagnosis
+
+Do not hide deterministic adapter bugs behind retries. Request body errors, wrong labels,
+and incorrect sentinel translation should fail once in the fast suite.
+
+Creation timestamps may come from different clocks and precisions. Core conformance
+should assert meaningful, stable values and document tolerated skew. Exact timestamp
+equality belongs only where the contract guarantees one source of truth.
+
+## CLI and full-stack scope
+
+CLI tests using `runtimetest.Fake` should remain comprehensive for:
+
+- flags and positional arguments
+- conversion into runtime types
+- output formats and sorting
+- error wrapping and sentinel preservation
+- validation that stops before a runtime call
+
+The live CLI smoke is intentionally small:
+
+```text
+create → inspect → list → destroy → destroy again → confirm absent
+```
+
+Its purpose is to catch main-package construction, environment wiring, separate-process
+state, stdout/stderr, and exit status. Do not replicate every CLI table row against every
+runtime.
+
+The CLI smoke **is** the full-stack lane while a backend only has lifecycle: one script
+per backend environment, not a smoke script plus a separate `validate` script proving
+the same flow. When a plan adds capabilities (exec, files, isolation, crash recovery),
+its `hack/validate-*.sh` extends that same script's flow rather than starting a second
+one. Backend-specific full-stack validation adds only what lower layers cannot prove:
+
+- Docker: forwarded socket and real daemon lifecycle
+- Firecracker: `/dev/kvm`, distinct guest kernel, tap/socket/rootfs cleanup, killed VMM
+- Kata: RuntimeClass selection, guest kernel isolation, unschedulable cleanup, deleted
+  pod reconciliation
+- Cloud worker: provision, bootstrap, join, sandbox lifecycle, drain, provider deletion
+
+## Review checklist for a new runtime
+
+- [ ] Pure state/config/resource decisions have daemon-free table tests.
+- [ ] The external adapter has deterministic success and failure tests.
+- [ ] Consumer code still uses `runtimetest.Fake`; backend SDK types do not leak upward.
+- [ ] The backend runs core conformance in a real environment.
+- [ ] Every supported capability suite runs there too.
+- [ ] A native ownership query can find malformed and half-created resources.
+- [ ] Per-resource cleanup is registered immediately.
+- [ ] The final mop fails loudly before removing survivors.
+- [ ] The live gate compiles when disabled and uses `-count=1` when enabled.
+- [ ] At least one backend-specific negative path proves rollback or convergence.
+- [ ] The CLI smoke is reused or minimally extended for backend routing.
+- [ ] Host, cluster, and cloud setup is reproducible from checked-in scripts.
+- [ ] Cost, privilege, architecture, and KVM requirements are printed before the run.
+- [ ] Deliberately untested behavior is named in the plan's definition of done.
+
+## Further reading
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="Docker Engine SDKs"
+    href="https://docs.docker.com/reference/api/engine/sdk/"
+  >
+    The real client boundary used by Docker adapter tests and the `DOCKER_HOST`
+    environment contract used by live tests.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Lima Docker template"
+    href="https://lima-vm.io/docs/examples/containers/docker/"
+  >
+    The canonical forwarded-socket workflow behind reusable and fresh Docker test VMs.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Firecracker getting started"
+    href="https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md"
+  >
+    KVM prerequisites, API socket mechanics, and Firecracker's own split between
+    environment checks and integration tests.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Kubernetes client-go fake"
+    href="https://pkg.go.dev/k8s.io/client-go/testing"
+  >
+    The generated fake's intended unit-test role and the API-server behavior it
+    deliberately does not reproduce.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Kubernetes RuntimeClass"
+    href="https://kubernetes.io/docs/concepts/containers/runtime-class/"
+  >
+    The live cluster mechanism a Kata backend must prove rather than infer from a fake
+    Pod client.
+  </Resource>
+</Resources>
+
