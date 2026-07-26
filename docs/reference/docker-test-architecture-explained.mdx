@@ -1,0 +1,519 @@
+# Docker Test Architecture, Explained
+
+This document explains the runtime test architecture that exists in the code today — what
+each layer is, the concepts behind it, why it is worth this much machinery, and how the
+same shape extends to Firecracker, Kata, or any future backend. It is the companion to
+[`runtime-backend-testing.mdx`](runtime-backend-testing.mdx), which is the rulebook: the
+durable requirements every runtime plan must satisfy. Read this one to understand; read
+that one to comply.
+
+The goal is that "the suite is green" stops being a fact you trust and becomes a fact you
+can *explain*: green here means these specific claims, checked at these specific
+boundaries, and here is what green does not claim.
+
+## The problem the architecture solves
+
+Quickspin's runtime layer is one small interface:
+
+```go
+type Runtime interface {
+    Create(ctx context.Context, spec Spec) (Info, error)
+    Inspect(ctx context.Context, id string) (Info, error)
+    List(ctx context.Context) ([]Info, error)
+    Destroy(ctx context.Context, id string) error
+}
+```
+
+Testing it is awkward for one reason: the only real implementation talks to a Docker
+daemon, and a daemon is everything a test dependency should not be. It is **slow** (an
+image pull takes seconds to minutes), **stateful** (a leftover container changes the next
+run's result), **machine-dependent** (CI, a colleague's laptop, and your Mac all differ),
+and **shared** (a test that sweeps containers could sweep yours).
+
+The standard escape is a *seam* — a boundary where you can swap a real dependency for a
+controlled stand-in without changing the code under test. Quickspin's architecture is
+built on exactly two seams, one on each side of the Docker adapter:
+
+<Figure caption="Two seams bracket the Docker adapter. Everything above seam 1 is tested with runtimetest.Fake; the adapter between the seams is tested against a fake daemon; only the live lane crosses seam 2 to a real daemon.">
+  <svg viewBox="0 0 640 370" role="img" aria-label="The two test seams around the Docker adapter">
+    <defs>
+      <marker id="seam-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 z" fill="#cf5436" />
+      </marker>
+    </defs>
+    <rect x="40" y="20" width="300" height="46" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="190" y="40" textAnchor="middle" fontSize="13" fill="#18231f">consumers</text>
+    <text x="190" y="56" textAnchor="middle" fontSize="11" fill="#635e53">internal/cli, future control plane</text>
+    <line x1="40" y1="100" x2="340" y2="100" stroke="#caa552" strokeWidth="2" strokeDasharray="7 5" />
+    <text x="40" y="118" fontSize="11" fill="#7f5d43">seam 1 — the runtime.Runtime interface</text>
+    <rect x="460" y="60" width="160" height="40" fill="none" stroke="#cf5436" strokeWidth="1.5" />
+    <text x="540" y="77" textAnchor="middle" fontSize="12" fill="#cf5436">runtimetest.Fake</text>
+    <text x="540" y="92" textAnchor="middle" fontSize="10" fill="#635e53">plugs in at seam 1</text>
+    <line x1="460" y1="83" x2="348" y2="99" stroke="#cf5436" strokeWidth="1.2" markerEnd="url(#seam-arrow)" />
+    <rect x="40" y="140" width="300" height="46" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="190" y="160" textAnchor="middle" fontSize="13" fill="#18231f">DockerRuntime adapter</text>
+    <text x="190" y="176" textAnchor="middle" fontSize="11" fill="#635e53">docker.go + the real Moby client</text>
+    <line x1="40" y1="220" x2="340" y2="220" stroke="#caa552" strokeWidth="2" strokeDasharray="7 5" />
+    <text x="40" y="238" fontSize="11" fill="#7f5d43">seam 2 — the Docker Engine HTTP API</text>
+    <rect x="460" y="180" width="160" height="40" fill="none" stroke="#cf5436" strokeWidth="1.5" />
+    <text x="540" y="197" textAnchor="middle" fontSize="12" fill="#cf5436">fakeDaemon</text>
+    <text x="540" y="212" textAnchor="middle" fontSize="10" fill="#635e53">plugs in at seam 2</text>
+    <line x1="460" y1="203" x2="348" y2="219" stroke="#cf5436" strokeWidth="1.2" markerEnd="url(#seam-arrow)" />
+    <rect x="40" y="260" width="300" height="46" fill="none" stroke="#18231f" strokeWidth="1.5" />
+    <text x="190" y="280" textAnchor="middle" fontSize="13" fill="#18231f">real Docker daemon</text>
+    <text x="190" y="296" textAnchor="middle" fontSize="11" fill="#635e53">inside the dedicated Lima test VM</text>
+    <text x="40" y="338" fontSize="11" fill="#635e53">Fast suite: everything above the bottom box, daemon replaced at a seam.</text>
+    <text x="40" y="354" fontSize="11" fill="#635e53">Live suite: the whole stack, no substitutions, leak-checked at both ends.</text>
+  </svg>
+</Figure>
+
+<KeyPoint label="The organizing idea">
+  Every lane below is defined by which seam it substitutes at. When a test fails, the
+  seam it runs against tells you which layer holds the bug before you read a single
+  line of output.
+</KeyPoint>
+
+## The map: five lanes, two commands
+
+| Lane | Substitutes at | Lives in | Runs under |
+| --- | --- | --- | --- |
+| Pure table tests | nothing — no I/O at all | `translate_test.go`, `ids_test.go`, `labels_test.go`, parts of `docker_test.go` | `make test` |
+| Adapter tests | seam 2: fake daemon | `docker_test.go` | `make test` |
+| Consumer tests | seam 1: `runtimetest.Fake` | `internal/cli` tests | `make test` |
+| Conformance | nothing — real backend | `runtimetest/conformance.go`, invoked by `docker_live_test.go` | `make test-docker` |
+| CLI smoke | nothing — compiled binary | `hack/validate-runtime-cli.sh` | `make test-docker` |
+
+<Mermaid
+  caption="How the two commands fan out. The fast path needs no Docker anywhere; the live path is owned end to end by one orchestration script."
+  code={`
+flowchart LR
+    T["make test"] --> P["pure table tests<br/>no I/O"]
+    T --> A["adapter tests<br/>real Moby client vs fakeDaemon"]
+    T --> C["consumer tests<br/>CLI vs runtimetest.Fake"]
+    T --> SK["docker_live_test.go<br/>compiles, then skips itself"]
+    D["make test-docker"] --> H["hack/test-runtime-docker.sh<br/>owns the Lima VM + DOCKER_HOST"]
+    H --> CF["RunConformance<br/>vs the real daemon"]
+    H --> SM["CLI smoke<br/>compiled binary vs the real daemon"]
+    H --> L["leak check<br/>native Docker query, both ends"]
+`}
+/>
+
+The split is deliberate: the fast suite must pass on a machine with no Docker installed,
+so it can sit in a tight edit-test loop, while everything that needs a daemon is behind
+one command that also owns the daemon's entire lifecycle. The live test file still
+*compiles* during `make test` — it skips at run time rather than being excluded by a
+build tag, so it cannot silently rot on machines that never run it.
+
+## Lane 1 — pure and table tests
+
+This is the straightforward lane, so it gets the short section. A *table-driven test* is
+Go's idiom for checking a pure function against many inputs: declare a slice of cases,
+loop, and run each as a named subtest with `t.Run`. Because functions like
+`stateFromContainerState`, ID validation, and label construction take values and return
+values — no context, no client, no error paths that depend on a network — every
+interesting case can be enumerated exhaustively and the whole file runs in microseconds.
+
+The design move worth noticing is not the tests but what made them possible: decisions
+were *extracted into pure functions on purpose* so they could be tested this way. Which
+Docker status string becomes which `State`, how a Unix timestamp becomes a `time.Time`,
+what makes an ID malformed — each is a pure translation, tested once, exhaustively.
+Higher lanes then only need to prove the translation is *wired in*, not re-prove every
+case over HTTP. That is why `TestListRoutesTheSummaryThroughTheTranslators` uses two
+contrasting rows instead of duplicating the full state table: the mapping already has an
+exhaustive home, and this layer can only get routing wrong.
+
+## Interlude: test doubles, and which kind lives where
+
+"Test double" is the umbrella term (from Gerard Meszaros, popularized by Martin Fowler)
+for anything standing in for a real dependency. The taxonomy matters here because
+Quickspin uses two different kinds at its two seams, and they are different for a reason:
+
+- A **stub** returns canned answers and remembers nothing.
+- A **mock** is pre-programmed with the calls it *expects* and fails the test if the
+  interaction differs.
+- A **fake** has a real working implementation, just a cheap one — an in-memory database,
+  an HTTP server that behaves like a daemon.
+
+`runtimetest.Fake` (seam 1) is, despite the name, closest to a *configurable stub*: each
+interface method answers from a function field the test supplies. The `fakeDaemon` in
+`docker_test.go` (seam 2) is a true fake — a real HTTP server speaking enough of the
+Docker Engine API that the genuine Moby client accepts it — which also *records* requests
+so tests can assert ordering, a mock-like trait. Neither is a classical mock: no test
+here pre-declares an expected call script, because that style couples tests to
+implementation order even when order is not the point.
+
+## Lane 2 — adapter tests against a fake daemon
+
+The adapter lane answers: *does `DockerRuntime` translate Quickspin's intent into the
+right Docker Engine API requests, and Docker's responses into the right Quickspin
+results?* The trick is where the seam sits. The tests do **not** wrap the Moby client in
+a hand-written interface and mock it. They stand up `httptest.Server` — a real HTTP
+server on a loopback port, from Go's standard library — playing the daemon, and point the
+*genuine* Moby client at it.
+
+Why that is worth insisting on: with a mocked client interface, the test asserts "I
+called the method I believe is right," which verifies your assumptions against
+themselves. Against a fake daemon, the real client still builds URLs, serializes the
+create body, negotiates API versions, and — critically — runs its real error decoder, so
+a 404 body becomes an errdefs not-found exactly the way production would see it. The
+tests exercise the *wire contract*, and an SDK upgrade that changes behavior fails tests
+instead of only failing in production.
+
+Each `fakeDaemon` endpoint defaults to success, so a test overrides only the one thing it
+is about. The most instructive cases are the failure and rollback paths, because those
+are nearly impossible to manufacture deterministically against a live daemon:
+
+<Mermaid
+  caption="Create is three daemon requests, and the interesting engineering is what happens when the third one fails."
+  code={`
+sequenceDiagram
+    participant Q as DockerRuntime.Create
+    participant D as daemon (fakeDaemon in tests)
+    Q->>D: POST /images/create (pull)
+    D-->>Q: progress stream (drained, closed)
+    Q->>D: POST /containers/create (labels, env, policies)
+    D-->>Q: container id
+    Q->>D: POST /containers/id/start
+    alt start succeeds
+        D-->>Q: 204
+        Q-->>Q: return Info with StateRunning
+    else start fails
+        D-->>Q: 500
+        Q->>D: DELETE /containers/id?force=1 (detached context)
+        Q-->>Q: return the start error, no container leaked
+    end
+`}
+/>
+
+Two rollback subtleties the tests pin down, both easy to get wrong:
+
+**The detached cleanup context.** If `Create` is cancelled after the container is
+allocated, the natural bug is to run cleanup on the caller's context — which is already
+cancelled, so the removal request dies instantly and the container leaks *every time a
+create is cancelled*. The fix is `context.WithoutCancel` plus a short deadline: cleanup
+inherits the request's values but not its cancellation, and is still bounded so it cannot
+hang forever. `TestCreateStillRemovesTheContainerWhenTheCallerCancels` exists precisely
+to keep this from regressing, and every future backend inherits the rule.
+
+**Failed cleanup must name the leak.** When start fails *and* the removal also fails,
+returning only one error hides either the cause or the leak.
+`TestCreateNamesTheLeakWhenCleanupAlsoFails` asserts the returned chain retains both
+causes and identifies the orphaned container, because that string is what an operator
+will grep at 2 a.m.
+
+The restraint is as deliberate as the coverage: tests assert the request properties that
+are *Quickspin decisions* (ordering, labels, sorted env, restart policy) and never
+incidental SDK details like the negotiated `/v1.NN` path prefix — pinning those would
+make a routine SDK upgrade look like a Quickspin regression.
+
+## Lane 3 — consumer tests with `runtimetest.Fake`
+
+Seam 1 faces the other direction: *given a `Runtime` that answers however I say, does the
+CLI (and later the control plane and reconciler) drive it correctly and render its
+results correctly?* `runtimetest.Fake` is a function-field double:
+
+```go
+type Fake struct {
+    runtime.Runtime // nil on purpose
+
+    CreateFn  func(context.Context, runtime.Spec) (runtime.Info, error)
+    InspectFn func(context.Context, string) (runtime.Info, error)
+    ListFn    func(context.Context) ([]runtime.Info, error)
+    DestroyFn func(context.Context, string) error
+}
+```
+
+A test sets only the fields it needs, including error returns that would require breaking
+a real daemon to produce. The embedded-but-nil interface is a deliberate Go trick worth
+understanding: embedding `runtime.Runtime` makes `Fake` satisfy the interface without
+writing stub methods, and because the embedded value is nil, a consumer that calls a
+method the test did not configure panics with a nil dereference instead of silently
+receiving a zero `Info`. The panic *is* the assertion — "this code path made a runtime
+call this test didn't expect." The recorded tradeoff: adding a method to the interface no
+longer breaks `Fake` at compile time; it surfaces at run time in whichever consumer test
+first hits it.
+
+The package layout copies `net/http/httptest`: `runtimetest` is a separate package with
+non-test files, so any package can import the double, but it never leaks into
+`internal/runtime`'s production API surface.
+
+## Lane 4 — the conformance suite
+
+This is the piece designed for the project's future more than its present. A
+*conformance suite* (also called a contract test) is one reusable set of assertions
+encoding what an interface *promises*, run against every implementation of it. Today
+there is one real backend; plans 14 and 21 add Firecracker and Kata/Kubernetes. Without a
+shared suite, each backend would accumulate its own slightly different idea of what
+`Destroy` means, and consumers written against one would subtly break on another. With
+it, "is this a valid Runtime?" is a single function call:
+
+```go
+runtimetest.RunConformance(t, rt, spec, observeTimeout)
+```
+
+The suite walks the whole lifecycle contract in order:
+
+<Mermaid
+  caption="The conformance clauses. Boxes marked converge poll until observed or a deadline expires — immediate visibility is deliberately not part of the contract."
+  code={`
+flowchart TD
+    A["Create: nonempty id, StateRunning,<br/>nonzero UTC CreatedAt"] --> R["register Destroy cleanup<br/>immediately, before any assertion"]
+    R --> B["Inspect finds it — converge"]
+    B --> B2["repeat Inspect: CreatedAt is stable"]
+    B2 --> C["List contains it — converge<br/>membership, not equality"]
+    C --> E["Destroy succeeds"]
+    E --> F["Inspect reports ErrNotFound — converge"]
+    F --> G["Destroy again succeeds<br/>idempotency clause"]
+    G --> I["Inspect malformed id:<br/>ErrInvalidSandboxID, not ErrNotFound"]
+`}
+/>
+
+Four design decisions carry most of the value:
+
+**Convergence instead of assertion.** Docker deletes synchronously, but that is Docker's
+behavior, not the contract's promise. Kubernetes finalizers and cloud APIs converge
+*eventually*. So the suite polls — `converge` retries an observation every 50ms until a
+predicate accepts it or a deadline passes — and a failure reports the clause it was
+proving plus the last thing it actually saw. A fixed `time.Sleep(5 * time.Second)` would
+be the naive alternative: it makes every failure slow without making any failure
+informative, and still flakes when the backend needs six seconds. The deadline
+accommodates slowness; the short interval keeps the fast case fast.
+
+**Cleanup is registered before assertions run.** `t.Cleanup` for the destroy is
+registered the moment `Create` returns an ID — because a `Fatalf` ends the test goroutine
+immediately, cleanup written after the assertions would never register on a failing run,
+and every failed conformance run would leak a live container.
+
+**The `TB` seam, or: who tests the tests.** The suite takes a tiny local interface
+(`Helper`, `Errorf`, `Fatalf`, `Cleanup`) instead of `*testing.T`. That is forced —
+`testing.TB` is sealed with an unexported method, so nothing outside the standard library
+can implement it — but it is also what makes the suite itself testable: a recording `TB`
+lets `conformance_test.go` *observe* a failure rather than suffer one. Those self-tests
+are intentionally only two: a delayed-visibility in-memory runtime proves the suite
+really polls, and a deliberately broken runtime proves the suite can fail. A harness that
+cannot fail is indistinguishable from one that checks nothing, so this is not pedantry —
+it is the suite's own smoke test. The in-memory runtime is kept minimal by policy: if it
+grows a config surface, it has become a fourth backend to maintain.
+
+**Membership, not equality.** `List` must *contain* the created sandbox, not equal
+`[created]` — a backend holding unrelated sandboxes is busy, not broken. The same
+humility shows in timestamps: `CreatedAt` must be *stable across two Inspects*, not equal
+to `Create`'s value, because Docker reports whole seconds in listings while `Create`
+stamps the local clock.
+
+## Lane 5 — the live lane and its Lima harness
+
+Everything so far runs against substitutes. `make test-docker` is where the real
+`DockerRuntime`, real Moby client, real Unix socket, real image pull, and real daemon
+state meet — and most of its engineering is not in the tests but in making a real daemon
+*safe to test against*. Background for each moving part:
+
+**Lima** runs a Linux VM on macOS (Docker containers are Linux processes; a Mac needs a
+Linux kernel from somewhere) and forwards the guest's Docker socket to a Unix socket on
+the host. **`DOCKER_HOST`** is the environment variable every Docker client honors for
+"which daemon do I talk to." The harness *exports* `DOCKER_HOST` for its own child
+processes instead of switching your `docker context`, because a context switch is
+developer-wide mutable state — a crashed test run would leave every later `docker ps` in
+your terminal silently pointed at the test VM.
+
+The harness owns a **dedicated VM**, `quickspin-runtime-test`, distinct from the
+`quickspin` VM you develop in. The reason is structural rather than procedural: the live
+suite *sweeps every container carrying Quickspin's managed label*, and the only sweep
+that can never hit your work is one aimed at a daemon your work cannot reach. The script
+enforces this in layers — it refuses to run if `TEST_VM_NAME` equals `VM_NAME`, and it
+will only sweep a VM carrying an **ownership marker** file it wrote itself at creation
+time. A marker is knowledge ("I created this instance"); a name prefix would be a guess,
+and only knowledge should authorize destruction.
+
+<Mermaid
+  caption="One run of hack/test-runtime-docker.sh. Every red-edged decision exists to protect either the developer's environment or the leak signal."
+  code={`
+flowchart TD
+    S["make test-docker"] --> G1{"TEST_VM_NAME same as<br/>the development VM?"}
+    G1 -- yes --> X1["refuse: never sweep the dev VM"]
+    G1 -- no --> V{"VM exists?"}
+    V -- no --> CR["create it from the template<br/>+ write ownership marker"]
+    V -- "yes, stopped" --> ST["start it"]
+    V -- "yes, running" --> M
+    CR --> M{"ownership marker present?"}
+    ST --> M
+    M -- no --> X2["refuse: not test-owned,<br/>will not sweep it"]
+    M -- yes --> DH["export DOCKER_HOST to the<br/>forwarded socket, wait for daemon"]
+    DH --> B{"managed containers<br/>already present?"}
+    B -- yes --> X3["refuse: a prior run leaked.<br/>make test-docker-clean is the mop"]
+    B -- no --> RT["go test -count=1 with<br/>QUICKSPIN_TEST_DOCKER=1"]
+    RT --> SM["CLI smoke via the<br/>compiled binary"]
+    SM --> LK{"EXIT trap: any managed<br/>containers survived?"}
+    LK -- yes --> FL["report LEAK, mark the run<br/>failed, then remove them"]
+    LK -- no --> OK["pass — VM left running<br/>for the next loop"]
+`}
+/>
+
+The two most opinionated decisions deserve their own explanation, because both refuse an
+"obvious" convenience:
+
+**A dirty baseline is refused, never auto-cleaned.** On a daemon only tests use,
+pre-existing managed containers have exactly one possible cause: a previous run leaked.
+Auto-cleaning before the run would be more convenient — and would permanently erase the
+one signal this whole harness exists to produce. So the run fails, prints every survivor,
+and `make test-docker-clean` exists as the explicit, separate mop. The convenience is
+traded for the diagnosis.
+
+**The leak check records failure before removing anything.** The EXIT trap — which runs
+on success, failure, and Ctrl-C alike — queries Docker for survivors, and if it finds
+any, it *first* marks the run failed and *then* removes them. Remove-then-report would
+make a product leak indistinguishable from clean teardown. This is also why the
+clean-baseline check licenses the sweep at all: anything present at the end of a run that
+provably started clean is definitionally new, so removing it destroys no evidence.
+
+Two structural details close the loop. The leak queries use `docker ps` with the raw
+label string, not `quickspin sandbox list` — the CLI is the thing under test, and a
+container whose ID label is corrupted is invisible to `Runtime.List` while still being
+very much a leak (this is also why `labels.go` declares the label names a wire format:
+the shell script spells them literally, so a rename that "refactors" them makes the leak
+check pass while finding nothing). And the Go suite's `TestMain` repeats the
+baseline-and-leak bracket natively — not redundancy, but honesty for the bare
+`QUICKSPIN_TEST_DOCKER=1 go test` invocation that bypasses the script entirely.
+
+| Target | What it does |
+| --- | --- |
+| `make test-docker` | Full run: guards, baseline, live suite, CLI smoke, leak check. |
+| `make test-docker-clean` | The explicit mop: removes surviving managed containers, nothing else. |
+| `make test-docker-setup` | Creates the dedicated VM ahead of time (first boot is slow). |
+| `make test-docker-teardown` | Deletes the dedicated VM, guarded by the same ownership checks. |
+
+All four route through the script rather than calling `limactl` from the Makefile, so the
+ownership marker has exactly one writer and no destructive path bypasses the guards.
+
+## The CLI smoke: proving composition, once
+
+The last lane runs the *compiled* `quickspin` binary through one JSON lifecycle — create,
+inspect, list, destroy, destroy again, confirm inspect now fails — each step a separate
+process. It exists because every prior lane substitutes *something*: the fake-backed CLI
+tests never touch a daemon, the conformance suite never goes through Cobra. Only this
+script proves the shipped composition — argument parsing → `NewDockerRuntime(nil)` → the
+`DOCKER_HOST` socket → a real container — and that the binary exits nonzero on a runtime
+error rather than printing one and exiting 0, which is what any calling script would trip
+over. It is deliberately *one* flow: flag matrices, output formats, and error rendering
+already live in the fake-backed CLI tests, and duplicating them here would just be the
+slow, flaky copy.
+
+## What green proves, and what it cannot
+
+The lanes triage failures for you — this table is the practical payoff of the seam
+discipline:
+
+| When this fails | The bug is in |
+| --- | --- |
+| A pure table test | The decision itself: a translation, validation, or config rule. |
+| An adapter test | The adapter's use of the Docker API — wrong request, order, or error mapping. |
+| A consumer test | CLI/consumer logic: how it drives `Runtime` or renders results. |
+| Conformance (live only) | A real-world assumption: daemon semantics, timing, image, socket. |
+| The CLI smoke only | Wiring: construction, environment plumbing, process exit paths. |
+| The leak check | Cleanup paths — some route through create/destroy failed to release a container. |
+
+Equally important is what no lane catches, on purpose, for now: a daemon restart
+mid-create, concurrent creates racing each other, registry outages, and multi-backend
+behavior. Those belong to the reconciler-era and backend-specific layers described in the
+rulebook — knowing they are *out* is part of knowing what green means.
+
+## Extending this to the next runtime
+
+The architecture is shaped so a new backend adds implementations, not test frameworks:
+
+<Steps>
+  <Step title="Implement the interface">
+    A new backend implements `runtime.Runtime` and returns the shared sentinels
+    (`ErrNotFound`, `ErrInvalidSandboxID`, `ErrImageMissing`) for the shared situations.
+  </Step>
+  <Step title="Fake its natural seam for adapter tests">
+    Docker's seam was its HTTP API behind `httptest.Server`. Firecracker's is its API
+    socket; Kubernetes' is a fake API server. The principle transfers even though the
+    fake does not: drive the real client library against a controlled endpoint, and
+    manufacture the failure and rollback paths there.
+  </Step>
+  <Step title="Run the same conformance suite">
+    One gated live test constructs the backend and calls `runtimetest.RunConformance`
+    unchanged. The suite imports no backend types, so nothing about it needs editing —
+    if a clause fails, either the backend is wrong or the contract just learned
+    something, and both are worth a commit.
+  </Step>
+  <Step title="Provide backend-native leak checks">
+    Each live harness queries its backend directly — labels for Docker, pod labels for
+    Kubernetes — never through the interface under test, and brackets the run with the
+    same refuse-dirty / record-then-sweep discipline.
+  </Step>
+  <Step title="Leave the consumer lane alone">
+    `runtimetest.Fake` and every CLI test keep working untouched — that is seam 1
+    paying out: consumers never knew which backend they had.
+  </Step>
+</Steps>
+
+The rulebook's [review checklist](runtime-backend-testing.mdx) is the enforcement copy of
+this list.
+
+## Key technical considerations, collected
+
+Cross-cutting details that each earned a decision somewhere above:
+
+- **Go's test cache lies about live tests.** It keys on the binary and its inputs and
+  cannot see daemon state, so a live "pass" may be a stale replay. The harness always
+  runs with `-count=1`; remember it for any manual invocation.
+- **Cleanup code cannot use the test's context.** `t.Context()` is cancelled before
+  `t.Cleanup` functions run, so teardown builds its own bounded context — the same class
+  of bug as the rollback rule, appearing on the test side.
+- **Rollback runs on a detached, bounded context** (`context.WithoutCancel` + deadline),
+  or every cancelled create leaks by construction.
+- **Destroy is idempotent by contract**, so every recovery path may destroy without
+  checking first — the conformance suite and the smoke both assert the second destroy.
+- **Timestamps are UTC, and precision differs by source** — assert stability across
+  observations, never equality across sources.
+- **One deadline, not two.** Polling waits on the context *and* the interval; a separate
+  wall-clock bound would be a second copy of the same limit, free to drift.
+- **Labels are a wire format.** Shell, Go tests, and the runtime all spell
+  `quickspin.managed=true` independently; renaming it is a coordinated migration, not a
+  refactor.
+- **The fixture image is pinned in one place** (the harness exports it to both the Go
+  suite and the smoke) and must have a long-running default process — Docker's `Create`
+  only promises that start was *accepted*, and a process that exits immediately turns
+  the lifecycle into a race, as `TestDockerCreateOnlyPromisesThatStartWasAccepted`
+  records.
+
+## Go deeper
+
+<Resources>
+  <Resource kind="article" title="Test Double" href="https://martinfowler.com/bliki/TestDouble.html" by="Martin Fowler">
+    The two-paragraph canonical taxonomy — dummy, stub, spy, mock, fake — used in this
+    document.
+  </Resource>
+  <Resource kind="article" title="Mocks Aren't Stubs" href="https://martinfowler.com/articles/mocksArentStubs.html" by="Martin Fowler">
+    Why interaction-verifying mocks and state-verifying fakes lead to different test
+    designs; explains the instinct behind the fake daemon.
+  </Resource>
+  <Resource kind="video" title="Advanced Testing with Go" by="Mitchell Hashimoto, GopherCon 2017">
+    The talk behind several patterns here: function-field fakes, testing with real
+    dependencies, and hand-rolled doubles over mock frameworks.
+  </Resource>
+  <Resource kind="docs" title="net/http/httptest" href="https://pkg.go.dev/net/http/httptest">
+    The standard-library server the fake daemon is built on, and the package whose
+    layout `runtimetest` copies.
+  </Resource>
+  <Resource kind="docs" title="Go Wiki: Table Driven Tests" href="https://go.dev/wiki/TableDrivenTests">
+    The idiom behind lane 1, including subtests and naming.
+  </Resource>
+  <Resource kind="docs" title="Docker Engine API" href="https://docs.docker.com/reference/api/engine/">
+    The wire contract seam 2 fakes; useful for reading the adapter tests' recorded
+    routes.
+  </Resource>
+  <Resource kind="docs" title="Lima documentation" href="https://lima-vm.io/docs/">
+    How the VM, port forwarding, and the forwarded Docker socket actually work.
+  </Resource>
+  <Resource kind="article" title="Test Sizes" href="https://testing.googleblog.com/2010/12/test-sizes.html" by="Google Testing Blog">
+    The small/medium/large framing that maps almost exactly onto make test versus make
+    test-docker.
+  </Resource>
+  <Resource kind="video" title="Integrated Tests Are a Scam" by="J.B. Rainsberger">
+    The argument for contract tests plus collaboration tests over ever-larger
+    integration suites — the conformance suite is this idea in Go.
+  </Resource>
+</Resources>

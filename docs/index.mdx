@@ -105,15 +105,6 @@ not by itself authorize implementation.
 - [`plans/AGENTS.md`](plans/AGENTS.md) defines the required structure for every plan,
   including the verifiable definition-of-done requirement.
 
-### One-off implementation work
-
-[`Docker runtime test foundation`](docker-runtime-testing-plan.mdx) is an unnumbered,
-bounded coding plan for daemon-free Docker adapter coverage, shared runtime conformance,
-live tests through a dedicated reusable Lima VM, and one compiled-CLI lifecycle smoke
-(a fresh disposable-VM lane is deferred until CI exists).
-It is intentionally outside the platform learning sequence: implementing it strengthens
-the test seam used by later runtime plans without adding a new platform capability.
-
 ### The platform learning path (open)
 
 Plans 01–12 build the platform incrementally; 13–14 are isolation deep dives that can
@@ -210,6 +201,11 @@ Current reference documents:
 - [`reference/runtime-backend-testing.mdx`](reference/runtime-backend-testing.mdx)
   defines the reusable test layers, core runtime conformance contract, live harness
   responsibilities, and the checklist every later runtime plan should extend.
+- [`reference/docker-test-architecture-explained.mdx`](reference/docker-test-architecture-explained.mdx)
+  is the concept-first companion to the rulebook above: it explains the implemented
+  test lanes — table tests, the fake daemon, `runtimetest.Fake`, conformance, and the
+  Lima live harness — with diagrams, the reasoning behind each decision, and how the
+  shape extends to future runtimes.
 - [`reference/concurrency-and-state.mdx`](reference/concurrency-and-state.mdx) proposes how
   the future control plane and workers should guard shared state around slow Docker I/O —
   the four helper categories, the upsert pattern for read-modify-write with I/O between,

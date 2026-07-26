@@ -5,6 +5,7 @@ import {
   isValidElement,
   useContext,
   useEffect,
+  useId,
   useState,
   type AnchorHTMLAttributes,
   type HTMLAttributes,
@@ -391,6 +392,108 @@ export function Figure({
   );
 }
 
+// The mermaid module is imported lazily inside the effect so documents without
+// diagrams never pay for the library in their initial chunk.
+let mermaidReady: Promise<typeof import("mermaid")["default"]> | null = null;
+
+function loadMermaid() {
+  mermaidReady ??= import("mermaid").then(({ default: mermaid }) => {
+    const rootStyle = getComputedStyle(document.documentElement);
+    const token = (name: string, fallback: string) =>
+      rootStyle.getPropertyValue(name).trim() || fallback;
+    const ink = token("--ink", "#18231f");
+    const accent = token("--accent", "#cf5436");
+    const gold = token("--gold", "#caa552");
+    // The literal backgrounds are lighter tints of --paper with no styles.css
+    // token of their own.
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: "base",
+      fontFamily: "inherit",
+      themeVariables: {
+        primaryColor: "#f6f1e7",
+        primaryTextColor: ink,
+        primaryBorderColor: ink,
+        lineColor: accent,
+        secondaryColor: "#f6f1e7",
+        tertiaryColor: "#faf7f0",
+        noteBkgColor: "#f3e9d2",
+        noteBorderColor: gold,
+        actorBorder: ink,
+        actorBkg: "#f6f1e7",
+        signalColor: ink,
+        signalTextColor: ink,
+        labelBoxBkgColor: "#f3e9d2",
+        labelBoxBorderColor: gold,
+        activationBorderColor: gold,
+        activationBkgColor: "#faf7f0",
+        clusterBkg: "#faf7f0",
+        clusterBorder: gold,
+        edgeLabelBackground: "#faf7f0",
+      },
+    });
+    return mermaid;
+  });
+  return mermaidReady;
+}
+
+// Layout is the expensive part of mermaid.render, so finished renders are
+// cached by source; remounting a document (or StrictMode's doubled effect)
+// reuses the in-flight or completed promise instead of laying out again.
+const mermaidRenders = new Map<string, Promise<string>>();
+
+function renderMermaid(id: string, source: string) {
+  let render = mermaidRenders.get(source);
+  if (!render) {
+    render = loadMermaid()
+      .then((mermaid) => mermaid.render(id, source))
+      .then((result) => result.svg);
+    render.catch(() => mermaidRenders.delete(source));
+    mermaidRenders.set(source, render);
+  }
+  return render;
+}
+
+export function Mermaid({ code, caption }: { code: string; caption?: string }) {
+  const id = useId();
+  const [result, setResult] = useState<
+    { svg: string } | { error: string } | null
+  >(null);
+
+  const source = code.trim();
+  useEffect(() => {
+    let cancelled = false;
+    renderMermaid(`mermaid-${id.replace(/[^a-zA-Z0-9_-]/g, "")}`, source)
+      .then((svg) => {
+        if (!cancelled) setResult({ svg });
+      })
+      .catch((renderError: unknown) => {
+        if (!cancelled) setResult({ error: String(renderError) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, source]);
+
+  if (result && "error" in result) {
+    return (
+      <Figure caption="This diagram failed to render; its source has a syntax error.">
+        <pre>{result.error}</pre>
+      </Figure>
+    );
+  }
+
+  return (
+    <Figure caption={caption}>
+      <div
+        // Mermaid's output is an SVG string it generated itself from the code
+        // prop; nothing user-supplied at runtime reaches this sink.
+        dangerouslySetInnerHTML={{ __html: result ? result.svg : "" }}
+      />
+    </Figure>
+  );
+}
+
 export const mdxComponents: MDXComponents = {
   h1: (props) => <Heading level={1} {...props} />,
   h2: (props) => <Heading level={2} {...props} />,
@@ -421,6 +524,7 @@ export const mdxComponents: MDXComponents = {
   HintSteps,
   Hint,
   Figure,
+  Mermaid,
   Resources,
   Resource,
 };

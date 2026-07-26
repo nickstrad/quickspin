@@ -249,6 +249,35 @@ A diagram should explain a lifecycle, hierarchy, request path, state transition,
 ownership boundary—not decorate a section that prose already explains. Fenced text
 diagrams remain fine when monospace layout is already clear.
 
+For flowcharts and sequence diagrams, `Mermaid` renders
+[Mermaid](https://mermaid.js.org/) source in the same framed canvas as `Figure`, themed
+to the reader palette. Pass the diagram source as the `code` prop in a template literal;
+`caption` is optional:
+
+```mdx
+<Mermaid
+  caption="Create is two Docker calls, and rollback lives in the gap."
+  code={`
+flowchart LR
+    A["ContainerCreate"] --> B["ContainerStart"]
+    B -- fails --> C["force remove the new container"]
+`}
+/>
+```
+
+<Mermaid
+  caption="Create is two Docker calls, and rollback lives in the gap."
+  code={`
+flowchart LR
+    A["ContainerCreate"] --> B["ContainerStart"]
+    B -- fails --> C["force remove the new container"]
+`}
+/>
+
+Prefer `Mermaid` when the diagram is a flow with branches or a message sequence — the
+layouts Mermaid does well. Prefer hand-written SVG in `Figure` when exact spatial
+arrangement carries the meaning, such as layered stacks or ownership boundaries.
+
 ## Authoring rules
 
 - Keep plan filenames in the `NN-short-slug.mdx` form.
