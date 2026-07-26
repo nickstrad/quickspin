@@ -16,6 +16,12 @@ production software as fast as possible.
   architecture. Do not describe a proposal as though it already exists.
 - Explain unfamiliar Go or TypeScript conventions when they materially affect a change.
   Optimize for the user's understanding, not merely for completing the task.
+- Explain in the response, not in the code. Comments are for what the code cannot say:
+  a surprising fact about a dependency, a decision that could have gone the other way, a
+  consequence invisible at the call site. Do not restate signatures, narrate control flow,
+  explain Go itself, or re-derive a plan or reference doc in a comment — link to the doc
+  in one line instead. See
+  [`docs/reference/code-structure-and-testing.mdx`](docs/reference/code-structure-and-testing.mdx).
 - State assumptions and tradeoffs. When several reasonable approaches exist, present
   them with the question each approach would help answer.
 

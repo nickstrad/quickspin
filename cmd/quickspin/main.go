@@ -1,14 +1,7 @@
 package main
 
-import (
-	"fmt"
-	"os"
-	"strings"
-
-	"github.com/nickstrad/quickspin/internal/greeting"
-)
+import "fmt"
 
 func main() {
-	name := strings.Join(os.Args[1:], " ")
-	fmt.Println(greeting.Greet(name))
+	fmt.Println("hello")
 }

@@ -121,6 +121,40 @@ if err != nil {
 }
 ```
 
+## Comments earn their place or go
+
+Default to no comment. Code says what it does; a comment exists to say what the code
+cannot. The test is whether a competent Go reader who has the code in front of them
+would still be missing something after reading it.
+
+Worth writing:
+
+| Kind | Example |
+| --- | --- |
+| **A non-obvious fact about a dependency** | `uuid.Parse` also accepts braced and dashless encodings, which is why the canonical round trip exists. |
+| **A decision that could reasonably have gone the other way** | `restarting` counts as running, so the reconciler does not act on a condition that fixes itself. |
+| **A consequence invisible at the call site** | Docker cannot add labels after create, so omitting one here is permanent. |
+| **Why a test exists**, when the name cannot carry it | The row that fails if the sort moves back onto the joined strings. |
+
+Not worth writing:
+
+- Restating the signature. `// newSandboxID mints a new sandbox ID` above `newSandboxID`.
+- Narrating control flow. `// loop over the env map`, `// return the error`.
+- Explaining Go itself. That a missing map key yields the zero value, that `append` grows
+  a slice, that `errors.Is` walks `Unwrap`.
+- Section banners inside a file (`// --- labels ---`). If a file needs them it wants to be
+  two files.
+- Re-deriving a plan or reference doc in a code comment. Link to it in one line instead:
+  the doc is where the long form belongs, and two copies drift apart.
+
+Length is the symptom, not the disease. A thirty-line comment above a ten-line function
+usually means the reasoning belongs in `docs/`, with the code keeping only the sentence
+that stops the next reader from "simplifying" the tricky line away.
+
+Prefer making the comment unnecessary. A named constant, a clearer function name, or a
+test whose name states the rule all outlive prose, because nothing checks that a comment
+is still true.
+
 ## What to test
 
 Test **both** layers. The pure functions catch the arithmetic; the business logic catches

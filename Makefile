@@ -87,7 +87,7 @@ host-docker-context-use:
 
 .PHONY: host-docker-context-delete
 host-docker-context-delete:
-	docker context rm $(DOCKER_CONTEXT)
+	docker context rm -f $(DOCKER_CONTEXT)
 
 .PHONY: env-create
 env-create: lima-vm-create host-docker-context-create host-docker-context-use

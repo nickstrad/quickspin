@@ -7,6 +7,78 @@ Run `make docs` from the repository root to open the local MDX reader. The reade
 search, plan navigation, per-document outlines, code highlighting, and reusable study
 components. See the [`reader guide`](reader-guide.mdx) for the available MDX components.
 
+## Running the tests
+
+Scope the run to the package you are working in — it is fast enough to sit in a tight
+loop, and it stays green while other packages are mid-change:
+
+```sh
+go test ./internal/runtime/            # one package
+go test ./internal/runtime/ -v         # per-test names, including subtests
+go test ./internal/runtime/ -run TestEnvToArgs -v      # one test
+go test ./internal/runtime/ -run 'TestEnvToArgs/sorted' # one subtest
+```
+
+`-run` takes a regular expression, and a slash descends into `t.Run` subtests — so a
+table-driven test can be narrowed to the single row you are fixing.
+
+### Just the names of what failed
+
+Once a table-driven suite has a few hundred rows, the failure detail is longer than the
+screen. This prints one failing test per line and nothing else:
+
+```sh
+go test ./internal/runtime/ 2>&1 | sed -n 's/^ *--- FAIL: \([^ ]*\).*/\1/p'
+```
+
+No `-v` — `go test` already prints `--- FAIL:` lines for failures only, so adding `-v`
+would bury them under every passing test. If `jq` is installed, the structured form does
+the same job without pattern-matching human-readable output:
+
+```sh
+go test -json ./internal/runtime/ | jq -r 'select(.Action == "fail") | .Test // empty'
+```
+
+Both list a parent test alongside its failing subtests (`TestEnvToArgs` and
+`TestEnvToArgs/single_pair`), because a parent fails when any row under it does. That is
+the tree, not duplication — the parent name is what you feed back to `-run` to work the
+whole group.
+
+<Callout tone="note" title="A passing test that is not re-run">
+  Go caches successful results and prints `(cached)` instead of running them again. The
+  cache keys on the test binary and its inputs, so editing Go code invalidates it — but
+  a test whose outcome depends on something Go cannot see, like the Docker daemon's
+  state, can go stale. Add `-count=1` to force a real run.
+</Callout>
+
+Repository-wide commands, all from the root:
+
+| Command | What it does |
+| --- | --- |
+| `make test` | every Go test in the module |
+| `make fmt` | gofmt; must leave nothing to change |
+| `make vet` | `go vet`; must be clean before a change is done |
+| `make build` | builds the CLI into `bin/` |
+| `make docs` | starts this reader |
+| `make docs-build` | type-checks and produces a static docs build |
+
+<Callout tone="idea" title="A watch loop, if you want one">
+  Go has no built-in file watcher. `brew install entr`, then:
+
+  ```sh
+  ls internal/runtime/*.go | entr -c go test ./internal/runtime/
+  ```
+
+  `-c` clears the screen between runs, so what you see is always the current result
+  rather than a scrollback of old ones. Re-run the `ls` when you add a file — `entr`
+  watches the list it was given, not the directory.
+</Callout>
+
+Plan 02 introduces a second suite: daemon-free unit tests stay in `make test`, while
+tests that need the Lima Docker socket run separately under `make test-docker`. Keeping
+them apart is what lets the fast loop above stay fast, and lets `make test` work on a
+machine with no Docker at all.
+
 ## Plans
 
 Plans describe bounded implementation work. Moving a plan records its lifecycle; it does
@@ -84,7 +156,7 @@ Current reference documents:
   error, and `slog` child loggers threaded through constructors.
 - [`reference/code-structure-and-testing.mdx`](reference/code-structure-and-testing.mdx)
   proposes separating decisions from Docker/HTTP plumbing, when to extract a pure
-  function, and what to test at each layer.
+  function, what to test at each layer, and which comments earn their place.
 - [`reference/concurrency-and-state.mdx`](reference/concurrency-and-state.mdx) proposes how
   the future control plane and workers should guard shared state around slow Docker I/O —
   the four helper categories, the upsert pattern for read-modify-write with I/O between,
