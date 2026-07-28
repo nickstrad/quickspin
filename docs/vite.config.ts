@@ -29,6 +29,10 @@ const mdxPlugin = {
 } as Plugin;
 
 export default defineConfig({
+  // Relative so the same build works at "/" locally and under "/quickspin/" on
+  // GitHub Pages; safe here because there is a single HTML entry and no
+  // path-based routing.
+  base: "./",
   plugins: [
     mdxPlugin,
     react({ include: /\.(js|jsx|mdx|ts|tsx)$/ }),
