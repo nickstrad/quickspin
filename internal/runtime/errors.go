@@ -14,6 +14,7 @@ var (
 	ErrNotFound         = errors.New("sandbox not found")
 	ErrImageMissing     = errors.New("image not found")
 	ErrInvalidSandboxID = errors.New("invalid sandbox id")
+	ErrInvalidSpec      = errors.New("invalid sandbox spec")
 )
 
 type RuntimeError struct {

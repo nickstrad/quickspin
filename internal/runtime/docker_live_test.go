@@ -37,6 +37,13 @@ const (
 	// record what Create promises, never for core conformance.
 	shortLivedImage = "docker.io/library/alpine:3.20"
 
+	// Limits every live spec shares. They are well clear of Spec's minimums so a
+	// conformance failure is never the daemon refusing an under-resourced
+	// container; what the limits translate to is pinned by the unit tests.
+	liveCPULimit    = 0.5
+	liveMemoryLimit = 128 * 1024 * 1024
+	livePidsLimit   = 256
+
 	// Generous because the first run on a fresh daemon pays for a cold pull. It
 	// bounds every call and every convergence poll in the shared suite.
 	observeTimeout = 3 * time.Minute
@@ -121,7 +128,7 @@ func TestDockerRuntimeConformance(t *testing.T) {
 	rt := liveDocker(t)
 
 	runtimetest.RunConformance(t, rt,
-		runtime.NewSpec(longRunningImage(), map[string]string{"QUICKSPIN_CONFORMANCE": "1"}),
+		runtime.NewSpec(longRunningImage(), map[string]string{"QUICKSPIN_CONFORMANCE": "1"}, liveCPULimit, liveMemoryLimit, livePidsLimit, false),
 		observeTimeout)
 }
 
@@ -139,7 +146,7 @@ func TestDockerCreateOnlyPromisesThatStartWasAccepted(t *testing.T) {
 	// depends on which phase happened to be visible.
 	rt := liveDocker(t)
 
-	info, err := rt.Create(t.Context(), runtime.NewSpec(shortLivedImage, nil))
+	info, err := rt.Create(t.Context(), runtime.NewSpec(shortLivedImage, nil, liveCPULimit, liveMemoryLimit, livePidsLimit, false))
 	if err != nil {
 		t.Fatalf("Create(%s) error = %v, want nil", shortLivedImage, err)
 	}

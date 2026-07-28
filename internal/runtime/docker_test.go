@@ -27,7 +27,20 @@ import (
 const (
 	testContainerID = "container-good"
 	testImage       = "alpine:3.20"
+
+	// Limits chosen so each one's translation is distinguishable in an assertion:
+	// a half core exercises the fractional half of the NanoCPUs conversion, and no
+	// two values share a magnitude.
+	testCPULimit    = 0.5
+	testMemoryLimit = 64 * 1024 * 1024
+	testPidsLimit   = 128
 )
+
+// testSpec is the valid baseline every Docker test that is not about validation
+// starts from, so adding a required Spec field breaks one line rather than ten.
+func testSpec(image string, env map[string]string) Spec {
+	return NewSpec(image, env, testCPULimit, testMemoryLimit, testPidsLimit, false)
+}
 
 func TestNewDockerRuntimeRequiresLogger(t *testing.T) {
 	_, err := NewDockerRuntime(&client.Client{}, nil)
@@ -39,9 +52,12 @@ func TestNewDockerRuntimeRequiresLogger(t *testing.T) {
 // --- Pure decisions ----------------------------------------------------------
 
 func TestNewContainerConfigsCarriesEveryQuickspinDecision(t *testing.T) {
-	spec := NewSpec(testImage, map[string]string{"FOO_A": "3", "FOO": "1", "FOO2": "2"})
+	spec := testSpec(testImage, map[string]string{"FOO_A": "3", "FOO": "1", "FOO2": "2"})
 
-	cfg, host := newContainerConfigs(spec, testSandboxID)
+	cfg, host, err := newContainerConfigs(spec, testSandboxID)
+	if err != nil {
+		t.Fatalf("newContainerConfigs error = %v, want nil", err)
+	}
 
 	if cfg.Image != testImage {
 		t.Errorf("Image = %q, want %q", cfg.Image, testImage)
@@ -60,6 +76,72 @@ func TestNewContainerConfigsCarriesEveryQuickspinDecision(t *testing.T) {
 	}
 	if !host.PublishAllPorts {
 		t.Error("PublishAllPorts = false, want true")
+	}
+}
+
+// TestSpecToHostConfigMapsEveryLimit is the units test for the three
+// cgroup v2 knobs. Each field lands in a different unit — Memory is bytes,
+// NanoCPUs is cores × 10⁹, PidsLimit is a plain count — and a mistake produces a
+// wrong kernel ceiling rather than an error, so nothing downstream catches it.
+func TestSpecToHostConfigMapsEveryLimit(t *testing.T) {
+	_, host, err := newContainerConfigs(testSpec(testImage, nil), testSandboxID)
+	if err != nil {
+		t.Fatalf("newContainerConfigs error = %v, want nil", err)
+	}
+
+	if host.Memory != testMemoryLimit {
+		t.Errorf("Memory = %d, want %d bytes verbatim", host.Memory, int64(testMemoryLimit))
+	}
+	// 0.5 cores is 500_000_000 nano-CPUs. Writing the expectation as a literal
+	// rather than as the same multiplication the code performs is the point: a
+	// computed want would agree with a wrong conversion.
+	if want := int64(500_000_000); host.NanoCPUs != want {
+		t.Errorf("NanoCPUs = %d, want %d for %g cores", host.NanoCPUs, want, testCPULimit)
+	}
+	// A nil PidsLimit is the daemon's "set no pids.max", which is how a dropped
+	// field becomes an unbounded fork bomb rather than a visible failure.
+	if host.PidsLimit == nil {
+		t.Fatal("PidsLimit = nil, want a pointer to the limit: nil means unlimited")
+	}
+	if *host.PidsLimit != testPidsLimit {
+		t.Errorf("PidsLimit = %d, want the plain count %d", *host.PidsLimit, int64(testPidsLimit))
+	}
+}
+
+func TestNewContainerConfigsMapsAllowNetworkToNetworkMode(t *testing.T) {
+	// Default-deny: a spec that never mentions the network gets none, rather than
+	// inheriting Docker's default bridge.
+	for _, tt := range []struct {
+		allow bool
+		want  container.NetworkMode
+	}{
+		{allow: false, want: "none"},
+		{allow: true, want: "bridge"},
+	} {
+		spec := NewSpec(testImage, nil, testCPULimit, testMemoryLimit, testPidsLimit, tt.allow)
+
+		_, host, err := newContainerConfigs(spec, testSandboxID)
+		if err != nil {
+			t.Fatalf("newContainerConfigs(AllowNetwork=%v) error = %v, want nil", tt.allow, err)
+		}
+		if host.NetworkMode != tt.want {
+			t.Errorf("NetworkMode = %q for AllowNetwork=%v, want %q", host.NetworkMode, tt.allow, tt.want)
+		}
+	}
+}
+
+func TestNewContainerConfigsRefusesAnInvalidSpec(t *testing.T) {
+	// newContainerConfigs is the last place a Spec can be rejected before its
+	// limits become kernel state, so it must not hand back a usable config for a
+	// spec Validate rejects.
+	spec := NewSpec(testImage, nil, testCPULimit, testMemoryLimit, 0, false)
+
+	cfg, host, err := newContainerConfigs(spec, testSandboxID)
+	if !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("newContainerConfigs error = %v, want errors.Is(..., ErrInvalidSpec)", err)
+	}
+	if cfg.Image != "" || host.PidsLimit != nil {
+		t.Errorf("configs = %+v / %+v, want both zero on a rejected spec", cfg, host)
 	}
 }
 
@@ -113,13 +195,215 @@ func TestClassifyNotFoundSubstitutesTheSentinelAndKeepsTheCauseText(t *testing.T
 	}
 }
 
+func TestClassifyExecDoneDistinguishesADeadlineFromACancel(t *testing.T) {
+	// A caller retries a timeout and does not retry a cancel, so collapsing the
+	// two is a behavior bug even though both stop the same exec.
+	tests := []struct {
+		name      string
+		parentErr error
+		derived   error
+		wantErr   error
+		wantMsg   string
+	}{
+		{
+			// The case the previous shape could not produce. opts.Timeout expiring
+			// leaves the parent untouched, so a check that looked for
+			// DeadlineExceeded on the parent found nothing and fell through to the
+			// cancel branch — making ErrExecTimeout unreachable.
+			name:      "the exec timeout expired",
+			parentErr: nil,
+			derived:   context.DeadlineExceeded,
+			wantErr:   ErrExecTimeout,
+			wantMsg:   "timed out",
+		},
+		{
+			// Deriving the timeout context means a parent cancel finishes both. The
+			// parent is consulted first so this reports what actually happened.
+			name:      "the caller cancelled",
+			parentErr: context.Canceled,
+			derived:   context.Canceled,
+			wantErr:   context.Canceled,
+			wantMsg:   "cancelled",
+		},
+		{
+			// A deadline on the caller's own context is theirs, not opts.Timeout's,
+			// so it surfaces as itself. Challenge this if ErrExecTimeout should mean
+			// "any deadline" rather than "the one Exec applied".
+			name:      "the caller's own deadline passed",
+			parentErr: context.DeadlineExceeded,
+			derived:   context.DeadlineExceeded,
+			wantErr:   context.DeadlineExceeded,
+			wantMsg:   "cancelled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := classifyExecDone("op", "timed out", "cancelled", tt.parentErr, tt.derived)
+
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("classifyExecDone = %v, want errors.Is(..., %v)", err, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Errorf("classifyExecDone = %q, want it to contain %q", err, tt.wantMsg)
+			}
+		})
+	}
+}
+
+// TestClassifyExecDoneAgainstRealContexts pairs the classifier with the context
+// derivation it actually receives. The table above pins the decision given two
+// errors; this pins that context.WithTimeout produces those errors — the half
+// that was wrong, and that no table of hand-written arguments can catch.
+func TestClassifyExecDoneAgainstRealContexts(t *testing.T) {
+	t.Run("a timeout on a healthy parent is ErrExecTimeout", func(t *testing.T) {
+		parent := t.Context()
+		derived, cancel := context.WithTimeout(parent, time.Nanosecond)
+		defer cancel()
+		<-derived.Done()
+
+		err := classifyExecDone("op", "timed out", "cancelled", parent.Err(), derived.Err())
+		if !errors.Is(err, ErrExecTimeout) {
+			t.Fatalf("classifyExecDone = %v, want errors.Is(..., ErrExecTimeout)", err)
+		}
+	})
+
+	t.Run("a cancelled parent is not a timeout", func(t *testing.T) {
+		parent, cancelParent := context.WithCancel(t.Context())
+		// A generous timeout that cannot have fired: the derived context is Done
+		// only because cancellation propagates, which is exactly the ambiguity the
+		// parent-first ordering resolves.
+		derived, cancel := context.WithTimeout(parent, time.Hour)
+		defer cancel()
+		cancelParent()
+		<-derived.Done()
+
+		err := classifyExecDone("op", "timed out", "cancelled", parent.Err(), derived.Err())
+		if errors.Is(err, ErrExecTimeout) {
+			t.Fatalf("classifyExecDone = %v, want a cancel, not a deadline", err)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("classifyExecDone = %v, want errors.Is(..., context.Canceled)", err)
+		}
+	})
+}
+
+func TestPkillCommandBuildsOnePatternArgument(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  []string
+		want []string
+	}{
+		{
+			// The bug this pins: splicing argv in produced `pkill -f sh -c sleep 300`,
+			// which pkill rejects as extra operands, so nothing was ever killed.
+			name: "a multi-word command is one joined pattern",
+			cmd:  []string{"sh", "-c", "sleep 300"},
+			// `-` is not a regexp metacharacter outside a character class, so
+			// QuoteMeta leaves it alone; the `--` separator is what keeps a flag-like
+			// pattern from being read as a pkill option.
+			want: []string{"pkill", "-f", "-x", "--", "sh -c sleep 300"},
+		},
+		{
+			name: "a single-word command",
+			cmd:  []string{"sleep"},
+			want: []string{"pkill", "-f", "-x", "--", "sleep"},
+		},
+		{
+			// Unescaped, `.` and `[0-9]` are regexp and would match — and kill —
+			// processes the caller never named.
+			name: "regexp metacharacters are quoted",
+			cmd:  []string{"python3", "-m", "http.server[0-9]"},
+			want: []string{"pkill", "-f", "-x", "--", `python3 -m http\.server\[0-9\]`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := pkillCommand(tt.cmd)
+
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("pkillCommand = %q, want %q", got, tt.want)
+			}
+			// The count is asserted separately because the failure it guards is a
+			// usage error inside the container, invisible from here: pkill takes
+			// exactly one pattern however many words the command had.
+			if len(got) != 5 {
+				t.Errorf("pkillCommand produced %d args, want pkill plus exactly one pattern", len(got))
+			}
+		})
+	}
+}
+
+func TestClassifyPkillExitTreatsNoMatchAsSuccess(t *testing.T) {
+	tests := []struct {
+		name     string
+		exitCode int
+		wantOK   bool
+		wantMsg  string
+	}{
+		{
+			name:     "the process was signalled",
+			exitCode: 0,
+			wantOK:   true,
+		},
+		{
+			// The case that matters most: a command that exited on its own between
+			// the deadline and the kill leaves nothing to match. Reporting that as a
+			// failure would join a spurious error onto nearly every timeout.
+			name:     "nothing matched because it already exited",
+			exitCode: 1,
+			wantOK:   true,
+		},
+		{
+			// Distroless and scratch images have no pkill. The message has to name
+			// the image or the user goes looking for a bug in quickspin.
+			name:     "pkill is not in the image",
+			exitCode: 127,
+			wantOK:   false,
+			wantMsg:  "not available in this image",
+		},
+		{
+			name:     "pkill is present but not executable",
+			exitCode: 126,
+			wantOK:   false,
+			wantMsg:  "not available in this image",
+		},
+		{
+			name:     "pkill failed for its own reasons",
+			exitCode: 2,
+			wantOK:   false,
+			wantMsg:  "pkill exited 2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg, ok := classifyPkillExit(tt.exitCode)
+
+			if ok != tt.wantOK {
+				t.Fatalf("classifyPkillExit(%d) ok = %v, want %v", tt.exitCode, ok, tt.wantOK)
+			}
+			if tt.wantMsg == "" {
+				if msg != "" {
+					t.Errorf("classifyPkillExit(%d) message = %q, want it empty on success", tt.exitCode, msg)
+				}
+				return
+			}
+			if !strings.Contains(msg, tt.wantMsg) {
+				t.Errorf("classifyPkillExit(%d) message = %q, want it to contain %q", tt.exitCode, msg, tt.wantMsg)
+			}
+		})
+	}
+}
+
 // --- Create: request shape, ordering, and rollback ---------------------------
 
 func TestCreateOrdersItsRequestsAndSendsQuickspinsConfig(t *testing.T) {
 	daemon := newFakeDaemon(t)
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	info, err := rt.Create(t.Context(), NewSpec(testImage, map[string]string{"B": "2", "A": "1"}))
+	info, err := rt.Create(t.Context(), testSpec(testImage, map[string]string{"B": "2", "A": "1"}))
 	if err != nil {
 		t.Fatalf("Create error = %v, want nil", err)
 	}
@@ -157,6 +441,10 @@ func TestCreateOrdersItsRequestsAndSendsQuickspinsConfig(t *testing.T) {
 		HostConfig struct {
 			RestartPolicy   container.RestartPolicy
 			PublishAllPorts bool
+			NetworkMode     container.NetworkMode
+			Memory          int64
+			NanoCpus        int64  // the wire name; the Go field is NanoCPUs
+			PidsLimit       *int64 // absent in JSON, not zero, when the field is dropped
 		}
 	}
 	if err := json.Unmarshal(daemon.request(1).body, &body); err != nil {
@@ -177,6 +465,39 @@ func TestCreateOrdersItsRequestsAndSendsQuickspinsConfig(t *testing.T) {
 	}
 	if !body.HostConfig.PublishAllPorts {
 		t.Error("create body PublishAllPorts = false, want true")
+	}
+
+	// The limits are asserted on the wire rather than only on the struct because
+	// the SDK renames NanoCPUs to NanoCpus and omits a nil PidsLimit entirely — a
+	// dropped limit is an absent JSON key, which the daemon reads as unlimited.
+	if body.HostConfig.Memory != testMemoryLimit {
+		t.Errorf("create body Memory = %d, want %d", body.HostConfig.Memory, int64(testMemoryLimit))
+	}
+	if want := int64(500_000_000); body.HostConfig.NanoCpus != want {
+		t.Errorf("create body NanoCpus = %d, want %d", body.HostConfig.NanoCpus, want)
+	}
+	if body.HostConfig.PidsLimit == nil {
+		t.Error("create body PidsLimit absent, want the limit: the daemon reads absent as unlimited")
+	} else if *body.HostConfig.PidsLimit != testPidsLimit {
+		t.Errorf("create body PidsLimit = %d, want %d", *body.HostConfig.PidsLimit, int64(testPidsLimit))
+	}
+	if want := container.NetworkMode("none"); body.HostConfig.NetworkMode != want {
+		t.Errorf("create body NetworkMode = %q, want %q", body.HostConfig.NetworkMode, want)
+	}
+}
+
+func TestCreateRejectsAnInvalidSpecBeforeTouchingTheDaemon(t *testing.T) {
+	// Validation runs before the pull, so an unrunnable spec costs no registry
+	// round trip and leaves nothing to clean up.
+	daemon := newFakeDaemon(t)
+	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
+
+	_, err := rt.Create(t.Context(), NewSpec(testImage, nil, testCPULimit, 0, testPidsLimit, false))
+	if !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("Create error = %v, want errors.Is(..., ErrInvalidSpec)", err)
+	}
+	if got := daemon.routes(); len(got) != 0 {
+		t.Errorf("requests = %v, want none for a spec that never validated", got)
 	}
 }
 
@@ -203,7 +524,7 @@ func TestCreateMapsADaemonNotFoundToErrImageMissing(t *testing.T) {
 			tt.set(daemon)
 			rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-			_, err := rt.Create(t.Context(), NewSpec("nope:latest", nil))
+			_, err := rt.Create(t.Context(), testSpec("nope:latest", nil))
 			if !errors.Is(err, ErrImageMissing) {
 				t.Fatalf("Create error = %v, want errors.Is(..., ErrImageMissing)", err)
 			}
@@ -221,7 +542,7 @@ func TestCreateReportsAPullStreamFailureAndNeverCreates(t *testing.T) {
 	}
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	_, err := rt.Create(t.Context(), NewSpec(testImage, nil))
+	_, err := rt.Create(t.Context(), testSpec(testImage, nil))
 	if err == nil || !strings.Contains(err.Error(), "toomanyrequests") {
 		t.Fatalf("Create error = %v, want the stream's own cause", err)
 	}
@@ -235,7 +556,7 @@ func TestCreateRemovesTheContainerItMadeWhenStartFails(t *testing.T) {
 	daemon.start = dockerError(http.StatusInternalServerError, `exec: "nope": not found`)
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	if _, err := rt.Create(t.Context(), NewSpec(testImage, nil)); err == nil {
+	if _, err := rt.Create(t.Context(), testSpec(testImage, nil)); err == nil {
 		t.Fatal("Create error = nil, want the start failure")
 	}
 
@@ -256,7 +577,7 @@ func TestCreateNamesTheLeakWhenCleanupAlsoFails(t *testing.T) {
 	daemon.remove = dockerError(http.StatusInternalServerError, "remove refused")
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	_, err := rt.Create(t.Context(), NewSpec(testImage, nil))
+	_, err := rt.Create(t.Context(), testSpec(testImage, nil))
 	if err == nil {
 		t.Fatal("Create error = nil, want the joined failure")
 	}
@@ -285,7 +606,7 @@ func TestCreateStillRemovesTheContainerWhenTheCallerCancels(t *testing.T) {
 	}
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	if _, err := rt.Create(ctx, NewSpec(testImage, nil)); err == nil {
+	if _, err := rt.Create(ctx, testSpec(testImage, nil)); err == nil {
 		t.Fatal("Create error = nil, want a failure after cancellation")
 	}
 

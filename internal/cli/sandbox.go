@@ -13,6 +13,7 @@ func (app *application) newSandboxCommand() *cobra.Command {
 		app.newCreateCommand(),
 		app.newListCommand(),
 		app.newInspectCommand(),
+		app.newExecCommand(),
 		app.newDestroyCommand(),
 	)
 

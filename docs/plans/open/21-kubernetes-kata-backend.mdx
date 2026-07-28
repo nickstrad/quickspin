@@ -11,6 +11,8 @@ containers run inside a microVM instead of sharing the node's kernel. The backen
 talks to the cluster's API server via client-go — create pod, poll ready, delete pod
 — and the guest agent from plan 07 runs as the pod's single container, so exec and
 files arrive over the pod IP exactly as they do for Docker and Firecracker. On the
+network side, the pod always keeps that IP: `AllowNetwork: false` creates an
+egress-isolating `NetworkPolicy`, while `true` leaves workload egress permitted. On the
 capacity side, a pool of kind `kubernetes` delegates: no workerd, no per-host
 heartbeats, no target size — the cluster's own scheduler and whatever node scaling
 you configure in the cloud console are the capacity mechanism, and the plane's job
@@ -64,6 +66,9 @@ plan's pool kind *delegates* instead of pretending to manage.
   `ErrImageMissing` — sentinel translation at a boundary you don't control.
 - Packaging the guest agent as an OCI image for the first time: a scratch/distroless
   image around the static binary, pushed to a registry the cluster can pull from.
+- Kubernetes `NetworkPolicy` as the Kata implementation of plan 03's backend-neutral
+  egress contract: pod IP and plane reachability stay intact while new
+  workload-originated connections are denied.
 - Delegated capacity as a design stance: what the plane checks (reachability, a
   kata smoke pod) versus what it deliberately does not track (nodes, slots).
 
@@ -130,6 +135,34 @@ version of plan 17's full host); `ImagePullBackOff` inside container statuses is
     <text x="300" y="214" textAnchor="middle" fontSize="10" fill="#7f5d43">GET /healthz on the pod IP — running means the guest answered, same as plans 07/14</text>
   </svg>
 </Figure>
+
+### Concept: the pod IP is plumbing; egress permission is policy
+
+Kubernetes assigns networking to the pod before `quickspin-guest` can serve. That pod
+IP is the route used for health, exec, and files, so `AllowNetwork: false` cannot mean
+"remove the interface" here. It means that Quickspin creates an egress-only
+`NetworkPolicy` selecting the sandbox's immutable `quickspin.id` label:
+
+| `AllowNetwork` | Pod IP | Plane → guest | Guest reply | New workload connection |
+|---|---|---|---|---|
+| `false` | retained | allowed | allowed as reply traffic | denied by `policyTypes: [Egress]` with an empty egress list |
+| `true` | retained | allowed | allowed | not restricted by a Quickspin egress-deny policy |
+
+The policy deliberately does not select `Ingress`: reachability from the plane is a
+separate boundary, and the plan's single-node topology already places the plane within
+pod-network reach. Kubernetes network policy is connection-aware, so response traffic
+for the plane's allowed connection is implicitly permitted even when the pod is
+isolated for egress. `true` means Quickspin does not deny egress; it cannot promise
+that DNS, an Internet gateway, or cluster-admin policy outside Quickspin will make a
+particular destination reachable.
+
+Ordering is the security property. For `false`, create the policy first and the
+matching Pod second; a selector may safely exist before any pod matches it. On rollback
+or `Destroy`, delete the Pod, wait until it is gone, and only then delete the policy.
+The reverse order creates a small allow-all window for a pod that is still terminating.
+If the cluster's CNI does not enforce `NetworkPolicy`, pool admission fails—the
+backend must prove the negative path with a real pod rather than treating successful
+API object creation as enforcement.
 
 ### Concept: a kubernetes pool has no target size, and that is the design
 
@@ -206,14 +239,21 @@ Lifecycle mapping (pure, table-tested):
   stateFromPod: PodRunning+guest-healthy → running; Succeeded/Failed → stopped;
   Pending+Unschedulable past window → no_capacity; ImagePullBackOff →
   ErrImageMissing; absent → ErrNotFound.
-  Destroy: delete by label-resolved name, IsNotFound → nil, idempotent as always.
+  Destroy: delete the label-resolved Pod and wait for absence, then delete its
+  NetworkPolicy if present; IsNotFound → nil, idempotent as always.
+Egress policy (pure builder + live enforcement test):
+  AllowNetwork false → an Egress-only NetworkPolicy selecting quickspin.id with an
+  empty egress list; create policy before Pod.
+  AllowNetwork true → no Quickspin egress-deny policy; the plan-owned namespace's
+  ordinary cluster networking applies.
 Guest image: build/quickspin-guest.Dockerfile — FROM scratch + the static binary
   (plan 07's static build paying off a third time); pushed to a registry the
   cluster pulls from; tag pinned in pool config, never :latest.
 Pool integration (needs 19):
   pools of kind "kubernetes": kubeconfig_ref + namespace + runtime_class instead of
   provider/target_size; scale → typed refusal; health = reachability probe +
-  smoke pod at pool create; placement treats healthy pools as elastic.
+  smoke pod at pool create, including a false-policy outbound probe; placement treats
+  healthy pools as elastic.
 Network reachability: the plane must reach pod IPs for exec/files. Committed dev
   answer: the plane runs inside the cluster's network reach (single-node k3s: the
   node itself). The general answer (LB per sandbox, ingress, or a tunnel) is real
@@ -240,35 +280,39 @@ them (an operator inverts that ownership; worth understanding, deliberately not
 built); polling over informers for state (the reconciler already polls; informers
 are an optimization with a large conceptual surface, deferred); one namespace per
 pool, created by pool create, so `kubectl get pods -n <pool>` is the operator view
-and namespace deletion is the disaster-recovery cleanup.
+and namespace deletion is the disaster-recovery cleanup. Pool creation also proves
+that the cluster's CNI enforces `NetworkPolicy`; accepting the object without dropping
+traffic is not sufficient.
 
 ## Tasks
 
 <TaskList>
   <Task title="Stand up the kata-capable lab cluster">
     `hack/setup-kata-cluster.sh`: k3s on a nested-virt droplet (or equivalent),
-    kata-deploy, RuntimeClass present, and the uname smoke check proving pods get
-    their own kernel.
+    kata-deploy, RuntimeClass present, the uname smoke check proving pods get their
+    own kernel, and a live default-deny probe proving the CNI enforces
+    `NetworkPolicy`.
   </Task>
   <Task title="Package and push the guest image">
     `build/quickspin-guest.Dockerfile` from scratch + static binary; a make target
     builds and pushes; a hand-written kata pod running it answers /healthz.
   </Task>
   <Task title="Write the pure mapping layer">
-    `stateFromPod`, the pod-template builder, and label helpers — table-tested with
-    fabricated Pod structs, no cluster required.
+    `stateFromPod`, the pod-template builder, the egress-policy builder, and label
+    helpers — table-tested with fabricated Kubernetes objects, no cluster required.
   </Task>
   <Task title="Implement the kata Runtime">
-    create/inspect/list/destroy via client-go against the lab cluster; sentinel
-    translation at the boundary; the pending-window timeout on create.
+    create/inspect/list/destroy via client-go against the lab cluster; policy-before-
+    pod create ordering, pod-before-policy cleanup ordering, sentinel translation at
+    the boundary, and the pending-window timeout on create.
   </Task>
   <Task title="Add the kubernetes pool kind">
     Plan 19 schema variant, scale refusal, reachability probe, and the smoke pod on
-    pool create.
+    pool create; the smoke must reach its guest while its outbound probe is denied.
   </Task>
   <Task title="Route backend kata through the stack and validate">
     Spec validation, placement's elastic-pool path, one SDK field value, and
-    `hack/validate-21.sh`.
+    `hack/validate-21.sh` covering both `AllowNetwork` values.
   </Task>
 </TaskList>
 
@@ -277,14 +321,18 @@ and namespace deletion is the disaster-recovery cleanup.
 <HintSteps>
   <Hint
     title="Prove kata before any Go"
-    check="kubectl apply of a busybox pod with runtimeClassName kata runs, and uname -r inside it differs from the node's kernel."
+    check="A kata pod has a different kernel from its node, and a disposable egress-deny NetworkPolicy blocks its new outbound connection without removing its pod IP."
   >
     k3s installs with one script; kata-deploy is a DaemonSet plus RuntimeClass
     manifests from the kata-containers repo. On k3s specifically, containerd config
     lives in a templated path — kata-deploy handles current k3s, but if pods stay
     in `ContainerCreating`, `kubectl describe pod` and the node's containerd log
     name the missing handler. The uname comparison is the only proof that matters;
-    a pod that runs with the node's kernel is runc wearing kata's name.
+    a pod that runs with the node's kernel is runc wearing kata's name. Separately
+    apply an egress-only default-deny policy to a disposable labeled pod and test an
+    outbound connection before and after; a NetworkPolicy object that exists while
+    traffic still succeeds means the CNI is not enforcing it, and the backend must
+    reject that pool.
   </Hint>
   <Hint
     title="The guest image is FROM scratch and two lines"
@@ -299,7 +347,7 @@ and namespace deletion is the disaster-recovery cleanup.
   </Hint>
   <Hint
     title="Build the pod template and stateFromPod as pure functions first"
-    check="TestStateFromPodTable covers running, succeeded, failed, unschedulable-pending, image-pull-backoff, and absent — green with no cluster."
+    check="TestStateFromPodTable covers the lifecycle rows and TestEgressPolicyForSpec proves false builds an empty-egress policy while true builds none — green with no cluster."
   >
     The template builder takes (spec, pool config) and returns a `*corev1.Pod` —
     fabricating expected Pods in tests is verbose but mechanical. For state: pod
@@ -307,7 +355,21 @@ and namespace deletion is the disaster-recovery cleanup.
     reasons, ImagePullBackOff in `ContainerStatuses[].State.Waiting.Reason`. Every
     one of those paths is a table row, and this table is where the foreign state
     machine gets pinned — the kata equivalent of plan 02's seven-states-to-two
-    decision.
+    decision. Keep policy construction pure too: derive a deterministic Kubernetes
+    object name and selector from the backend-owned sandbox identity, set only
+    `policyTypes: [Egress]`, and distinguish an empty egress list from an omitted
+    policy. Do not add an ingress policy as an accidental way to express egress.
+  </Hint>
+  <Hint
+    title="Create policy before Pod; clean up in reverse"
+    check="A forced failure after NetworkPolicy creation leaves neither object, and Destroy never observes a live Pod without its false-policy."
+  >
+    For `AllowNetwork: false`, create the NetworkPolicy before submitting the Pod;
+    because matching is by label, the policy becomes effective as soon as the pod
+    joins the network. If any later create step fails, delete the Pod and wait for
+    `IsNotFound` before deleting the policy. `AllowNetwork: true` skips the policy
+    operation. Keep both cleanup paths idempotent so retries can resume after either
+    resource has already disappeared.
   </Hint>
   <Hint
     title="client-go's boilerplate is front-loaded; the verbs are small"
@@ -318,9 +380,9 @@ and namespace deletion is the disaster-recovery cleanup.
     `ListOptions.LabelSelector` with `quickspin.id=<id>` — never get-by-name from
     user input, the same prefix-match trap as plan 02's ContainerInspect warning.
     Create polls your `stateFromPod` until running or the pending window lapses;
-    on lapse, delete the pod before returning `no_capacity` — the create-gap
-    cleanup discipline, third incarnation. Destroy maps
-    `k8serrors.IsNotFound` to nil.
+    on lapse, delete the pod, wait for absence, delete its policy, then return
+    `no_capacity` — the create-gap cleanup discipline, third incarnation. Destroy
+    maps `k8serrors.IsNotFound` to nil for both resource kinds.
   </Hint>
   <Hint
     title="The smoke pod is pool create's admission test"
@@ -328,10 +390,13 @@ and namespace deletion is the disaster-recovery cleanup.
   >
     Reuse the backend's own Create/Destroy for the smoke pod — the point is to
     exercise the real path, not a parallel one. Run it with a short deadline and a
-    distinctive label so a crashed smoke test is reaped by the ordinary orphan
-    sweep. Order matters for crash-safety: smoke pod first, pool row only on
-    success — the inverse of plan 18's row-first ordering, because here the
-    external resource is disposable and the row is the commitment.
+    distinctive label so a crashed smoke test and its policy are reaped by the
+    ordinary orphan sweep. Use `AllowNetwork: false`, reach `/healthz`, then execute
+    an outbound probe through the guest and require that it fail; this proves guest
+    reachability and egress isolation coexist. Order matters for crash-safety: smoke
+    resources first, pool row only on success — the inverse of plan 18's row-first
+    ordering, because here the external resources are disposable and the row is the
+    commitment.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: created pods stick in Pending"
@@ -344,7 +409,11 @@ and namespace deletion is the disaster-recovery cleanup.
     turns ready, split the failure with pod logs: no log output means the image or
     entrypoint (wrong arch is the classic — the droplet is amd64, plan 01's
     cross-compile habit finally flips direction); guest logs but probe failing
-    means the readinessProbe port disagrees with the guest's listen address.
+    means the readinessProbe port disagrees with the guest's listen address. If
+    `/healthz` fails only under `AllowNetwork: false`, inspect the policy: it probably
+    isolated ingress as well as egress. If outbound traffic still succeeds, inspect
+    the CNI rather than the Pod—the API server storing a policy does not prove the
+    data plane enforces it.
   </Hint>
 </HintSteps>
 
@@ -356,6 +425,8 @@ Unit tests (`make test`, no cluster):
   errors.
 - `TestPodTemplateCarriesLabelsAndRuntimeClass` — both quickspin labels, the
   RuntimeClass, restartPolicy Never, and the readiness probe present.
+- `TestEgressPolicyForSpec` — `false` returns an Egress-only policy with the exact
+  sandbox selector and no allowed egress; `true` returns no Quickspin deny policy.
 - `TestKubernetesPoolRefusesScale`.
 
 Gated live tests + `hack/validate-21.sh` against the lab cluster:
@@ -363,7 +434,12 @@ Gated live tests + `hack/validate-21.sh` against the lab cluster:
 - Isolation proof: `uname -r` in a sandbox differs from the node kernel.
 - Via the control plane with `"backend": "kata"`: create reaches running (guest
   answered), exec streams and exit codes work, file round-trip works, destroy is
-  idempotent, and `kubectl get pods` shows no quickspin pods after.
+  idempotent, and `kubectl get pods` plus `kubectl get networkpolicies` show no
+  sandbox resources after.
+- Network contract: `AllowNetwork: false` retains the pod IP and plane-driven
+  health/exec/files while a new outbound connection from the workload fails;
+  `AllowNetwork: true` permits the same connection. The CNI-enforcement probe fails
+  pool admission if traffic ignores the stored policy.
 - Negative: impossible resource request → typed `no_capacity` within the window,
   pod cleaned up; deleting the RuntimeClass makes `pool create` fail its smoke pod.
 - Crash check: `kubectl delete pod` behind the plane's back → the reconciler marks
@@ -372,22 +448,20 @@ Gated live tests + `hack/validate-21.sh` against the lab cluster:
   Docker's and Firecracker's numbers — the three-way table is the artifact.
 
 Deliberately untested: multi-node clusters, informer-based watching, pod networking
-beyond the single-node reach commitment, kata's Firecracker VMM variant
-(`kata-fc` — noted as the bridge between this plan and plan 14, left as an
-experiment), operators/CRDs.
+beyond the single-node reach commitment, egress allowlists, DNS filtering,
+protocol-aware policy, kata's Firecracker VMM variant (`kata-fc` — noted as the
+bridge between this plan and plan 14, left as an experiment), operators/CRDs.
 
 ## Solo-developer tradeoffs
 
 A commercial platform on Kubernetes would run an operator with CRDs, informers,
-admission webhooks, and per-tenant namespaces with NetworkPolicies — the full
-cloud-native toolchain. You stop at "pods as disposable actuals under your own
-control plane" because the learning target is the backend boundary and the
-delegated-capacity stance, not the Kubernetes ecosystem itself; each omitted piece
-is a well-documented industry pattern you can now place. The genuinely load-bearing
-shortcut is network reachability: real platforms put a routing layer between plane
-and sandbox (plan 07's address abstraction is where it would slot in), and
-single-node reach is the recorded debt that makes this plan honest rather than
-production-shaped.
+admission webhooks, tenant-wide default-deny policy, destination allowlists, and
+audited DNS — the full cloud-native toolchain. You implement only the per-sandbox
+binary egress policy because it is part of the shared `Runtime` contract; richer
+tenant policy remains capstone work. The genuinely load-bearing shortcut is network
+reachability: real platforms put a routing layer between plane and sandbox (plan 07's
+address abstraction is where it would slot in), and single-node reach is the recorded
+debt that makes this plan honest rather than production-shaped.
 
 ## Go deeper
 
@@ -407,6 +481,15 @@ production-shaped.
   >
     The per-pod runtime selection mechanism, and its scheduling implications when
     only some nodes carry a handler.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Kubernetes: Network Policies"
+    href="https://kubernetes.io/docs/concepts/services-networking/network-policies/"
+  >
+    The additive ingress/egress model, empty egress isolation, and stateful reply
+    behavior that let the pod keep its control-plane connection while denying new
+    workload connections.
   </Resource>
   <Resource
     kind="docs"

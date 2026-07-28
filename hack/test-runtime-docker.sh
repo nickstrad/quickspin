@@ -255,13 +255,45 @@ trap leak_check EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# --- 6. The live Go suite -----------------------------------------------------
+# --- 6. Warm the image cache --------------------------------------------------
+#
+# The first Create pays for a cold pull, and it pays for it inside a test whose
+# only visible output is `=== RUN`. Pulling here puts the longest silent stretch
+# of the run behind Docker's own progress bars instead. It is a warm-up, not a
+# precondition: the runtime pulls for itself, so a failure here is reported and
+# stepped over rather than aborting a suite that would have worked.
+printf '\nPre-pulling %s so the first Create does not stall silently.\n' "${QUICKSPIN_TEST_IMAGE}"
+if ! docker pull "${QUICKSPIN_TEST_IMAGE}"; then
+	printf 'Pre-pull failed; continuing — the runtime pulls for itself.\n'
+fi
+
+# --- 7. The live Go suite -----------------------------------------------------
 #
 # -count=1 because Go's test cache keys on the test binary and its inputs, and
 # cannot know the daemon's state changed between runs.
-printf '\nRunning the live Docker runtime suite.\n'
-QUICKSPIN_TEST_DOCKER=1 go test -count=1 ./internal/runtime/...
+#
+# -timeout raises Go's 10-minute default. Several clauses are deliberately slow —
+# a 3-minute convergence budget, an OOM that must actually be provoked, and reap
+# polls generous enough that a loaded machine does not fail a passing
+# implementation. Blowing the default produces a goroutine dump that looks like a
+# crash rather than the "this suite is just long" that it is.
+#
+# -v plus one invocation per package is what makes the run legible. -v alone does
+# not stream: given a pattern matching several packages, go test buffers each
+# package's output and prints it only on completion, so a long suite shows
+# nothing until it is over — indistinguishable from a wedged run. go test streams
+# line by line only when handed exactly one package, which is what the loop does.
+#
+# `go list` rather than a hard-coded list: a package added under internal/runtime
+# should be run, and a loop that silently skipped it would be worse than none.
+LIVE_TEST_TIMEOUT="${LIVE_TEST_TIMEOUT:-30m}"
+printf '\nRunning the live Docker runtime suite (timeout %s).\n' "${LIVE_TEST_TIMEOUT}"
 
-# --- 7. The CLI smoke ---------------------------------------------------------
+for pkg in $(go list ./internal/runtime/...); do
+	printf '\n--- %s\n' "${pkg}"
+	QUICKSPIN_TEST_DOCKER=1 go test -count=1 -v -timeout "${LIVE_TEST_TIMEOUT}" "${pkg}"
+done
+
+# --- 8. The CLI smoke ---------------------------------------------------------
 printf '\nRunning the compiled-CLI lifecycle smoke.\n'
 "${REPO_ROOT}/hack/validate-runtime-cli.sh"

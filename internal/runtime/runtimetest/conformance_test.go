@@ -141,7 +141,7 @@ func runRecorded(t *testing.T, rec *recorder, rt runtime.Runtime, observe time.D
 			panic(r)
 		}
 	}()
-	RunConformance(rec, rt, runtime.NewSpec("in-memory", nil), observe)
+	RunConformance(rec, rt, runtime.NewSpec("in-memory", nil, 0.5, 64*1024*1024, 128, false), observe)
 }
 
 var errFatal = errors.New("recorder: Fatalf")
@@ -255,6 +255,23 @@ func (m *memRuntime) Destroy(_ context.Context, id string) error {
 	}
 	delete(m.sandboxes, id)
 	return nil
+}
+
+// Exec exists so memRuntime still satisfies runtime.Runtime. The conformance
+// suite does not exercise exec — there is no in-memory analogue of a process —
+// so this reports success without running anything, and a suite clause that
+// starts depending on exec will see that emptiness rather than a plausible lie.
+func (m *memRuntime) Exec(_ context.Context, id string, _ []string, _ runtime.ExecOpts) (runtime.ExecResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := validateMemID(id); err != nil {
+		return runtime.ExecResult{}, err
+	}
+	if _, ok := m.sandboxes[id]; !ok {
+		return runtime.ExecResult{}, runtime.ErrNotFound
+	}
+	return runtime.ExecResult{}, nil
 }
 
 // validateMemID applies the prefix rule alone. The double deliberately does not

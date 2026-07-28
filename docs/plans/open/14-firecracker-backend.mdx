@@ -8,9 +8,12 @@ The capstone taste of how the leaders actually run untrusted code: boot Firecrac
 microVMs inside the Lima VM (nested virtualization), get the `quickspin-guest` binary
 running inside them, and implement enough of a second `Runtime` backend
 (`firecracker`) that a sandbox created with `--backend firecracker` supports create /
-exec-via-guest / files / destroy through the same control plane and SDKs. Snapshots,
-warm pools, and production hardening are explicitly out of scope — this plan buys the
-mental model and the resume line, not parity with Docker.
+exec-via-guest / files / destroy through the same control plane and SDKs. The backend
+also carries plan 03's binary egress contract across the VM boundary: every guest keeps
+its network device so the plane can reach it, while host firewall policy decides
+whether workload-initiated traffic may leave. Snapshots, warm pools, and production
+hardening are explicitly out of scope — this plan buys the mental model and the resume
+line, not parity with Docker.
 
 ## Industry context
 
@@ -48,7 +51,8 @@ boundary moves from "syscall filtering" to "virtual hardware."
   same alpine export as plan 13, and a tiny init that brings up networking and execs
   `quickspin-guest` — closing the loop on why the guest is a static binary.
 - MicroVM networking: one tap device per VM, addresses, and why platforms obsess over
-  this part.
+  this part; stateful host filtering that separates plane-to-guest management traffic
+  from guest-initiated egress.
 - An honest boot-time measurement to place next to plan 11's numbers.
 
 ### Concept: Firecracker is a process, and the VM dies with it
@@ -64,10 +68,9 @@ does not exist; the kernel is loaded directly at a known address and told about 
 few devices on the command line. Two consequences shape your backend. One process per
 VM means the host's ordinary process model *is* your VM lifecycle model: `kill -9`
 of the firecracker process is instant, unclean VM death — which is exactly the crash
-your reconciler must detect. And because the VMM process is the sandbox's entire
-footprint on the host, "destroy" is enumerable: the process, its API socket, its tap
-device, its rootfs copy — four artifacts, no daemon holding hidden state the way
-dockerd does.
+your reconciler must detect. And because no daemon holds hidden sandbox state,
+"destroy" is enumerable: the process, its API socket, its tap device, its egress-policy
+handle, and its rootfs copy — five artifacts.
 
 ### Concept: the boot path — API socket, three PUTs, then a kernel
 
@@ -152,17 +155,19 @@ the firecracker process and the other end is a normal interface in the host's ne
 stack. Frames the guest sends come out of `tap-sbx…` on the host; the host answers
 back down the same pipe. Your design gives each VM its own tap plus a fixed /30 (one
 host address, one guest address), so guest reachability is plain IP routing with no
-bridge, NAT, or DHCP — the control plane, running inside the Lima VM, curls the guest
-address directly. The engineering lesson is in the allocator: taps and subnets are
-host-global resources created outside any transaction, and concurrent creates racing
-for the same /30 is the textbook check-then-take bug — which is why the plan pins the
-allocator to the concurrency reference's category-3 shape (allocate and mark in one
-locked helper) with its own race test. It is also the seed of why real platforms
-obsess here: per-VM egress policy, MAC/IP spoofing prevention, and thousands of taps
-per host all live in this layer; your version is the minimal honest form of it.
+bridge or DHCP — the control plane, running inside the Lima VM, curls the guest address
+directly. NAT is conditional: it is installed only when `AllowNetwork` permits the host
+to forward guest traffic to its uplink. The engineering lesson is in the allocator:
+taps and subnets are host-global resources created outside any transaction, and
+concurrent creates racing for the same /30 is the textbook check-then-take bug — which
+is why the plan pins the allocator to the concurrency reference's category-3 shape
+(allocate and mark in one locked helper) with its own race test. It is also the seed of
+why real platforms obsess here: per-VM egress policy, MAC/IP spoofing prevention, and
+thousands of taps per host all live in this layer; your version is the minimal honest
+form of it.
 
 <Mermaid
-  caption="No bridge, no NAT, no DHCP: each VM gets its own tap plus a fixed /30, so guest reachability is plain IP routing — and the only shared, race-prone resource in the whole picture is the allocator handing out those subnets."
+  caption="No bridge or DHCP: each VM gets its own tap plus a fixed /30, so plane-to-guest reachability is direct routing. NAT is an egress policy choice, not a prerequisite for management traffic."
   code={`
 flowchart LR
     subgraph host["Lima VM (host network stack)"]
@@ -186,6 +191,34 @@ flowchart LR
 `}
 />
 
+### Concept: keep the interface; filter who may start a connection
+
+Plan 03's `AllowNetwork` flag is a traffic-policy promise, not a virtual-hardware
+switch. Both values therefore boot the same virtio-net device, TAP, and /30. Removing
+them for `false` would also remove the path plan 07 uses for health, exec, and files.
+The host instead distinguishes connections by direction and state:
+
+| `AllowNetwork` | Plane starts a connection to the guest | Guest replies to that connection | Guest starts a new connection |
+|---|---|---|---|
+| `false` | allowed | allowed as established traffic | denied, whether the destination is the host or a forwarded network |
+| `true` | allowed | allowed | allowed through host forwarding and NAT, except for host resources denied by the backend's baseline isolation rules |
+
+This is why a rule cannot literally drop every packet emitted by the guest: an HTTP
+response from `quickspin-guest` is emitted by the guest too. The filter must be
+stateful. For `false`, it accepts established/related return traffic and rejects new
+connections arriving from that TAP in both the host-input and forwarding paths. For
+`true`, it permits forwarding and installs masquerading for that VM's source subnet.
+Restrictions protecting the host's control-plane database, metadata endpoints, and
+other internal services apply under both values; `true` permits ordinary workload
+egress, not access to platform internals.
+
+The rule set is installed before `InstanceStart`, so there is no boot-time window in
+which untrusted code runs before its policy. Rollback and `Destroy` remove the VM
+before removing its rules; deleting the rule first would briefly reopen a still-running
+guest. DNS allowlists, destination allowlists, bandwidth metering, and protocol-aware
+filtering remain deferred—the only choices here are deny new workload egress or permit
+ordinary egress.
+
 <Callout tone="warning" title="Nested virtualization is a precondition, not a given">
   Everything in this plan needs `/dev/kvm` *inside* the Lima VM, which requires Lima's
   `vz` VM type with nested virtualization enabled — available on Apple Silicon (M3 or
@@ -203,8 +236,9 @@ routes create/destroy to the chosen backend and the guest client needs only an a
 ```go
 // internal/runtime/firecracker — implements the same Runtime interface for
 // lifecycle; workload ops arrive via the guest as with Docker.
-// Per-VM artifacts: api socket, tap device, rootfs copy, firecracker process.
-// Destroy kills the process and removes all four; idempotent like plan 02.
+// Per-VM artifacts: api socket, tap device, egress-policy handle, rootfs copy,
+// firecracker process. Destroy kills the process and removes all five;
+// idempotent like plan 02.
 ```
 
 Committed decisions: the control plane runs **inside** the Lima VM for this plan
@@ -216,6 +250,21 @@ concurrent creates are the norm once the reconciler drives this backend; exec/fi
 — cgroup-equivalent limits inside the VM are out of scope (the VM's memory size is the
 real limit and the interesting difference to write up).
 
+`AllowNetwork` maps to a backend-owned, per-TAP policy installed in dedicated
+Quickspin-owned **nftables** tables:
+
+| Value | Host policy |
+|---|---|
+| `false` | Keep the TAP and /30; accept established replies to plane-initiated connections; reject new guest-originated host-input and forwarded connections. |
+| `true` | Keep the TAP and /30; permit forwarding and masquerade the guest subnet onto the host uplink; retain baseline denials for platform-internal destinations. |
+
+The nftables command shape is an implementation detail behind a small policy helper;
+the pure input is the sandbox ID, TAP name, /30, and `AllowNetwork`, and the output is
+the desired rule set plus an opaque cleanup handle. Setup is idempotent, partial setup
+rolls back, and cleanup treats already-absent rules as success. Host forwarding may be
+enabled once during environment setup, but per-VM forwarding and NAT remain explicit
+policy so two sandboxes with opposite flag values can coexist.
+
 <KeyPoint label="The boundary that makes this plan small">
   The `Runtime` interface from plan 02 plus the guest agent from plan 07 mean this
   backend only has to answer lifecycle questions: create, inspect, list, destroy, and
@@ -223,20 +272,21 @@ real limit and the interesting difference to write up).
   exactly as they do for Docker — no second implementation of the workload API.
 </KeyPoint>
 
-The shape of the two lifecycle operations follows from the four-artifact footprint:
+The shape of the two lifecycle operations follows from the five-artifact footprint:
 
 <Mermaid
   caption="Create is a supervised sequence where any failure unwinds everything acquired so far — the plan 02 create-gap discipline — and Destroy is the same removal list run unconditionally, with each step tolerating already-gone so a second destroy still exits 0."
   code={`
 flowchart TD
     A["allocate a /30<br/>(allocate and mark in one locked call)"] --> B["per-VM dir + rootfs copy"]
-    B --> C["spawn firecracker,<br/>stdout/stderr to a log file"]
-    C --> D["poll for the API socket file<br/>(created asynchronously)"]
-    D --> E["3 PUTs: boot-source,<br/>drive, network-interface"]
-    E --> F["PUT /actions InstanceStart"]
-    F --> G["poll guest /healthz<br/>with a context deadline"]
-    G --> H["sandbox running"]
-    G -. "any step fails or times out" .-> U["unwind everything so far:<br/>kill process, del tap,<br/>remove dir, free the /30"]
+    B --> C["create tap + install<br/>per-VM egress policy"]
+    C --> D["spawn firecracker,<br/>stdout/stderr to a log file"]
+    D --> E["poll for the API socket file<br/>(created asynchronously)"]
+    E --> F["3 PUTs: boot-source,<br/>drive, network-interface"]
+    F --> G["PUT /actions InstanceStart"]
+    G --> H["poll guest /healthz<br/>with a context deadline"]
+    H --> I["sandbox running"]
+    H -. "any step fails or times out" .-> U["unwind in safe order:<br/>kill process, del tap,<br/>remove policy + dir, free /30"]
     X["Destroy (or reconciler cleanup<br/>after kill -9 of the VMM)"] --> U
 `}
 />
@@ -246,9 +296,9 @@ flowchart TD
 <TaskList>
   <Task title="Write hack/setup-firecracker.sh">
     Verify `/dev/kvm` in Lima, fetch the firecracker binary and a CI kernel image,
-    and build the rootfs (with guest + init) via script. All artifact scripts take
-    `ARCH` (per plan 01's convention) even though this plan only exercises arm64 —
-    plan 16 reruns them for amd64 unchanged.
+    verify `nft`, enable host forwarding, and build the rootfs (with guest + init) via
+    script. All artifact scripts take `ARCH` (per plan 01's convention) even though
+    this plan only exercises arm64 — plan 16 reruns them for amd64 unchanged.
   </Task>
   <Task title="Boot one VM by hand to a shell">
     Script only, no Go — configure over the API socket with curl and reach a serial
@@ -258,9 +308,14 @@ flowchart TD
     The VM boots straight into a serving `quickspin-guest`; curl its `/healthz` from
     inside the Lima VM.
   </Task>
+  <Task title="Implement per-VM egress policy">
+    Build and table-test the desired host rules for both `AllowNetwork` values, then
+    install them before `InstanceStart`; rollback and destroy remove them only after
+    the VM can no longer send traffic.
+  </Task>
   <Task title="Implement the firecracker Runtime backend">
     create/inspect/list/destroy plus the guest address, including the tap/IP
-    allocator with its race test.
+    allocator with its race test and the egress-policy cleanup handle.
   </Task>
   <Task title="Route Backend through the stack">
     Plumb `Spec.Backend` through the control plane, spec validation, and one SDK
@@ -318,23 +373,40 @@ flowchart TD
     Per VM: `ip tuntap add tap-<id> mode tap`, `ip addr add <host-ip>/30 dev
     tap-<id>`, `ip link set tap-<id> up`, then `PUT /network-interfaces/eth0` with
     `host_dev_name` and a `guest_mac` you generate. `man 7 networking` won't help
-    here — the firecracker docs' network-setup guide is the reference. No bridge and
-    no NAT: the control plane lives on the same host, so a directly-addressed /30 per
+    here — the firecracker docs' network-setup guide is the reference. No bridge is
+    needed: the control plane lives on the same host, so a directly-addressed /30 per
     VM is sufficient and keeps routing trivially debuggable with `ip route` and
-    `tcpdump -i tap-<id>`.
+    `tcpdump -i tap-<id>`. NAT is added separately for an egress-enabled VM.
   </Hint>
   <Hint
-    title="Create is a supervised sequence; Destroy is four removals"
-    check="quickspin sandbox create --backend firecracker reaches running; destroy leaves no firecracker process, no tap in ip link, no socket, no rootfs copy — and a second destroy exits 0."
+    title="Install policy before the guest can run"
+    check="TestEgressPolicyTable distinguishes false from true without starting Firecracker; the live false case still answers /healthz but cannot open a new external connection."
+  >
+    First model the policy as data: TAP name, guest subnet, protected host
+    destinations, whether forwarding/NAT is allowed, and the rule-set identifier
+    needed for cleanup. Then translate that model to Quickspin-owned nftables chains;
+    do not append anonymous rules to host-global chains that cannot be attributed or
+    cleaned up. The `false` case needs state in two paths: established replies may
+    return to the plane, while new packets from the TAP are rejected in host input and
+    forwarding.
+    The `true` case enables forwarding plus masquerading, but does not remove the
+    baseline denials protecting platform internals. Install after the TAP exists and
+    before `InstanceStart`; on failure, remove any partial rules and the TAP.
+  </Hint>
+  <Hint
+    title="Create is a supervised sequence; Destroy is five removals"
+    check="quickspin sandbox create --backend firecracker reaches running; destroy leaves no firecracker process, tap, policy rule, socket, or rootfs copy — and a second destroy exits 0."
   >
     Shape of `Create`: allocate the /30 (locked helper — allocate and mark in one
     call, never check-then-take), make a per-VM dir, copy the rootfs, `exec.Command`
     firecracker with its stdout/stderr to a log file, wait for the socket file to
     appear (poll with a deadline — it is created asynchronously), issue the PUTs,
     `InstanceStart`, then poll guest `/healthz` with a context deadline. Any failure
-    unwinds everything so far — same create-gap discipline as plan 02. `Destroy`:
-    SIGKILL the process, reap it, `ip link del` the tap, remove the dir; each step
-    tolerates "already gone" so destroy stays idempotent.
+    unwinds everything so far — same create-gap discipline as plan 02. `Destroy`
+    first SIGKILLs and reaps the process, then deletes the tap, policy rules, and
+    directory and frees the /30; each step tolerates "already gone" so destroy stays
+    idempotent. The process-first order is a security property: policy never
+    disappears while the guest can still transmit.
   </Hint>
   <Hint
     title="Route the Backend field and test the allocator under race"
@@ -365,13 +437,26 @@ flowchart TD
 
 ## Definition of done
 
+Unit tests (`make test`, no Firecracker process):
+
+- `TestEgressPolicyTable` — `false` retains plane-initiated management and established
+  replies but denies new guest input/forward flows; `true` adds forwarding and
+  masquerading while retaining baseline protected-host denials.
+- The allocator race test still proves concurrent creates receive distinct /30s, and
+  policy identifiers are distinct for those allocations.
+
 `hack/validate-14.sh` runs inside the Lima VM, exits 0, checking:
 
 - Environment: `/dev/kvm` present; firecracker binary runs.
 - Via the control plane API with `"backend": "firecracker"`: create reaches `running`
   (meaning guest `/healthz` answered from inside the microVM); exec returns correct
   streams/exit code; file round-trip works; destroy removes the VM process, tap
-  device, socket, and rootfs copy; destroy twice succeeds.
+  device, policy rules, socket, and rootfs copy; destroy twice succeeds.
+- Network contract: with `AllowNetwork: false`, plane-driven health/exec/files still
+  work while a new connection from the workload to the configured external test
+  endpoint fails; with `AllowNetwork: true`, the same endpoint is reachable through
+  forwarding/NAT. The two sandboxes run concurrently so a host-global rule cannot
+  accidentally make the flag global.
 - Isolation smoke check: `uname -r` inside the sandbox differs from the Lima kernel
   when the CI kernel version differs, and the Docker socket / control-plane DB are
   unreachable from inside.
@@ -384,7 +469,8 @@ flowchart TD
 
 Deliberately untested/out of scope: VM snapshots/resume (E2B's crown jewel — future
 plan set), jailer hardening, memory ballooning, CoW rootfs (overlay/reflink), running
-many VMs, egress control per VM.
+many VMs, egress allowlists, DNS filtering, protocol-aware policy, and bandwidth
+metering.
 
 ## Solo-developer tradeoffs
 
@@ -424,8 +510,16 @@ interviews.
     title="Firecracker Network Setup"
     href="https://github.com/firecracker-microvm/firecracker/blob/main/docs/network-setup.md"
   >
-    The canonical tap-device recipe, including the iptables/NAT variants this plan
-    skips — read it when your guest pings the host but not the internet.
+    The canonical tap-device recipe, including the forwarding and NAT boundary this
+    plan makes conditional on `AllowNetwork`.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Firecracker Production Host Setup Recommendations"
+    href="https://github.com/firecracker-microvm/firecracker/blob/main/docs/prod-host-setup.md"
+  >
+    Firecracker's explicit warning that the VMM does not filter guest traffic, plus
+    its nftables examples for enforcing policy at the TAP boundary.
   </Resource>
   <Resource
     kind="paper"

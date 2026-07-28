@@ -25,6 +25,7 @@ type Fake struct {
 	InspectFn func(context.Context, string) (runtime.Info, error)
 	ListFn    func(context.Context) ([]runtime.Info, error)
 	DestroyFn func(context.Context, string) error
+	ExecFn    func(context.Context, string, []string, runtime.ExecOpts) (runtime.ExecResult, error)
 }
 
 var _ runtime.Runtime = Fake{}
@@ -43,4 +44,8 @@ func (f Fake) List(ctx context.Context) ([]runtime.Info, error) {
 
 func (f Fake) Destroy(ctx context.Context, id string) error {
 	return f.DestroyFn(ctx, id)
+}
+
+func (f Fake) Exec(ctx context.Context, id string, cmd []string, opts runtime.ExecOpts) (runtime.ExecResult, error) {
+	return f.ExecFn(ctx, id, cmd, opts)
 }
