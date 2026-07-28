@@ -39,11 +39,9 @@ type Runtime interface {
 }
 ```
 
-Everything above this line is backend-neutral. The CLI never imports the Docker client;
+Everything except `DockerRuntime` is backend-neutral. The CLI never imports the Docker client;
 it is handed a `Runtime` and knows nothing about how a sandbox is isolated. That is what
 makes the planned Firecracker and Kata backends drop-in replacements rather than rewrites.
-
-Two details worth knowing:
 
 - **Sandbox IDs are Quickspin's, not Docker's.** A sandbox is `sbx_<uuid>`, stored as a
   container label; the Docker container ID never leaks into the CLI surface.
@@ -68,19 +66,6 @@ Two details worth knowing:
 | `docker` CLI | managing the Docker context that points at the VM |
 | `jq` | used by `make test-docker` |
 | Node.js + npm | only for the local docs reader (`make docs`) |
-
-Go dependencies (all pulled by `go mod download`):
-
-| Module | Role |
-| --- | --- |
-| `github.com/spf13/cobra` | CLI command tree and flags |
-| `github.com/moby/moby/client`, `github.com/moby/moby/api` | Docker daemon client |
-| `github.com/containerd/errdefs` | classifying daemon errors (not-found, etc.) |
-| `github.com/google/uuid` | sandbox ID generation |
-| `gopkg.in/yaml.v3` | `-o yaml` output |
-
-The standard library covers the rest — `log/slog` for structured logging, `context` for
-cancellation.
 
 ## Install
 
@@ -112,9 +97,7 @@ make env-validate   # verify the VM, the daemon, and a cross-compiled binary all
 make env-cleanup    # stop/delete the VM and remove the docker context
 ```
 
-`make env-create` is the composite of `lima-vm-create`, `host-docker-context-create`, and
-`host-docker-context-use` if you would rather run the steps individually. `make
-lima-vm-shell` drops you inside the VM.
+`make lima-vm-shell` drops you inside the VM.
 
 ## CLI
 
@@ -127,7 +110,7 @@ quickspin
     list                    list managed sandboxes
     inspect ID              show one sandbox
     exec ID -- CMD [ARG..]  run a command inside a sandbox
-    destroy ID              destroy a sandbox (idempotent)
+    destroy ID              destroy a sandbox
 ```
 
 Persistent flags, valid on every command:
@@ -234,22 +217,11 @@ $ quickspin sandbox list -o json | jq -r '.[].id' | xargs -n1 quickspin sandbox 
 Destroying an unknown ID succeeds silently — cleanup is retry-safe by design, so a
 crashed reaper can re-run without special-casing already-gone sandboxes.
 
-Debug a failing create against the daemon:
-
-```sh
-quickspin sandbox create alpine:3.20 --log-level debug
-```
-
-Run without building first:
-
-```sh
-make run ARGS="sandbox list -o yaml"
-```
-
 ## Development
 
 ```sh
 make build      # build bin/quickspin
+make run ARGS="sandbox list"  # build and run in one step
 make fmt        # gofmt
 make vet        # go vet
 make tidy       # sync go.mod / go.sum

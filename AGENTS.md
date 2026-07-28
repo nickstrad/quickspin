@@ -118,6 +118,11 @@ instructions.
 - Do not treat permission for one commit or other Git action as standing permission for
   later actions.
 - Do not add AI attribution or `Co-Authored-By:` trailers to commit messages.
+- The development flow here is: the user hand-writes the implementation first, then AI
+  assists with review, cleanup, and simplification. Whenever a commit includes
+  AI-assisted work, say so in the commit message body as an authorship note — joint
+  human and AI work, human-authored first with an AI cleanup pass, not 100% AI. This
+  body text is the authorship record; the no-trailer rule above still applies.
 - Preserve unrelated working-tree changes and call them out rather than modifying them.
 
 `CLAUDE.md` is a symlink to this file so both agent entry points share the same
