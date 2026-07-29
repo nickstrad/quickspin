@@ -18,7 +18,7 @@ func TestWriteFileSendsFileArchiveToContainerRoot(t *testing.T) {
 	daemon.list = listOKManaged()
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	content := []byte{0x00, 0xff, 'q', 'u', 'i', 'c', 'k', '\n'}
+	content := testBinaryContent
 	const mode = 0o640
 	const filePath = "/work/a/b/main.bin"
 	if err := rt.WriteFile(t.Context(), testSandboxID, filePath, content, mode); err != nil {

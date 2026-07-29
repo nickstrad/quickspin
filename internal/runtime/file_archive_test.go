@@ -10,8 +10,11 @@ import (
 	"testing"
 )
 
+// testBinaryContent holds bytes that are not valid UTF-8, so any stray string
+// conversion in an archive path corrupts it visibly.
+var testBinaryContent = []byte{0x00, 0xff, 'q', 'u', 'i', 'c', 'k', '\n'}
+
 func TestFileArchive(t *testing.T) {
-	binaryContent := []byte{0x00, 0xff, 'q', 'u', 'i', 'c', 'k', '\n'}
 
 	tests := []struct {
 		name    string
@@ -26,7 +29,7 @@ func TestFileArchive(t *testing.T) {
 		{
 			name:         "nested path creates parent directories",
 			path:         "/work/a/b/main.bin",
-			content:      binaryContent,
+			content:      testBinaryContent,
 			mode:         0o640,
 			wantNames:    []string{"work/", "work/a/", "work/a/b/", "work/a/b/main.bin"},
 			wantFileMode: 0o640,
@@ -96,6 +99,193 @@ func TestFileArchive(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFileUnarchive(t *testing.T) {
+	// fileArchive's output is deliberately not fed back in here. The two sides
+	// name entries differently — fileArchive writes the full path from the
+	// container root ("work/a/b/main.bin") because CopyToContainer extracts
+	// relative to "/", while CopyFromContainer names entries relative to the
+	// source's parent ("main.bin"). The round trip closes through the daemon,
+	// not through these two functions, so the live suite is what proves it.
+
+	tests := []struct {
+		name    string
+		path    string
+		archive []byte
+		want    []byte
+		// wantErr is matched with errors.Is; wantPlainErr demands an error
+		// carrying no sentinel at all, for the malformed streams whose exact
+		// wording is not part of the contract.
+		wantErr      error
+		wantPlainErr bool
+	}{
+		{
+			// The shape the daemon actually returns for a file source: one entry
+			// named for the basename, with none of the parents the request path had.
+			name:    "docker's single basename entry",
+			path:    "/work/a/b/main.bin",
+			archive: tarEntries(t, testTarEntry{tar.Header{Name: "main.bin", Typeflag: tar.TypeReg, Mode: 0o640, Size: int64(len(testBinaryContent))}, testBinaryContent}),
+			want:    testBinaryContent,
+		},
+		{
+			// A file source can still bring directory entries along, and they must
+			// be walked past rather than mistaken for the file.
+			name: "parent directory entries are walked past",
+			path: "/work/a/b/main.bin",
+			archive: tarEntries(t,
+				testTarEntry{tar.Header{Name: "b/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
+				testTarEntry{tar.Header{Name: "main.bin", Typeflag: tar.TypeReg, Mode: 0o640, Size: int64(len(testBinaryContent))}, testBinaryContent},
+			),
+			want: testBinaryContent,
+		},
+		{
+			name:    "an empty file is not a missing file",
+			path:    "/work/empty.txt",
+			archive: tarEntries(t, testTarEntry{tar.Header{Name: "empty.txt", Typeflag: tar.TypeReg, Mode: 0o600, Size: 0}, nil}),
+			want:    []byte{},
+		},
+		{
+			name:    "no entry matches",
+			path:    "/work/main.bin",
+			archive: tarEntries(t, testTarEntry{tar.Header{Name: "other.bin", Typeflag: tar.TypeReg, Size: 3}, []byte("abc")}),
+			wantErr: ErrPathNotFound,
+		},
+		{
+			// A directory carrying the requested name is not the file: without the
+			// Typeflag check its zero-size header would read as an empty file, and
+			// the caller could not tell that apart from a real empty one.
+			name:    "a directory sharing the name is not the file",
+			path:    "/work/logs",
+			archive: tarEntries(t, testTarEntry{tar.Header{Name: "logs/", Typeflag: tar.TypeDir, Mode: 0o755}, nil}),
+			wantErr: ErrPathNotFound,
+		},
+		{
+			// Entry names are relative to the source, so a file source yields
+			// exactly "main.go". An entry nested under a directory is a different
+			// file that happens to share a basename, and returning its bytes as the
+			// requested file's is a silent wrong answer — the worst failure this
+			// function has, because nothing downstream can detect it.
+			name:    "a same-named file in another directory is not the file",
+			path:    "/work/main.go",
+			archive: tarEntries(t, testTarEntry{tar.Header{Name: "vendor/main.go", Typeflag: tar.TypeReg, Size: 5}, []byte("wrong")}),
+			wantErr: ErrPathNotFound,
+		},
+		{
+			// Reading a directory returns its whole tree, and no entry is the
+			// requested file. Bytes must not be invented from a child.
+			name: "a directory source yields no file",
+			path: "/work/a",
+			archive: tarEntries(t,
+				testTarEntry{tar.Header{Name: "a/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
+				testTarEntry{tar.Header{Name: "a/main.go", Typeflag: tar.TypeReg, Size: 5}, []byte("child")},
+			),
+			wantErr: ErrPathNotFound,
+		},
+		{
+			// Entry names are matched exactly, not by basename: a nested
+			// namesake must not be returned as the directory's content.
+			name: "a nested file sharing the basename is not the file",
+			path: "/work/config",
+			archive: tarEntries(t,
+				testTarEntry{tar.Header{Name: "config/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
+				testTarEntry{tar.Header{Name: "config/nested/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
+				testTarEntry{tar.Header{Name: "config/nested/config", Typeflag: tar.TypeReg, Mode: 0o640, Size: int64(len(testBinaryContent))}, testBinaryContent},
+			),
+			wantErr: ErrPathNotFound,
+		},
+		{
+			// Header-only: the size is a claim, and the point is that the claim
+			// alone is refused. An archive that really carried the bytes would
+			// allocate past the cap to prove the cap works.
+			name:    "an oversized header is refused before the body is read",
+			path:    "/work/core.dump",
+			archive: headerOnlyTar(t, tar.Header{Name: "core.dump", Typeflag: tar.TypeReg, Size: MaxFileSize + 1}),
+			wantErr: ErrFileTooLarge,
+		},
+		{
+			// A stream that ends mid-body must not report the sentinel a caller
+			// treats as "the file is not there": the file is there and the transfer
+			// broke, which is a retry, not a 404.
+			name:         "a truncated body is a transfer failure, not an absence",
+			path:         "/work/main.bin",
+			archive:      headerOnlyTar(t, tar.Header{Name: "main.bin", Typeflag: tar.TypeReg, Size: 512}),
+			wantPlainErr: true,
+		},
+		{
+			name:         "a stream that is not a tar archive",
+			path:         "/work/main.bin",
+			archive:      []byte("this is not a tar archive, it is a sentence"),
+			wantPlainErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := fileUnarchive(tt.path, io.NopCloser(bytes.NewReader(tt.archive)))
+
+			switch {
+			case tt.wantErr != nil:
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("fileUnarchive error = %v, want errors.Is(..., %v)", err, tt.wantErr)
+				}
+			case tt.wantPlainErr:
+				if err == nil {
+					t.Fatal("fileUnarchive error = nil, want an error for a malformed stream")
+				}
+				// The sentinels are what callers branch on, so a broken stream
+				// leaking one of them is worse than the bare error.
+				if errors.Is(err, ErrPathNotFound) || errors.Is(err, ErrFileTooLarge) {
+					t.Errorf("fileUnarchive error = %v, want no sentinel for a malformed stream", err)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("fileUnarchive error = %v, want nil", err)
+				}
+				if !bytes.Equal(got, tt.want) {
+					t.Errorf("fileUnarchive = %v, want %v", got, tt.want)
+				}
+			}
+			if err != nil && got != nil {
+				t.Errorf("fileUnarchive returned %d bytes alongside %v, want no partial content", len(got), err)
+			}
+		})
+	}
+}
+
+// tarEntries builds a well-formed archive. Each Header.Size is left as the
+// caller wrote it rather than derived from content, so a test can state a size
+// the bytes do not back.
+func tarEntries(t *testing.T, entries ...testTarEntry) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, e := range entries {
+		if err := tw.WriteHeader(&e.header); err != nil {
+			t.Fatalf("write tar header %q: %v", e.header.Name, err)
+		}
+		if _, err := tw.Write(e.content); err != nil {
+			t.Fatalf("write tar content %q: %v", e.header.Name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// headerOnlyTar stops after the header block, which tar.Writer emits eagerly.
+// That is what lets a test declare a body it never pays to produce — a 10 MiB
+// claim costs 512 bytes here.
+func headerOnlyTar(t *testing.T, header tar.Header) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	if err := tar.NewWriter(&buf).WriteHeader(&header); err != nil {
+		t.Fatalf("write tar header %q: %v", header.Name, err)
+	}
+	return buf.Bytes()
 }
 
 // assertFinalizedTar checks for the end-of-archive blocks at the byte level

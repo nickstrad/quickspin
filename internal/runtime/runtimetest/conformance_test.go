@@ -135,6 +135,31 @@ func TestMemRuntimeWriteFileSharesTheIdentitySentinels(t *testing.T) {
 	}
 }
 
+// The identity sentinels come first for reads too: an unknown sandbox is
+// ErrNotFound, never the ErrPathNotFound that would send a caller looking for a
+// missing file inside a sandbox that does not exist.
+func TestMemRuntimeReadFileSharesTheIdentitySentinels(t *testing.T) {
+	rt := new(memRuntime)
+	ctx := context.Background()
+
+	if _, err := rt.ReadFile(ctx, "not-a-sandbox-id", "/work/main.go"); !errors.Is(err, runtime.ErrInvalidSandboxID) {
+		t.Errorf("ReadFile(malformed id) error = %v, want ErrInvalidSandboxID", err)
+	}
+	if _, err := rt.ReadFile(ctx, "sbx_unknown", "/work/main.go"); !errors.Is(err, runtime.ErrNotFound) {
+		t.Errorf("ReadFile(unknown id) error = %v, want ErrNotFound", err)
+	}
+
+	created, err := rt.Create(ctx, runtime.Spec{})
+	if err != nil {
+		t.Fatalf("Create error = %v, want nil", err)
+	}
+	// The double stores nothing, so a known sandbox turns the answer into a
+	// statement about the path.
+	if _, err := rt.ReadFile(ctx, created.ID, "/work/main.go"); !errors.Is(err, runtime.ErrPathNotFound) {
+		t.Errorf("ReadFile(existing sandbox) error = %v, want ErrPathNotFound", err)
+	}
+}
+
 func TestPollReportsItsLastObservation(t *testing.T) {
 	wantErr := errors.New("daemon unreachable")
 
@@ -313,6 +338,22 @@ func (m *memRuntime) WriteFile(_ context.Context, id, _ string, _ []byte, _ fs.F
 		return runtime.ErrNotFound
 	}
 	return nil
+}
+
+// ReadFile exists so memRuntime still satisfies runtime.Runtime. WriteFile
+// stores nothing, so every path really is absent and ErrPathNotFound is the
+// honest report; empty content would claim a file that was never written.
+func (m *memRuntime) ReadFile(_ context.Context, id, _ string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := validateMemID(id); err != nil {
+		return nil, err
+	}
+	if _, ok := m.sandboxes[id]; !ok {
+		return nil, runtime.ErrNotFound
+	}
+	return nil, runtime.ErrPathNotFound
 }
 
 // validateMemID applies the prefix rule alone. The double deliberately does not

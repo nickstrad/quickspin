@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -896,12 +897,13 @@ type fakeDaemon struct {
 	mu       sync.Mutex
 	recorded []recordedRequest
 
-	pull   http.HandlerFunc
-	create http.HandlerFunc
-	start  http.HandlerFunc
-	list   http.HandlerFunc
-	remove http.HandlerFunc
-	copyTo http.HandlerFunc
+	pull     http.HandlerFunc
+	create   http.HandlerFunc
+	start    http.HandlerFunc
+	list     http.HandlerFunc
+	remove   http.HandlerFunc
+	copyTo   http.HandlerFunc
+	copyFrom http.HandlerFunc
 }
 
 type recordedRequest struct {
@@ -935,6 +937,10 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 		list:   listOK(),
 		remove: func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) },
 		copyTo: func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) },
+		// An archive with no entries: the success answer that carries nothing, so
+		// a test that has not staged content gets ErrPathNotFound rather than a
+		// decode failure it did not ask about.
+		copyFrom: copyFromOK(t, nil),
 	}
 }
 
@@ -965,6 +971,12 @@ func (d *fakeDaemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		d.list(w, r)
 	case r.Method == http.MethodPut && strings.HasSuffix(path, "/archive"):
 		d.copyTo(w, r)
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/archive"):
+		d.copyFrom(w, r)
+	// HEAD shares copyFrom (net/http drops the body), so one staged answer
+	// covers both a stat-first and a stream-first implementation.
+	case r.Method == http.MethodHead && strings.HasSuffix(path, "/archive"):
+		d.copyFrom(w, r)
 	case r.Method == http.MethodDelete && strings.Contains(path, "/containers/"):
 		d.remove(w, r)
 	default:
@@ -1019,6 +1031,33 @@ func dockerError(status int, message string) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(map[string]string{"message": message})
+	}
+}
+
+func copyFromOK(t *testing.T, archive []byte) http.HandlerFunc {
+	t.Helper()
+	return copyFromStat(t, container.PathStat{}, archive)
+}
+
+// copyFromStat answers the way the daemon does. The stat header is not optional
+// scenery: the SDK decodes X-Docker-Container-Path-Stat before it hands back
+// the stream, and a response without it fails the whole call with a decode
+// error rather than an empty stat.
+func copyFromStat(t *testing.T, stat container.PathStat, archive []byte) http.HandlerFunc {
+	t.Helper()
+
+	encoded, err := json.Marshal(stat)
+	if err != nil {
+		t.Fatalf("marshal path stat: %v", err)
+	}
+	if archive == nil {
+		archive = tarEntries(t)
+	}
+
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Docker-Container-Path-Stat", base64.StdEncoding.EncodeToString(encoded))
+		w.Header().Set("Content-Type", "application/x-tar")
+		_, _ = w.Write(archive)
 	}
 }
 
