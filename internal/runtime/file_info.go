@@ -14,11 +14,13 @@ type FileInfo struct {
 }
 
 const MaxFileSize = 10 << 20 // 10 MiB
+const MaxTotalFiles = 1000
 
 var (
-	ErrInvalidPath  = errors.New("invalid path")
-	ErrPathNotFound = errors.New("path not found in sandbox")
-	ErrFileTooLarge = errors.New("file exceeds file cap")
+	ErrInvalidPath        = errors.New("invalid path")
+	ErrPathNotFound       = errors.New("path not found in sandbox")
+	ErrFileTooLarge       = errors.New("file exceeds file cap")
+	ErrTotalFilesTooLarge = errors.New("total files exceeds file total cap")
 )
 
 func validatePath(p string) error {

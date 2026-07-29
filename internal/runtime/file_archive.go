@@ -85,3 +85,42 @@ func fileUnarchive(filePath string, content io.Reader) ([]byte, error) {
 
 	return nil, ErrPathNotFound
 }
+
+// The daemon names archive entries relative to the parent of the source, so
+// joining each name onto dirPath's parent rebuilds its absolute path at any
+// depth. dirPath must already have passed validatePath.
+func listDirectoryFromTarStream(dirPath string, content io.Reader) ([]FileInfo, error) {
+	tarReader := tar.NewReader(content)
+	fileInfos := []FileInfo{}
+	parent := path.Dir(dirPath)
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, errors.New("failed parsing tar stream headers")
+		}
+
+		entryPath := path.Join(parent, header.Name)
+		isDir := header.Typeflag == tar.TypeDir
+
+		if isDir && entryPath == dirPath {
+			continue
+		}
+
+		fileInfos = append(fileInfos, FileInfo{
+			Path:  entryPath,
+			Size:  header.Size,
+			Mode:  header.FileInfo().Mode(),
+			IsDir: isDir,
+		})
+
+		if len(fileInfos) > MaxTotalFiles {
+			return nil, ErrTotalFilesTooLarge
+		}
+	}
+
+	return fileInfos, nil
+}

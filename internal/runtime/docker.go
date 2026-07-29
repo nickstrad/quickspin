@@ -416,6 +416,39 @@ func (d *DockerRuntime) ReadFile(ctx context.Context, platformID, filePath strin
 	return fileBytes, nil
 }
 
+func (d *DockerRuntime) ListDir(ctx context.Context, platformID, dirPath string) ([]FileInfo, error) {
+	const op = "runtime.DockerRuntime.ListDir"
+
+	logger := d.logger.With("sandboxID", platformID, "path", dirPath)
+	logger.DebugContext(ctx, "listing directory")
+
+	if err := validatePath(dirPath); err != nil {
+		return nil, E(op, fmt.Sprintf("listing directory %s for sandbox %s", dirPath, platformID), err)
+	}
+
+	finalCtx, cancel := context.WithTimeout(ctx, fileCopyTimeout)
+	defer cancel()
+
+	c, err := d.getContainerByPlatformID(finalCtx, platformID)
+	if err != nil {
+		return nil, Wrap(op, "", err)
+	}
+
+	res, err := d.Client.CopyFromContainer(finalCtx, c.ID, client.CopyFromContainerOptions{SourcePath: dirPath})
+	if err != nil {
+		return nil, classifyNotFound(op, fmt.Sprintf("loading tar reader from container %s for sandbox %s", c.ID, platformID), ErrPathNotFound, err)
+	}
+	defer res.Content.Close()
+
+	fileInfos, err := listDirectoryFromTarStream(dirPath, res.Content)
+	if err != nil {
+		return nil, E(op, fmt.Sprintf("listing directory from container %s for sandbox %s", c.ID, platformID), err)
+	}
+
+	logger.DebugContext(ctx, "listed directory", "containerID", c.ID)
+	return fileInfos, nil
+}
+
 // killExec reaps a command its caller is abandoning. The kill runs on a
 // detached context: every call happens because the exec's context just died,
 // and a kill issued on it would never reach the daemon.
