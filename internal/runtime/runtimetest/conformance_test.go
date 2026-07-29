@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"slices"
 	"strings"
@@ -107,6 +108,30 @@ func TestConformanceFailsWhenListNeverContainsTheCreatedSandbox(t *testing.T) {
 	}
 	if got := rec.failures[0]; !strings.Contains(got, "List must contain the created sandbox") {
 		t.Errorf("first failure = %q, want the List clause named", got)
+	}
+}
+
+// The conformance suite does not exercise WriteFile, so this pins directly that
+// the double keeps the contract's identity sentinels: malformed and unknown ids
+// must stay distinguishable, exactly as conformMalformedID demands of real
+// backends.
+func TestMemRuntimeWriteFileSharesTheIdentitySentinels(t *testing.T) {
+	rt := new(memRuntime)
+	ctx := context.Background()
+
+	if err := rt.WriteFile(ctx, "not-a-sandbox-id", "/work/main.go", nil, 0o644); !errors.Is(err, runtime.ErrInvalidSandboxID) {
+		t.Errorf("WriteFile(malformed id) error = %v, want ErrInvalidSandboxID", err)
+	}
+	if err := rt.WriteFile(ctx, "sbx_unknown", "/work/main.go", nil, 0o644); !errors.Is(err, runtime.ErrNotFound) {
+		t.Errorf("WriteFile(unknown id) error = %v, want ErrNotFound", err)
+	}
+
+	created, err := rt.Create(ctx, runtime.Spec{})
+	if err != nil {
+		t.Fatalf("Create error = %v, want nil", err)
+	}
+	if err := rt.WriteFile(ctx, created.ID, "/work/main.go", []byte("package main"), 0o644); err != nil {
+		t.Errorf("WriteFile(existing sandbox) error = %v, want nil", err)
 	}
 }
 
@@ -272,6 +297,22 @@ func (m *memRuntime) Exec(_ context.Context, id string, _ []string, _ runtime.Ex
 		return runtime.ExecResult{}, runtime.ErrNotFound
 	}
 	return runtime.ExecResult{}, nil
+}
+
+// WriteFile exists so memRuntime still satisfies runtime.Runtime. Like Exec,
+// there is no in-memory filesystem, so once the sandbox is known it reports
+// success without storing anything.
+func (m *memRuntime) WriteFile(_ context.Context, id, _ string, _ []byte, _ fs.FileMode) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := validateMemID(id); err != nil {
+		return err
+	}
+	if _, ok := m.sandboxes[id]; !ok {
+		return runtime.ErrNotFound
+	}
+	return nil
 }
 
 // validateMemID applies the prefix rule alone. The double deliberately does not
