@@ -35,13 +35,20 @@ func validatePath(p string) error {
 	return nil
 }
 
-// "/" passes validatePath but is not a writable file target.
-func validateWrite(filePath string, content []byte) error {
+// "/" passes validatePath but is not a readable or writable file target.
+func validateRead(filePath string) error {
 	if err := validatePath(filePath); err != nil {
 		return err
 	}
 	if filePath == "/" {
 		return ErrInvalidPath
+	}
+	return nil
+}
+
+func validateWrite(filePath string, content []byte) error {
+	if err := validateRead(filePath); err != nil {
+		return err
 	}
 	if len(content) > MaxFileSize {
 		return ErrFileTooLarge

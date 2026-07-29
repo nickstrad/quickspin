@@ -378,6 +378,44 @@ func (d *DockerRuntime) WriteFile(ctx context.Context, platformID string, filePa
 	return nil
 }
 
+func (d *DockerRuntime) ReadFile(ctx context.Context, platformID, filePath string) ([]byte, error) {
+	const op = "runtime.DockerRuntime.ReadFile"
+
+	logger := d.logger.With("sandboxID", platformID, "path", filePath)
+	logger.DebugContext(ctx, "reading file")
+
+	if err := validateRead(filePath); err != nil {
+		return nil, E(op, fmt.Sprintf("reading file %s for sandbox %s", filePath, platformID), err)
+	}
+
+	finalCtx, cancel := context.WithTimeout(ctx, fileCopyTimeout)
+	defer cancel()
+
+	c, err := d.getContainerByPlatformID(finalCtx, platformID)
+	if err != nil {
+		return nil, Wrap(op, "", err)
+	}
+
+	res, err := d.Client.CopyFromContainer(finalCtx, c.ID, client.CopyFromContainerOptions{SourcePath: filePath})
+	if err != nil {
+		return nil, classifyNotFound(op, fmt.Sprintf("loading tar reader from container %s for sandbox %s", c.ID, platformID), ErrPathNotFound, err)
+	}
+	defer res.Content.Close()
+
+	// Stat check bails before parsing the stream; fileUnarchive re-checks the
+	// header to guard the allocation if the two disagree.
+	if res.Stat.Size > MaxFileSize {
+		return nil, Wrap(op, "", ErrFileTooLarge)
+	}
+	fileBytes, err := fileUnarchive(filePath, res.Content)
+	if err != nil {
+		return nil, E(op, fmt.Sprintf("unarchiving tar contents from container %s for sandbox %s", c.ID, platformID), err)
+	}
+
+	logger.DebugContext(ctx, "read file", "containerID", c.ID)
+	return fileBytes, nil
+}
+
 // killExec reaps a command its caller is abandoning. The kill runs on a
 // detached context: every call happens because the exec's context just died,
 // and a kill issued on it would never reach the daemon.

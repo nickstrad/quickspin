@@ -3,8 +3,11 @@ package runtime
 import (
 	"archive/tar"
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"path"
 	"strings"
 )
 
@@ -49,4 +52,36 @@ func fileArchive(filePath string, content []byte, mode fs.FileMode) ([]byte, err
 		return nil, fmt.Errorf("closing tar archive for %s: %w", filePath, err)
 	}
 	return archive.Bytes(), nil
+}
+
+func fileUnarchive(filePath string, content io.Reader) ([]byte, error) {
+	tarReader := tar.NewReader(content)
+	targetBasename := path.Base(filePath)
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, errors.New("failed parsing tar stream headers")
+		}
+
+		// TODO: symlinks are not followed — a symlinked path falls through this
+		// filter and reports ErrPathNotFound.
+		if header.Typeflag != tar.TypeReg || header.Name != targetBasename {
+			continue
+		}
+
+		if header.Size > MaxFileSize {
+			return nil, ErrFileTooLarge
+		}
+		fileBytes := make([]byte, header.Size)
+		if _, err := io.ReadFull(tarReader, fileBytes); err != nil {
+			return nil, fmt.Errorf("failed reading tar archive contents: %w", err)
+		}
+		return fileBytes, nil
+	}
+
+	return nil, ErrPathNotFound
 }
