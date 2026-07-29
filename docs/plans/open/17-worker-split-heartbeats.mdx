@@ -13,6 +13,12 @@ declares hosts dead when heartbeats stop, failing their sandboxes. This is the p
 that makes "monitor live cloud hosts" a property of the system rather than of your
 SSH habits.
 
+It also delivers `hack/failure-suite.sh`: a named failure-injection suite that
+deliberately kills a worker mid-create, silences heartbeats without killing anything,
+replays API requests, exhausts capacity, and abandons runtime resources — turning
+every distributed-systems claim this plan makes into a scenario you have personally
+run, not a textbook answer.
+
 ## Industry context
 
 This is the canonical control-plane/data-plane split: Kubernetes' apiserver/kubelet,
@@ -241,6 +247,15 @@ is exercised daily, not only in prod.
     Run workerd on the Hetzner host beside the plane (still one machine — plan 18
     adds more); update cloud-init and the deploy script for two units.
   </Task>
+  <Task title="Write hack/failure-suite.sh — the failure-injection suite">
+    Five deliberate injections against a real plane + workerd in Lima, each with an
+    asserted recovery: kill -9 workerd mid-create; SIGSTOP workerd so heartbeats
+    stop while sandboxes keep running (unready, never dead, recovers on SIGCONT);
+    replay a create with the same idempotency key during and after placement; fill
+    a host to capacity and assert typed no_capacity, then admission after a destroy
+    frees a slot; plant an orphan container bearing the quickspin label and assert
+    the sweep collects it.
+  </Task>
 </TaskList>
 
 ## Hint steps
@@ -373,6 +388,20 @@ Integration `hack/validate-17.sh` (Lima, real plane + real workerd):
 - Restart workerd: re-registers, placement resumes; the killed sandbox's container
   is garbage-collected (the runtime-level orphan sweep from plan 06 still works
   through the worker).
+
+Failure-injection suite `hack/failure-suite.sh` (Lima, real plane + workerd) runs
+green end-to-end, covering all five injections:
+
+- Worker killed mid-create: the sandbox converges to `failed` (or `running` if the
+  create had completed on the worker side) with an event — never stuck in `pending`.
+- Heartbeats silenced via SIGSTOP: host reaches `unready` and placement stops, but
+  nothing is killed; SIGCONT within the dead threshold returns it to `ready`
+  (the live twin of `TestFlappingHostRecovers`).
+- Idempotency under retry: replaying a create with the same key during and after
+  placement yields exactly one sandbox and one placement.
+- Capacity exhaustion: creates beyond capacity fail fast with typed `no_capacity`;
+  destroying one sandbox makes the next create admit.
+- Abandoned resources: a hand-planted labeled container is collected by the sweep.
 
 Deliberately untested: two workerds racing one sandbox ID (single-owner-by-placement
 is asserted by design, not by lease — recorded as the known gap vs the reference

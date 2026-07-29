@@ -107,9 +107,11 @@ not by itself authorize implementation.
 
 ### The platform learning path (open)
 
-Plans 01–12 build the platform incrementally; 13–14 are isolation deep dives that can
-run in parallel after their stated dependencies; 15–18 are the production track that
-takes the platform to live cloud hosts; 19–21 are the compute track that makes
+Plans 01–12 build the platform incrementally; 13 is an isolation deep dive that can
+run in parallel after plan 01; 15–18 are the production track that takes the
+Docker-backed platform to live, multi-host, observable cloud operation; 14 is the
+Firecracker deep dive, deliberately sequenced after the production track and ending
+with the prod cutover from Docker to Firecracker; 19–21 are the compute track that makes
 capacity a first-class subsystem — pools and the capacity admin surface, then one
 plan per new compute approach (Firecracker on cloud VMs; Kubernetes + Kata); 22–23
 are the agent-workflow track that turns the platform toward its coding-agent
@@ -143,11 +145,13 @@ persistent storage.
 13. [`13-mini-container-runtime.mdx`](plans/open/13-mini-container-runtime.mdx) — deep
     dive: namespaces, pivot_root, cgroups, capabilities by hand.
 14. [`14-firecracker-backend.mdx`](plans/open/14-firecracker-backend.mdx) — deep dive:
-    Firecracker microVM as a second `Runtime` backend behind the same API.
+    Firecracker microVM as a second `Runtime` backend behind the same API; sequenced
+    after the production track, ending with the prod cutover from Docker.
 15. [`15-postgres-store.mdx`](plans/open/15-postgres-store.mdx) — pluggable store:
     Neon Postgres for prod behind the same store contract, one conformance suite.
 16. [`16-prod-single-host.mdx`](plans/open/16-prod-single-host.mdx) — first live
-    deployment: one Hetzner host, Firecracker-backed, TLS, systemd, deploy script.
+    deployment: one Hetzner host, Docker-backed, TLS, systemd, deploy script
+    (Firecracker arrives via plan 14's cutover).
 17. [`17-worker-split-heartbeats.mdx`](plans/open/17-worker-split-heartbeats.mdx) —
     control-plane/worker split, host registration, heartbeats, placement.
 18. [`18-host-provisioning-observability.mdx`](plans/open/18-host-provisioning-observability.mdx)
@@ -171,13 +175,16 @@ persistent storage.
 
 Ordering: the spine is 01 → 02 → 03 → 04 → 05 → 06 → 07 and must be sequential (each
 extends the same interfaces). After 07, work can proceed in parallel batches: &#123;08&#125;
-alongside finishing touches on 07; then &#123;09 → 10, 11, 14, 15&#125; are mutually independent
-(15 needs 08; 14 and 11 need only 07); 12 needs 09 and 11; 13 is independent of
+alongside finishing touches on 07; then &#123;09 → 10, 11, 15&#125; are mutually independent
+(15 needs 08; 11 needs only 07); 12 needs 09 and 11; 13 is independent of
 everything after 01 and can be slotted anywhere as a change of pace. The production
-tail 16 → 17 → 18 is sequential and needs 12, 14, and 15 complete. The compute track
-is 19 → &#123;20, 21&#125;: 19 needs 17 and 18, then 20 and 21 are mutually independent —
+tail 16 → 17 → 18 is sequential and needs 12 and 15 complete — deliberately not 14:
+prod launches Docker-backed so the multi-host operational milestone lands early.
+14 needs only 07 but is recommended after 18; it closes by cutting prod over from
+Docker to Firecracker. The compute track is 19 → &#123;20, 21&#125;: 19 needs 17 and 18;
+20 additionally needs 14's Firecracker artifacts; 20 and 21 are mutually independent —
 and 21's runtime-backend half (tasks 1–4) needs only 07, so it can run in parallel
-with 14–18 as a second deep dive before its pool integration lands. The
+with the production track as a second deep dive before its pool integration lands. The
 agent-workflow track: 22 needs only 03 and 04, so it can slot in any time after the
 spine's filesystem work (12 is where it pays off, and 07/09 later expose its git
 layer); 23 needs 05, 08, and 22. Each plan's `Depends on:` header is authoritative

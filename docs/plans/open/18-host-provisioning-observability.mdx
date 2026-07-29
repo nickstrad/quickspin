@@ -10,8 +10,14 @@ provider integration (Hetzner Cloud API behind a Go interface) so an admin comma
 into a registered, heartbeating worker with no manual steps; `drain` + `delete`
 retire one just as cleanly. Monitoring becomes real observability: Prometheus-format
 `/metrics` on the plane and workers, scraped into Grafana Cloud's free tier, with a
-small dashboard and two alerts. A cost-safety reconciler guarantees no forgotten
-server ever bills you silently.
+small dashboard and two alerts — plus OpenTelemetry traces on the create path, so
+one trace shows a request crossing API → placement → worker → guest-ready. A
+cost-safety reconciler guarantees no forgotten server ever bills you silently.
+
+The plan closes with operations as writing, not just wiring: a runbook, a game day
+whose deliberately induced outage produces a written postmortem, and a one-page
+capacity note. These artifacts are cheap once the dashboard exists, and they are what
+turns "I instrumented a service" into "I operated a platform."
 
 ## Industry context
 
@@ -36,8 +42,13 @@ are the fleet-scale version of plan 02's orphan containers, except these cost mo
   restraint to stop there.
 - Alerting on symptoms not causes: "no ready hosts" and "sandbox failure rate" page;
   everything else is a dashboard.
+- Distributed tracing with OpenTelemetry: spans and context propagation across
+  process boundaries (plane → workerd over HTTP), and what a trace answers that
+  metrics cannot — *where* one slow create spent its time.
 - Cost-safety engineering: reconciling billing-relevant external state with strict
   "delete unknowns bearing our label" policy.
+- Operating as a discipline: writing a postmortem for an outage you induced, and a
+  capacity note that names what breaks first.
 
 ### Concept: the provider is just another runtime, one level up
 
@@ -238,9 +249,23 @@ revoked on delete.
     `prometheus/client_golang` on plane and workerd, Caddy-restricted `/metrics`
     exposure, Grafana Cloud scrape, `hack/dashboard.json`, and the two alerts.
   </Task>
+  <Task title="Trace the create path with OpenTelemetry">
+    `go.opentelemetry.io/otel` spans from API accept through placement, the worker
+    create call, and guest-ready, with W3C traceparent propagated over the
+    plane→workerd HTTP hop; export to Grafana Cloud Tempo. One create, one trace,
+    every hop visible — resist instrumenting anything beyond the create path.
+  </Task>
   <Task title="Write the runbook">
     `docs/reference/runbook.mdx`: host roll procedure, alert responses, and the
     "the bill looks wrong" checklist.
+  </Task>
+  <Task title="Run a game day; write the postmortem and capacity note">
+    Induce a real outage on purpose (stop every workerd until the zero-ready-hosts
+    alert pages), respond using only the runbook, then write
+    `docs/reference/postmortem-001.mdx` — timeline, detection, impact, contributing
+    factors, follow-ups — and a one-page capacity note: sandboxes per host before
+    what limit bites first (memory? disk? conntrack?), measured not guessed, and the
+    approximate cost per sandbox-hour it implies.
   </Task>
   <Task title="Write hack/validate-18.sh">
     The live validation from the definition of done, ending with the loud
@@ -364,14 +389,22 @@ Live validation `hack/validate-18.sh` (spends real money — cents — and says 
 
 - `admin host create` → within a bounded window the hosts table shows a new ready
   host that came up with **zero SSH interventions**.
-- A `backend: firecracker` sandbox is placed on the new host and passes exec/files.
+- A sandbox (on whatever backend prod runs — docker until plan 14's cutover) is
+  placed on the new host and passes exec/files.
 - Drain → placement avoids it; delete → Hetzner API confirms the server is gone and
   the token is revoked. Final assertion: provider server list contains exactly the
   expected set —**the script fails loudly if anything labeled quickspin remains**.
 - Metrics: `/metrics` on plane and worker include the required series; the
   create-to-ready histogram observed the new host's sandbox.
+- Traces: a create issued during the run appears in Tempo as one trace whose spans
+  cover API accept → placement → worker create → guest-ready, across both processes.
 - Alert check (once, manually acknowledged in closing notes): stop all workerds and
   confirm the zero-ready-hosts alert fires in Grafana.
+
+Written artifacts exist and are linked from `docs/index.mdx`:
+`docs/reference/runbook.mdx`, `docs/reference/postmortem-001.mdx` (from the game
+day), and the capacity note with measured sandboxes-per-host and cost-per-sandbox-hour
+figures.
 
 Deliberately untested: multi-region, autoscaling policy, provider rate limits/outage
 handling, Grafana-is-down blindness.
@@ -379,7 +412,8 @@ handling, Grafana-is-down blindness.
 ## Solo-developer tradeoffs
 
 A commercial fleet layer adds autoscaling, multi-region placement, capacity
-forecasting, and its own observability pipeline (Prometheus federation, Loki, traces).
+forecasting, and its own observability pipeline (Prometheus federation, Loki,
+tail-sampled tracing at volume).
 You stop at admin-triggered elasticity plus managed Grafana because the *primitives* —
 provider reconciliation, self-joining hosts, drain-based rolls, symptom alerts — are
 the transferable knowledge, and each omitted layer is policy atop them. The one place

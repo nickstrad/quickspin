@@ -1,15 +1,23 @@
-# 16 — Production: one live host, Firecracker-backed, public API
+# 16 — Production: one live host, Docker-backed, public API
 
-Depends on: 14, 15; 12 for the demo-against-prod check in the definition of done.
+Depends on: 15; 12 for the demo-against-prod check in the definition of done. Plan 14
+is deliberately **not** a dependency: prod launches on the Docker backend, and plan
+14's final task cuts it over to Firecracker later.
 
 ## Summary
 
 Put Quickspin on the public internet: one Hetzner Cloud host running the control plane
-and the Firecracker backend, state in Neon, TLS on a real domain
+and the Docker backend, state in Neon, TLS on a real domain
 (`api.quickspin.<yourdomain>`), managed by systemd, deployed by a script in the repo.
 The SDKs gain a base-URL knob so the plan 12 demo harness runs unchanged against prod
-— an agent on your Mac driving a microVM in a datacenter. Local Lima remains the dev
+— an agent on your Mac driving a sandbox in a datacenter. Local Lima remains the dev
 environment; this plan adds prod beside it, not instead of it.
+
+The sequencing is a deliberate career-evidence decision: the production track (16 →
+17 → 18) runs on Docker first so "multi-node, observable, failure-aware platform"
+lands as early as possible, and plan 14's guest-agent-based backend slides underneath
+afterward without touching a workload code path (the plan 07 architecture guarantees
+it). Nothing in 16–18 requires Firecracker.
 
 <KeyPoint label="What changes and what doesn't">
   Nothing in the plane's code becomes "prod-only". The same binary runs in Lima and on
@@ -21,11 +29,12 @@ environment; this plan adds prod beside it, not instead of it.
 
 This is a platform's minimum viable production shape, and it is deliberately boring:
 binary + systemd + Caddy + managed Postgres is how many real single-team services run
-before Kubernetes is justified. The Firecracker requirement drives the one non-obvious
-choice: most cloud VMs don't expose `/dev/kvm`, so the industry runs bare metal (E2B,
-Fly) or nitro `.metal` (AWS). Hetzner Cloud is the solo-scale loophole — ordinary
-cheap VMs with KVM enabled — which is why it hosts half the indie Firecracker projects
-on the internet. Everything else here (TLS termination in front of the plane, secrets
+before Kubernetes is justified. The host choice is made for the *future*, not the
+present: plan 14's Firecracker cutover will need `/dev/kvm`, and most cloud VMs don't
+expose it — the industry runs bare metal (E2B, Fly) or nitro `.metal` (AWS). Hetzner
+Cloud is the solo-scale loophole — ordinary cheap VMs with KVM enabled — so choosing
+it now means the cutover later is a software change, not a re-provisioning. Everything
+else here (TLS termination in front of the plane, secrets
 in an env file with tight permissions, deploy-by-artifact) is standard practice scaled
 down to one machine.
 
@@ -41,8 +50,6 @@ down to one machine.
   startup, restart unit, health-check, roll back on failure).
 - Environment/config separation: the same binary, different env — `QUICKSPIN_DB`,
   backend default, base URL — twelve-factor style.
-- Firecracker on x86_64: rebuilding the rootfs/kernel artifacts for amd64 (plan 14's
-  scripts parameterized by arch).
 
 ### Concept: the process tree belongs to systemd, not to you
 
@@ -73,8 +80,8 @@ auth middleware is mounted, possibly your logging and rate paths too. The negati
 probe in the validation script (assert connection refused on 8080 and a guest port
 from the internet) is the regression test for this boundary.
 
-<Figure caption="One host, three trust zones: the internet reaches only Caddy on 443; the plane and guest VMs live behind the firewall; Neon is the only external dependency.">
-  <svg viewBox="0 0 620 250" role="img" aria-label="Single-host production topology: Mac client through Caddy to the plane and Firecracker VMs, with Neon external">
+<Figure caption="One host, three trust zones: the internet reaches only Caddy on 443; the plane and sandboxes live behind the firewall; Neon is the only external dependency.">
+  <svg viewBox="0 0 620 250" role="img" aria-label="Single-host production topology: Mac client through Caddy to the plane and docker sandboxes, with Neon external">
     <defs>
       <marker id="arrow16" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
         <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
@@ -92,8 +99,8 @@ from the internet) is the regression test for this boundary.
     <text x="435" y="86" textAnchor="middle" fontSize="12" fill="#18231f">quickspin serve</text>
     <text x="435" y="101" textAnchor="middle" fontSize="10" fill="#405049">localhost:8080</text>
     <rect x="370" y="140" width="130" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
-    <text x="435" y="160" textAnchor="middle" fontSize="12" fill="#18231f">firecracker VMs</text>
-    <text x="435" y="175" textAnchor="middle" fontSize="10" fill="#405049">children of the plane</text>
+    <text x="435" y="160" textAnchor="middle" fontSize="12" fill="#18231f">docker sandboxes</text>
+    <text x="435" y="175" textAnchor="middle" fontSize="10" fill="#405049">managed by the plane</text>
     <line x1="120" y1="88" x2="198" y2="88" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow16)" />
     <text x="159" y="78" textAnchor="middle" fontSize="10" fill="#8f3423">https://api...</text>
     <line x1="310" y1="88" x2="368" y2="88" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow16)" />
@@ -154,21 +161,24 @@ flowchart TD
 ## Design and interfaces
 
 ```text
-Host: Hetzner CX-class (x86_64, /dev/kvm), Ubuntu LTS.
+Host: Hetzner CX-class (x86_64, /dev/kvm — unused until plan 14's cutover, but the
+  reason this provider was picked), Ubuntu LTS.
 Provisioning: hack/cloud-init.yaml checked into the repo — creates a deploy user,
-  installs Caddy + firecracker, writes systemd units, ufw rules. The host must be
+  installs Caddy + Docker, writes systemd units, ufw rules. The host must be
   reproducible from this file alone; no hand-configured snowflake.
-Processes: quickspin serve (localhost:8080) <- Caddy (:443, TLS) ; firecracker VMs
-  as children of the plane as in plan 14.
+Processes: quickspin serve (localhost:8080) <- Caddy (:443, TLS) ; docker-backed
+  sandboxes managed by the plane as in plans 02-04.
 Secrets: /etc/quickspin/env (mode 600) — Neon URL, nothing else in the repo.
 SDKs: baseUrl option + QUICKSPIN_BASE_URL env var (default stays localhost).
 New endpoint: GET /v1/status (unauthenticated) — version, uptime, backend, DB ping.
 ```
 
 Committed decisions: single host, no HA, no CDN, no container packaging (a static Go
-binary makes Docker-for-deploy pure ceremony); deploys are brief-downtime restarts
-(seconds — acceptable and stated); the Lima path keeps working with SQLite so local
-dev never needs the internet.
+binary makes Docker-for-deploy pure ceremony — Docker on the host is the sandbox
+backend, not a deploy mechanism); deploys are brief-downtime restarts (seconds —
+acceptable and stated); the Lima path keeps working with SQLite so local dev never
+needs the internet; prod launches Docker-backed, with the Firecracker cutover owned
+by plan 14's final task rather than blocking this plan.
 
 <Callout tone="system" title="The host is reproducible from the repo or it doesn't count">
   Every package installed, unit written, and firewall rule added must originate from
@@ -180,12 +190,12 @@ dev never needs the internet.
 ## Tasks
 
 <TaskList>
-  <Task title="Parameterize the amd64 artifacts and add make release">
-    Extend plan 14's kernel/rootfs scripts to take an arch parameter and produce
-    amd64 outputs; `make release` cross-compiles the linux/amd64 binary.
+  <Task title="Add make release for the linux/amd64 binary">
+    `make release` cross-compiles the plane binary for linux/amd64 (note the arch
+    flip from your arm64 Mac).
   </Task>
   <Task title="Write hack/cloud-init.yaml and create the server">
-    Deploy user, Caddy + firecracker install, systemd units, ufw rules — then create
+    Deploy user, Caddy + Docker install, systemd units, ufw rules — then create
     the Hetzner server from that file via console or CLI.
   </Task>
   <Task title="DNS record and Caddyfile; confirm TLS">
@@ -214,16 +224,14 @@ dev never needs the internet.
 
 <HintSteps>
   <Hint
-    title="Get the amd64 artifacts building before touching any server"
-    check="file bin/quickspin-linux-amd64 reports an x86-64 statically linked ELF, and the amd64 rootfs/kernel artifacts exist locally."
+    title="Get the amd64 binary building before touching any server"
+    check="file bin/quickspin-linux-amd64 reports an x86-64 statically linked ELF."
   >
     Start where no cloud account is needed. `make release` is
     `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/...` (CGO off keeps it
     static — check whether your SQLite driver needs cgo; the prod path uses Neon so
-    the pure-Go build may be fine, but decide explicitly). For the Firecracker
-    artifacts, thread an `ARCH` variable through plan 14's scripts; the kernel config
-    and the rootfs base image both change with it. `file` and `uname -m` are your
-    truth commands throughout this plan.
+    the pure-Go build may be fine, but decide explicitly). `file` and `uname -m` are
+    your truth commands throughout this plan.
   </Hint>
   <Hint
     title="Draft cloud-init locally, then create the server from it"
@@ -234,8 +242,9 @@ dev never needs the internet.
     rules (`ufw default deny incoming`, `ufw allow 443/tcp`, `ufw allow OpenSSH`,
     `ufw --force enable`) as `write_files` + `runcmd` entries. Debug a bad boot with
     `cloud-init status --long` and `/var/log/cloud-init-output.log` on the host. Pick
-    a CX line explicitly and verify `/dev/kvm` exists before going further — it is
-    the whole reason Hetzner was chosen.
+    a CX line explicitly and verify `/dev/kvm` exists even though nothing uses it
+    yet — it is why Hetzner was chosen, and discovering its absence during plan 14's
+    cutover would mean re-provisioning the host.
   </Hint>
   <Hint
     title="DNS then Caddy, in that order"
@@ -278,9 +287,7 @@ dev never needs the internet.
     Precedence should be explicit option > env var > localhost default, resolved in
     one place per SDK (the client constructor), not scattered. Add a contract test
     per SDK that pins the precedence order. Then mint the prod tenant over SSH with
-    the admin CLI against the live DB — and register the docker backend on the host
-    too, since the definition of done validates save/restore on docker-backed
-    sandboxes in prod.
+    the admin CLI against the live DB.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: a port that answers when it shouldn't"
@@ -290,9 +297,9 @@ dev never needs the internet.
     plane's listen address — `localhost:8080`, never `:8080`; confirm on the host
     with `ss -tlnp`. Two: ufw actually enabled (`ufw status verbose` says active) —
     cloud-init's `runcmd` may have needed `--force` to enable non-interactively.
-    Three: Docker, if installed for the second backend — Docker inserts iptables
-    rules that bypass ufw for published container ports, a notorious trap; avoid
-    publishing ports or bind them to 127.0.0.1. Write the negative probe with a
+    Three: Docker — the sandbox backend on this host inserts iptables rules that
+    bypass ufw for published container ports, a notorious trap; avoid publishing
+    ports or bind them to 127.0.0.1. Write the negative probe with a
     timeout (`nc -w3` or `curl --max-time`) so "filtered" counts as pass, not hang.
   </Hint>
 </HintSteps>
@@ -302,13 +309,11 @@ dev never needs the internet.
 `hack/validate-16.sh` runs **from the Mac** against the public URL, exits 0, checking:
 
 - `/v1/status` over valid TLS reports the expected version and `db: ok`.
-- Full lifecycle with `backend: firecracker`: create → running, exec streams, file
+- Full lifecycle with `backend: docker`: create → running, exec streams, file
   round-trip, destroy — all via the public API.
-- Honest capability boundary: `save` on a Firecracker-backed sandbox returns a typed
-  `snapshot_unsupported` error (plan 11's snapshots are docker-commit-based and plan 14
-  excludes VM snapshotting). The API must say so, not 500 — and the plane should also
-  run the docker backend as a second registered option on this host so save/restore
-  can be validated in prod on docker-backed sandboxes.
+- Save/restore works in prod: `save` a sandbox, create from the snapshot, and verify
+  the restored filesystem (plan 11's docker-commit snapshots run natively on this
+  backend).
 - Auth is enforced (no key ⇒ 401) and the plane's plaintext port and a guest port are
   **not** reachable from the internet (probe and assert connection refused/filtered).
 - Reboot resilience: `ssh reboot`, then within a bounded window `/v1/status` is green
@@ -317,12 +322,10 @@ dev never needs the internet.
   API stays serving the old version.
 
 Plus: the plan 12 demo harness completes one task against prod with only env-var
-changes, and its latency table gains a prod column (Mac→Hetzner RTT now included).
-Because Firecracker sandboxes cannot restore from snapshots, the harness needs a
-config switch: snapshot-restore on docker backends, plain-image create (slower first
-step, stated in the latency table) on firecracker. Add that switch as a plan 12 task
-if 16 is known to be coming — it is one flag, and it keeps the demo honest on both
-backends.
+changes, and its latency table (in `docs/reference/demo-latency.mdx`) gains a prod
+column (Mac→Hetzner RTT now included). The harness runs unchanged because docker
+supports snapshot restore; the backend config switch it will need for Firecracker
+sandboxes belongs to plan 14's cutover task.
 
 Deliberately untested: sustained load, disk-full behavior, Hetzner outages, multiple
 concurrent deploys.

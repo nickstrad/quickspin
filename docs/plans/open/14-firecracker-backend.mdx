@@ -1,6 +1,9 @@
 # 14 — Deep dive: a Firecracker microVM backend
 
-Depends on: 07, 13 recommended first.
+Depends on: 07; 13 recommended first. Recommended order: after the production track
+(16 → 17 → 18), so "multi-node, observable, failure-aware platform" lands before this
+deep dive — the final task here then cuts prod over from the Docker backend to
+Firecracker.
 
 ## Summary
 
@@ -14,6 +17,12 @@ its network device so the plane can reach it, while host firewall policy decides
 whether workload-initiated traffic may leave. Snapshots, warm pools, and production
 hardening are explicitly out of scope — this plan buys the mental model and the resume
 line, not parity with Docker.
+
+The plan ends with the **prod cutover**: the plan 16 host (chosen for its `/dev/kvm`
+precisely for this moment) gains the Firecracker backend beside Docker, and new prod
+sandboxes default to it. Because the production track ran Docker-backed first, this
+is the proof that the plan 07 architecture holds — the backend swaps underneath a
+live, distributed platform without touching a workload code path.
 
 ## Industry context
 
@@ -298,7 +307,7 @@ flowchart TD
     Verify `/dev/kvm` in Lima, fetch the firecracker binary and a CI kernel image,
     verify `nft`, enable host forwarding, and build the rootfs (with guest + init) via
     script. All artifact scripts take `ARCH` (per plan 01's convention) even though
-    this plan only exercises arm64 — plan 16 reruns them for amd64 unchanged.
+    Lima only exercises arm64 — the prod cutover task reruns them for amd64 unchanged.
   </Task>
   <Task title="Boot one VM by hand to a shell">
     Script only, no Go — configure over the API socket with curl and reach a serial
@@ -323,7 +332,20 @@ flowchart TD
   </Task>
   <Task title="Validate and measure">
     `hack/validate-14.sh`, plus the boot-time measurement recorded in
-    `docs/reference/demo-latency.mdx`.
+    `docs/reference/demo-latency.mdx` under plan 11's benchmark rules (p50/p95,
+    per-phase timestamps, stated method) — that document is the single durable
+    benchmark table: cold docker create, snapshot create, and Firecracker
+    boot-to-guest-healthy, side by side.
+  </Task>
+  <Task title="Cut prod over to Firecracker">
+    Rerun the artifact scripts with ARCH=amd64, extend plan 16's cloud-init to
+    install firecracker, deploy, and register the backend beside docker on the
+    Hetzner host; flip the prod default backend. Validate via the public API: full
+    lifecycle with `backend: firecracker`; `save` on a Firecracker sandbox returns a
+    typed `snapshot_unsupported` error, not a 500 (docker stays registered so
+    save/restore remains validated in prod); the plan 12 harness gains its backend
+    config switch — snapshot-restore on docker, plain-image create on firecracker,
+    stated in the latency table.
   </Task>
 </TaskList>
 
@@ -462,10 +484,16 @@ Unit tests (`make test`, no Firecracker process):
   unreachable from inside.
 - Crash check: `kill -9` the firecracker process; the reconciler marks the sandbox
   `failed` and cleans up the leftovers.
-- Boot-to-guest-healthy time is measured and recorded (target: observe the order of
-  magnitude, not hit a number).
+- Boot-to-guest-healthy time is measured and recorded in
+  `docs/reference/demo-latency.mdx` alongside plan 11's cold-vs-snapshot numbers,
+  with the method stated (target: observe the order of magnitude, not hit a number).
 - The plan 12 demo harness completes one task with `backend: firecracker` — the full
   stack, SDK to microVM.
+- Prod cutover: `hack/validate-16.sh` reruns green against the public API with
+  `backend: firecracker` as the default — full lifecycle works, `save` on a
+  Firecracker sandbox returns typed `snapshot_unsupported` (docker-backed
+  save/restore still passes), and the deploy that shipped the cutover rolled through
+  the plan 16 health gate.
 
 Deliberately untested/out of scope: VM snapshots/resume (E2B's crown jewel — future
 plan set), jailer hardening, memory ballooning, CoW rootfs (overlay/reflink), running

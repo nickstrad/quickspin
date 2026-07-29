@@ -188,7 +188,10 @@ quota; guest binary is re-injected on restore so snapshots never bake in a stale
   <Task title="Write hack/bench-11.sh">
     20 iterations each of cold create vs snapshot create (with a heavyweight setup
     step, e.g. `pip install` of a few packages), reporting p50/p95 per phase to a CSV
-    checked into the closing notes.
+    checked into the closing notes. The p50/p95 table and the method behind it also
+    land in `docs/reference/demo-latency.mdx` — the single durable benchmark doc that
+    plan 12 extends with per-step agent timing and plan 14 with Firecracker boot
+    numbers, so every latency claim the project makes lives on one page.
   </Task>
 </TaskList>
 
@@ -291,7 +294,8 @@ Integration tests (`make test-docker`):
 - `TestSnapshotGC` — deleting the DB row leads the reconciler to remove the image.
 
 Benchmark: `hack/bench-11.sh` runs green and its CSV shows snapshot-create p50
-meaningfully below cold-create-with-setup p50 (the number itself is the artifact).
+meaningfully below cold-create-with-setup p50 (the number itself is the artifact),
+and the p50/p95 table plus method are recorded in `docs/reference/demo-latency.mdx`.
 
 Deliberately untested: memory/process state (explicitly not preserved), concurrent
 saves of one sandbox, snapshot export off-host.
