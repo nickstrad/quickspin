@@ -146,6 +146,11 @@ Not worth writing:
   two files.
 - Re-deriving a plan or reference doc in a code comment. Link to it in one line instead:
   the doc is where the long form belongs, and two copies drift apart.
+- Design rationale. Why a helper lives in this file, which layer owns a rule, what
+  contract it serves, what every backend will do — that story belongs in the review
+  write-up or `docs/`, not above the function. Keep at most the one sentence that stops
+  the next reader from breaking the code ("`/` passes `validatePath` but is not a
+  writable target"), and drop the argument for the design.
 
 Length is the symptom, not the disease. A thirty-line comment above a ten-line function
 usually means the reasoning belongs in `docs/`, with the code keeping only the sentence

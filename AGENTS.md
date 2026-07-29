@@ -22,6 +22,12 @@ production software as fast as possible.
   explain Go itself, or re-derive a plan or reference doc in a comment — link to the doc
   in one line instead. See
   [`docs/reference/code-structure-and-testing.mdx`](docs/reference/code-structure-and-testing.mdx).
+- No design-rationale essays in comments. Why a function lives at this layer, what
+  contract or architecture it serves, how it compares to alternatives — that explanation
+  belongs in the end-of-response report (and, if durable, in `docs/`), never above the
+  function. A comment is one short sentence stating the single non-obvious fact the next
+  reader needs; if no such fact exists, write no comment. Justifying a design in a
+  comment and again in the report says it twice and lets the comment copy rot.
 - State assumptions and tradeoffs. When several reasonable approaches exist, present
   them with the question each approach would help answer.
 

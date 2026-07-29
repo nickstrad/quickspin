@@ -4,8 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"time"
 )
+
+type Runtime interface {
+	Create(ctx context.Context, spec Spec) (Info, error)
+	Inspect(ctx context.Context, platformID string) (Info, error)
+	List(ctx context.Context) ([]Info, error)
+	// Destroy of an unknown id return nil; cleanup needs to be retry safe
+	Destroy(ctx context.Context, platformID string) error
+	Exec(ctx context.Context, platformID string, cmd []string, opts ExecOpts) (ExecResult, error)
+	WriteFile(ctx context.Context, platformID, path string, content []byte, mode fs.FileMode) error
+	// ReadFile(ctx context.Context, platformID, path string) ([]byte, error)
+	// ListDir(ctx context.Context, platformID, path string) ([]FileInfo, error)
+	// RemovePath(ctx context.Context, platformID, path string) error
+}
 
 type Spec struct {
 	Image        string
@@ -85,15 +99,6 @@ func NewInfo(id string, state State, createdAt time.Time) Info {
 		State:     state,
 		CreatedAt: createdAt,
 	}
-}
-
-type Runtime interface {
-	Create(ctx context.Context, spec Spec) (Info, error)
-	Inspect(ctx context.Context, id string) (Info, error)
-	List(ctx context.Context) ([]Info, error)
-	// Destroy of an unknown id return nil; cleanup needs to be retry safe
-	Destroy(ctx context.Context, id string) error
-	Exec(ctx context.Context, id string, cmd []string, opts ExecOpts) (ExecResult, error)
 }
 
 type ExecOpts struct {

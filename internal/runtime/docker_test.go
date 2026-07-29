@@ -901,6 +901,7 @@ type fakeDaemon struct {
 	start  http.HandlerFunc
 	list   http.HandlerFunc
 	remove http.HandlerFunc
+	copyTo http.HandlerFunc
 }
 
 type recordedRequest struct {
@@ -933,6 +934,7 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 		start:  func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) },
 		list:   listOK(),
 		remove: func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) },
+		copyTo: func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) },
 	}
 }
 
@@ -961,6 +963,8 @@ func (d *fakeDaemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		d.start(w, r)
 	case r.Method == http.MethodGet && strings.HasSuffix(path, "/containers/json"):
 		d.list(w, r)
+	case r.Method == http.MethodPut && strings.HasSuffix(path, "/archive"):
+		d.copyTo(w, r)
 	case r.Method == http.MethodDelete && strings.Contains(path, "/containers/"):
 		d.remove(w, r)
 	default:
@@ -1020,6 +1024,13 @@ func dockerError(status int, message string) http.HandlerFunc {
 
 func listOK(summaries ...container.Summary) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, summaries) }
+}
+
+func listOKManaged() http.HandlerFunc {
+	return listOK(container.Summary{
+		ID:     testContainerID,
+		Labels: managedLabels(testSandboxID),
+	})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
