@@ -1,13 +1,15 @@
 # quickspin
 
-Quickspin is a learning project that builds an **agent sandbox platform**: infrastructure
-for giving an AI coding agent a disposable, isolated machine to run code in.
+Quickspin is an **agent sandbox platform**: infrastructure that gives an AI coding
+agent a disposable, isolated machine to run code in.
 
 An agent that writes code needs somewhere to run it. Running agent-authored commands on
-the host is unsafe and unreproducible, so platforms like E2B, Modal, and Vercel Sandbox
-hand the agent an ephemeral, resource-capped, network-restricted environment instead.
-Quickspin is a from-scratch implementation of that idea, built one layer at a time so
-each piece of the system is understood rather than imported.
+the host is unsafe and unreproducible, so the sandbox model — an ephemeral,
+resource-capped, network-restricted environment per task — has become the standard,
+used by platforms like E2B, Modal, and Vercel Sandbox. Quickspin implements that model
+around a backend-neutral runtime contract: mandatory cgroup limits, network off by
+default, idempotent lifecycle operations, and a conformance suite every backend must
+pass, so container and microVM isolation sit behind the same API.
 
 > **Status: early.** What exists today is the sandbox runtime layer and a CLI over it —
 > create, inspect, list, exec, and destroy Docker-backed sandboxes, with cgroup v2
@@ -242,7 +244,7 @@ make docs-build   # type-check and produce a static build
 ```
 
 `docs/plans/open/` holds proposed and in-progress work; `docs/plans/closed/` is history;
-`docs/reference/` is forward-looking architecture and learning material, not a spec for
+`docs/reference/` is forward-looking architecture and design notes, not a spec for
 current behavior.
 
 ## Tests
@@ -294,8 +296,8 @@ The plans in [`docs/plans/open/`](docs/plans/open/) sequence the platform. Abbre
 | 03–04 | exec with real exit codes, cgroup limits, network policy *(in progress)*; filesystem API |
 | 05–08 | HTTP control plane, reconciler and leases, in-sandbox guest agent, auth/tenancy/quotas |
 | 09–12 | TypeScript and Python SDKs, snapshots, an agent-harness capstone demo |
-| 13–14 | deep dives: a hand-rolled container runtime; Firecracker microVMs as a second backend |
-| 15–18 | production: Postgres store, single live host, control-plane/worker split, observability |
+| 15–18 | production: Postgres store, live Docker-backed host, control-plane/worker split with heartbeats and a failure-injection suite, fleet provisioning and observability |
+| 13–14 | isolation internals: a minimal container runtime on raw kernel primitives; Firecracker microVMs as a second backend, ending with the prod cutover |
 | 19–21 | compute pools, EC2/DigitalOcean providers, Kubernetes + Kata as a third backend |
 | 22–23 | agent workflows: git-capable sandboxes with secret injection, per-agent storage |
 
