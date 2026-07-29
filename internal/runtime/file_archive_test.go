@@ -4,9 +4,11 @@ import (
 	"archive/tar"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -250,6 +252,251 @@ func TestFileUnarchive(t *testing.T) {
 				t.Errorf("fileUnarchive returned %d bytes alongside %v, want no partial content", len(got), err)
 			}
 		})
+	}
+}
+
+// The daemon names archive entries relative to the *parent* of the source, so
+// every case below writes names as Docker would send them ("work/main.go" for a
+// source of /work) and expects paths the caller can hand straight back to
+// ReadFile.
+//
+// The listing is the whole subtree: the archive already carries every
+// descendant, so filtering to one level would pay the wire cost and discard the
+// result. MaxTotalFiles is what bounds it — see
+// TestListDirectoryFromTarStreamCapsEntries.
+func TestListDirectoryFromTarStream(t *testing.T) {
+	tests := []struct {
+		name    string
+		dirPath string
+		archive []byte
+		want    []FileInfo
+		// wantPlainErr demands an error carrying no sentinel, for the malformed
+		// streams whose exact wording is not part of the contract.
+		wantPlainErr bool
+	}{
+		{
+			name:    "a shallow directory's entries",
+			dirPath: "/work",
+			archive: tarEntries(t,
+				testTarEntry{tar.Header{Name: "work/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
+				testTarEntry{tar.Header{Name: "work/main.go", Typeflag: tar.TypeReg, Mode: 0o640, Size: 13}, []byte("package main\n")},
+				testTarEntry{tar.Header{Name: "work/logs/", Typeflag: tar.TypeDir, Mode: 0o750}, nil},
+			),
+			want: []FileInfo{
+				// No trailing slash: the slash is tar's way of marking a directory
+				// entry, and IsDir already carries that. A path ending in "/" fails
+				// validatePath, so leaving it on would produce entries that cannot be
+				// passed back into any other method.
+				{Path: "/work/logs", Mode: fs.ModeDir | 0o750, IsDir: true},
+				{Path: "/work/main.go", Size: 13, Mode: 0o640},
+			},
+		},
+		{
+			// The source directory is in its own archive, and reporting it as an
+			// entry makes a listing of an empty directory indistinguishable from one
+			// holding a single subdirectory. This is the one entry the recursion
+			// skips, and it is skipped because it is the question, not an answer.
+			name:    "the source directory is not one of its own entries",
+			dirPath: "/work/empty",
+			archive: tarEntries(t,
+				testTarEntry{tar.Header{Name: "empty/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
+			),
+			want: []FileInfo{},
+		},
+		{
+			// Every depth, not just one level: the join is the same at any depth, so a
+			// grandchild's path must come back as usable as a child's. Absolute paths
+			// are what make a flat listing of a deep tree readable at all — the
+			// alternative is a set of basenames with no way to tell two "main.go"
+			// apart.
+			name:    "the whole subtree is listed",
+			dirPath: "/work",
+			archive: tarEntries(t,
+				testTarEntry{tar.Header{Name: "work/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
+				testTarEntry{tar.Header{Name: "work/top.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 5}, []byte("hello")},
+				testTarEntry{tar.Header{Name: "work/a/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
+				testTarEntry{tar.Header{Name: "work/a/b/", Typeflag: tar.TypeDir, Mode: 0o750}, nil},
+				testTarEntry{tar.Header{Name: "work/a/b/c.txt", Typeflag: tar.TypeReg, Mode: 0o600, Size: 3}, []byte("abc")},
+			),
+			want: []FileInfo{
+				{Path: "/work/a", Mode: fs.ModeDir | 0o755, IsDir: true},
+				{Path: "/work/a/b", Mode: fs.ModeDir | 0o750, IsDir: true},
+				{Path: "/work/a/b/c.txt", Size: 3, Mode: 0o600},
+				{Path: "/work/top.txt", Size: 5, Mode: 0o644},
+			},
+		},
+		{
+			// `ls file` prints the file. The daemon answers a file source with a
+			// single basename entry, so the same rule that skips "work/" for a
+			// directory source must not skip "main.go" here.
+			name:    "a file source lists the file itself",
+			dirPath: "/work/main.go",
+			archive: tarEntries(t,
+				testTarEntry{tar.Header{Name: "main.go", Typeflag: tar.TypeReg, Mode: 0o640, Size: 13}, []byte("package main\n")},
+			),
+			want: []FileInfo{
+				{Path: "/work/main.go", Size: 13, Mode: 0o640},
+			},
+		},
+		{
+			// A stream that dies mid-entry has produced a partial listing, and a
+			// partial listing returned without an error is a wrong answer: the caller
+			// concludes the missing files do not exist.
+			name:         "a truncated stream is not a short listing",
+			dirPath:      "/work",
+			archive:      headerOnlyTar(t, tar.Header{Name: "work/main.go", Typeflag: tar.TypeReg, Mode: 0o644, Size: 512}),
+			wantPlainErr: true,
+		},
+		{
+			name:         "a stream that is not a tar archive",
+			dirPath:      "/work",
+			archive:      []byte("this is not a tar archive, it is a sentence"),
+			wantPlainErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := listDirectoryFromTarStream(tt.dirPath, io.NopCloser(bytes.NewReader(tt.archive)))
+
+			if tt.wantPlainErr {
+				if err == nil {
+					t.Fatal("listDirectoryFromTarStream error = nil, want an error for a malformed stream")
+				}
+				if errors.Is(err, ErrPathNotFound) || errors.Is(err, ErrTotalFilesTooLarge) {
+					t.Errorf("listDirectoryFromTarStream error = %v, want no sentinel for a malformed stream", err)
+				}
+				if got != nil {
+					t.Errorf("listDirectoryFromTarStream returned %d entries alongside %v, want no partial listing", len(got), err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("listDirectoryFromTarStream error = %v, want nil", err)
+			}
+			// An empty directory is an empty listing, not a nil one: plan 05 serves
+			// these over HTTP, where nil encodes as `null` and an empty slice as `[]`.
+			if got == nil {
+				t.Fatal("listDirectoryFromTarStream = nil, want an empty slice for a directory with no children")
+			}
+			assertFileInfos(t, got, tt.want)
+		})
+	}
+}
+
+// Because the listing recurses, MaxTotalFiles is the only thing standing between
+// a caller and a listing of every file in the sandbox. It therefore counts
+// listed entries at any depth — a deep tree cannot hide entries from it by
+// nesting them — and the refusal is a sentinel rather than a truncated slice,
+// since a silently short listing reads as "these are all the files".
+func TestListDirectoryFromTarStreamCapsEntries(t *testing.T) {
+	tests := []struct {
+		name string
+		// names are tar entry names; a trailing slash makes a directory entry.
+		names     []string
+		wantCount int
+		wantErr   error
+	}{
+		{
+			name:      "exactly at the cap",
+			names:     append([]string{"work/"}, generatedNames("work/f%04d.txt", MaxTotalFiles)...),
+			wantCount: MaxTotalFiles,
+		},
+		{
+			name:    "one over the cap",
+			names:   append([]string{"work/"}, generatedNames("work/f%04d.txt", MaxTotalFiles+1)...),
+			wantErr: ErrTotalFilesTooLarge,
+		},
+		{
+			// 999 files is comfortably under the cap on its own; the two directories
+			// holding them are listed too, and that is what pushes the total over. A
+			// cap that counted only the deepest entries, or only files, would let a
+			// sufficiently nested tree past.
+			name: "nesting does not exempt entries from the cap",
+			names: append([]string{"work/", "work/a/", "work/a/b/"},
+				generatedNames("work/a/b/f%04d.txt", MaxTotalFiles-1)...),
+			wantErr: ErrTotalFilesTooLarge,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			archive := tarNamedEntries(t, tt.names...)
+
+			got, err := listDirectoryFromTarStream("/work", io.NopCloser(bytes.NewReader(archive)))
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("listDirectoryFromTarStream error = %v, want errors.Is(..., %v)", err, tt.wantErr)
+			}
+			if tt.wantErr != nil {
+				// Refusing with a partial listing attached invites a caller to use it.
+				if got != nil {
+					t.Errorf("listDirectoryFromTarStream returned %d entries alongside %v, want none", len(got), err)
+				}
+				return
+			}
+			if len(got) != tt.wantCount {
+				t.Errorf("listDirectoryFromTarStream returned %d entries, want %d", len(got), tt.wantCount)
+			}
+		})
+	}
+}
+
+func generatedNames(format string, n int) []string {
+	names := make([]string, n)
+	for i := range names {
+		names[i] = fmt.Sprintf(format, i)
+	}
+	return names
+}
+
+// tarNamedEntries builds an archive of empty entries from names alone, for the
+// cases that care about how many entries there are rather than what is in them.
+// A trailing slash makes a directory entry.
+func tarNamedEntries(t *testing.T, names ...string) []byte {
+	t.Helper()
+
+	entries := make([]testTarEntry, 0, len(names))
+	for _, name := range names {
+		header := tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644}
+		if strings.HasSuffix(name, "/") {
+			header.Typeflag, header.Mode = tar.TypeDir, 0o755
+		}
+		entries = append(entries, testTarEntry{header, nil})
+	}
+	return tarEntries(t, entries...)
+}
+
+// MaxFileSize bounds what ReadFile pulls into memory. A listing reads headers
+// only, so the same cap applied here would make a directory unlistable because
+// of one core dump sitting in it — the entry a caller most needs to see.
+func TestListDirectoryFromTarStreamReportsSizesOverTheFileCap(t *testing.T) {
+	oversized := make([]byte, MaxFileSize+1)
+	archive := tarEntries(t,
+		testTarEntry{tar.Header{Name: "work/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
+		testTarEntry{tar.Header{Name: "work/core.dump", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(oversized))}, oversized},
+	)
+
+	got, err := listDirectoryFromTarStream("/work", io.NopCloser(bytes.NewReader(archive)))
+	if err != nil {
+		t.Fatalf("listDirectoryFromTarStream error = %v, want nil", err)
+	}
+	assertFileInfos(t, got, []FileInfo{
+		{Path: "/work/core.dump", Size: int64(len(oversized)), Mode: 0o644},
+	})
+}
+
+// Order is not part of the contract — the daemon's traversal order is its own
+// business — so both sides are sorted before comparison.
+func assertFileInfos(t *testing.T, got, want []FileInfo) {
+	t.Helper()
+
+	byPath := func(a, b FileInfo) int { return strings.Compare(a.Path, b.Path) }
+	got = slices.SortedFunc(slices.Values(got), byPath)
+	want = slices.SortedFunc(slices.Values(want), byPath)
+
+	if !slices.Equal(got, want) {
+		t.Fatalf("listing = %+v, want %+v", got, want)
 	}
 }
 

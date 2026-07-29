@@ -166,6 +166,101 @@ func TestReadFileAbsenceAndCap(t *testing.T) {
 	})
 }
 
+// The pure tests feed listDirectoryFromTarStream archives written the way the
+// daemon is believed to write them. This is the test that checks the belief:
+// entry naming relative to the source's parent is the assumption the whole
+// path-joining rule rests on, and only the real daemon can confirm it.
+func TestListDir(t *testing.T) {
+	rt := liveDocker(t)
+	id := newSandbox(t, rt, liveSpec(t))
+
+	const content = "package main\n"
+	writeOrFatal(t, rt, id, "/work/list/main.go", []byte(content), 0o640)
+	writeOrFatal(t, rt, id, "/work/list/logs/app.log", []byte("started\n"), 0o600)
+
+	t.Run("a directory's whole subtree", func(t *testing.T) {
+		got, err := rt.ListDir(t.Context(), id, "/work/list")
+		if err != nil {
+			t.Fatalf("ListDir error = %v, want nil", err)
+		}
+
+		byPath := indexByPath(got)
+		// The grandchild is the point: its path is joined from a deeper entry name
+		// than the children's, and /work/list itself is not in its own listing. A
+		// duplicated path lands here too, by collapsing the map.
+		if len(byPath) != 3 {
+			t.Fatalf("listing = %+v, want main.go, logs, and logs/app.log under /work/list", got)
+		}
+		if grandchild, ok := byPath["/work/list/logs/app.log"]; !ok {
+			t.Errorf("listing = %+v, want an entry for /work/list/logs/app.log", got)
+		} else if grandchild.Size != int64(len("started\n")) {
+			t.Errorf("app.log size = %d, want %d", grandchild.Size, len("started\n"))
+		}
+
+		file, ok := byPath["/work/list/main.go"]
+		if !ok {
+			t.Fatalf("listing = %+v, want an entry for /work/list/main.go", got)
+		}
+		if file.IsDir {
+			t.Error("main.go IsDir = true, want false")
+		}
+		if file.Size != int64(len(content)) {
+			t.Errorf("main.go size = %d, want %d", file.Size, len(content))
+		}
+		// The mode WriteFile asked for, read back through a different header field
+		// in the other direction.
+		if got := file.Mode.Perm(); got != 0o640 {
+			t.Errorf("main.go mode = %#o, want %#o", got, 0o640)
+		}
+
+		dir, ok := byPath["/work/list/logs"]
+		if !ok {
+			// A trailing slash surviving from the tar entry name lands here, and it
+			// would make the path unusable in any other method.
+			t.Fatalf("listing = %+v, want an entry for /work/list/logs with no trailing slash", got)
+		}
+		if !dir.IsDir || !dir.Mode.IsDir() {
+			t.Errorf("logs IsDir = %v, Mode = %v, want a directory by both", dir.IsDir, dir.Mode)
+		}
+	})
+
+	t.Run("a file lists itself", func(t *testing.T) {
+		got, err := rt.ListDir(t.Context(), id, "/work/list/main.go")
+		if err != nil {
+			t.Fatalf("ListDir(file) error = %v, want nil", err)
+		}
+		if len(got) != 1 || got[0].Path != "/work/list/main.go" || got[0].IsDir {
+			t.Fatalf("ListDir(file) = %+v, want one non-directory entry for the file itself", got)
+		}
+	})
+
+	t.Run("a path that is not there", func(t *testing.T) {
+		got, err := rt.ListDir(t.Context(), id, "/work/list/nowhere")
+		if !errors.Is(err, runtime.ErrPathNotFound) {
+			t.Errorf("ListDir(missing) error = %v, want ErrPathNotFound", err)
+		}
+		if got != nil {
+			t.Errorf("ListDir(missing) = %+v, want no entries", got)
+		}
+	})
+}
+
+func writeOrFatal(t *testing.T, rt *runtime.DockerRuntime, id, path string, content []byte, mode fs.FileMode) {
+	t.Helper()
+
+	if err := rt.WriteFile(t.Context(), id, path, content, mode); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v, want nil", path, err)
+	}
+}
+
+func indexByPath(infos []runtime.FileInfo) map[string]runtime.FileInfo {
+	byPath := make(map[string]runtime.FileInfo, len(infos))
+	for _, info := range infos {
+		byPath[info.Path] = info
+	}
+	return byPath
+}
+
 // firstDifference reports the index of the first differing byte, or -1 if one
 // slice is a prefix of the other.
 func firstDifference(got, want []byte) int {

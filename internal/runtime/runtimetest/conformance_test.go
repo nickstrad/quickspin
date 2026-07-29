@@ -160,6 +160,36 @@ func TestMemRuntimeReadFileSharesTheIdentitySentinels(t *testing.T) {
 	}
 }
 
+// A listing is where the two absences are easiest to conflate: "no such
+// sandbox" and "no such directory" both look like an empty result, and a double
+// that returned one empty slice for both would hide the difference the contract
+// requires callers to branch on.
+func TestMemRuntimeListDirSharesTheIdentitySentinels(t *testing.T) {
+	rt := new(memRuntime)
+	ctx := context.Background()
+
+	if _, err := rt.ListDir(ctx, "not-a-sandbox-id", "/work"); !errors.Is(err, runtime.ErrInvalidSandboxID) {
+		t.Errorf("ListDir(malformed id) error = %v, want ErrInvalidSandboxID", err)
+	}
+	if _, err := rt.ListDir(ctx, "sbx_unknown", "/work"); !errors.Is(err, runtime.ErrNotFound) {
+		t.Errorf("ListDir(unknown id) error = %v, want ErrNotFound", err)
+	}
+
+	created, err := rt.Create(ctx, runtime.Spec{})
+	if err != nil {
+		t.Fatalf("Create error = %v, want nil", err)
+	}
+	got, err := rt.ListDir(ctx, created.ID, "/work")
+	if !errors.Is(err, runtime.ErrPathNotFound) {
+		t.Errorf("ListDir(existing sandbox) error = %v, want ErrPathNotFound", err)
+	}
+	// An empty listing alongside the error would let a caller that ignores the
+	// error read the double as an empty directory.
+	if got != nil {
+		t.Errorf("ListDir(existing sandbox) = %+v, want no entries alongside the error", got)
+	}
+}
+
 func TestPollReportsItsLastObservation(t *testing.T) {
 	wantErr := errors.New("daemon unreachable")
 
@@ -344,6 +374,24 @@ func (m *memRuntime) WriteFile(_ context.Context, id, _ string, _ []byte, _ fs.F
 // stores nothing, so every path really is absent and ErrPathNotFound is the
 // honest report; empty content would claim a file that was never written.
 func (m *memRuntime) ReadFile(_ context.Context, id, _ string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := validateMemID(id); err != nil {
+		return nil, err
+	}
+	if _, ok := m.sandboxes[id]; !ok {
+		return nil, runtime.ErrNotFound
+	}
+	return nil, runtime.ErrPathNotFound
+}
+
+// ListDir exists so memRuntime still satisfies runtime.Runtime. An empty
+// listing would be the wrong emptiness: it claims a directory that exists and
+// holds nothing, which is indistinguishable from a real one — so a suite clause
+// that starts depending on the filesystem would pass against a double that has
+// none. ErrPathNotFound says the absence out loud.
+func (m *memRuntime) ListDir(_ context.Context, id, _ string) ([]runtime.FileInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
