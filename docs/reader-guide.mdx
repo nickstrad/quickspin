@@ -121,11 +121,10 @@ Use `Compare` and `CompareItem` for two or more approaches whose differences mat
   </CompareItem>
 </Compare>
 
-## Interactive task checklists
+## Task lists
 
-Use `TaskList` and `Task` for a plan's `## Tasks` section. Checkbox state persists in
-the browser (per plan), the list shows a progress bar, and the sidebar shows each
-plan's completion count so progress is visible across the whole learning path.
+Use `TaskList` and `Task` for a plan's `## Tasks` section. The list renders as a
+numbered, read-only breakdown of the plan's implementation steps.
 
 ```mdx
 <TaskList>
@@ -147,8 +146,7 @@ plan's completion count so progress is visible across the whole learning path.
   </Task>
 </TaskList>
 
-Task titles double as storage keys, so keep them stable once a plan is in progress.
-Pass an explicit `id` if a title must change without losing the checkbox state.
+`Task` also accepts an optional `id`, used only as a stable React key.
 
 ## Sequential hint reveal
 

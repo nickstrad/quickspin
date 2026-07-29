@@ -396,22 +396,6 @@ summary:focus-visible {
   height: 14px;
 }
 
-.nav-item__progress {
-  margin-top: 1px;
-  padding: 1px 5px;
-  color: #93a29a;
-  border: 1px solid #3a4a43;
-  border-radius: 8px;
-  font: 600 8.5px/1.5 var(--mono);
-  letter-spacing: 0.04em;
-}
-
-.nav-item__progress--complete {
-  color: #10231c;
-  background: var(--gold);
-  border-color: var(--gold);
-}
-
 .search-empty {
   display: flex;
   margin: 30px 10px;
@@ -1012,10 +996,9 @@ h4:hover .heading-anchor {
 }
 
 .task-list__header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
   margin-bottom: 10px;
+  padding-bottom: 12px;
+  border-bottom: 3px solid #d9cfba;
 }
 
 .task-list__eyebrow {
@@ -1025,26 +1008,15 @@ h4:hover .heading-anchor {
   text-transform: uppercase;
 }
 
-.task-list__count {
+.task-list__items {
+  padding-left: 22px !important;
+  list-style: decimal;
+}
+
+.task-list__items::marker,
+.task-list__items > li::marker {
   color: var(--accent-dark);
   font: 700 12px/1 var(--mono);
-}
-
-.task-list__bar {
-  height: 3px;
-  margin-bottom: 16px;
-  background: #d9cfba;
-}
-
-.task-list__bar > div {
-  height: 100%;
-  background: var(--accent);
-  transition: width 200ms ease;
-}
-
-.task-list__items {
-  padding: 0 !important;
-  list-style: none;
 }
 
 .task-list__items > li {
@@ -1057,44 +1029,6 @@ h4:hover .heading-anchor {
   border-top: 0;
 }
 
-.task-list__items label {
-  display: grid;
-  grid-template-columns: 22px 1fr;
-  gap: 12px;
-  cursor: pointer;
-}
-
-.task-list__items input[type="checkbox"] {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-}
-
-.task__box {
-  width: 16px;
-  height: 16px;
-  margin-top: 3px;
-  background: var(--paper);
-  border: 2px solid var(--ink-soft);
-  border-radius: 2px;
-  transition:
-    background 150ms ease,
-    border-color 150ms ease;
-}
-
-.task-list__items input:focus-visible + .task__box {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.task--done .task__box {
-  background: var(--accent);
-  border-color: var(--accent);
-  box-shadow: inset 0 0 0 2.5px var(--paper);
-}
-
 .task__body {
   display: block;
 }
@@ -1102,12 +1036,6 @@ h4:hover .heading-anchor {
 .task__body strong {
   font-family: var(--display);
   font-size: 17px;
-}
-
-.task--done .task__body strong {
-  color: #7d786a;
-  text-decoration: line-through;
-  text-decoration-thickness: 1px;
 }
 
 .task__body > span {

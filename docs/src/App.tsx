@@ -17,12 +17,7 @@ import {
   type DocumentSection,
   type ReaderDocument,
 } from "./documents";
-import {
-  DocumentRouteContext,
-  mdxComponents,
-  onTaskProgress,
-  readTaskStore,
-} from "./mdx-components";
+import { mdxComponents } from "./mdx-components";
 
 // Display label shown above each document. Sections without an entry fall back to
 // their own name.
@@ -57,30 +52,6 @@ function resolveRelativeDocument(current: ReaderDocument, href: string) {
   return documents.find((document) => document.route === route);
 }
 
-// Re-render subscribers whenever any plan's task checkboxes change.
-function useTaskProgressVersion(): number {
-  const [version, setVersion] = useState(0);
-  useEffect(() => onTaskProgress(() => setVersion((value) => value + 1)), []);
-  return version;
-}
-
-function TaskProgressBadge({ document }: { document: ReaderDocument }) {
-  const store = readTaskStore(document.route);
-  if (!store || store.total === 0) return null;
-
-  const doneCount = Object.keys(store.done).filter((id) => store.done[id]).length;
-  const complete = doneCount >= store.total;
-
-  return (
-    <span
-      className={`nav-item__progress ${complete ? "nav-item__progress--complete" : ""}`}
-      title={`${doneCount} of ${store.total} tasks complete`}
-    >
-      {complete ? "✓" : `${doneCount}/${store.total}`}
-    </span>
-  );
-}
-
 const Sidebar = memo(function Sidebar({
   active,
   query,
@@ -98,8 +69,6 @@ const Sidebar = memo(function Sidebar({
   onClose: () => void;
   searchRef: React.RefObject<HTMLInputElement | null>;
 }) {
-  useTaskProgressVersion();
-
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return documents;
@@ -163,7 +132,6 @@ const Sidebar = memo(function Sidebar({
                       {document.planNumber ?? <FileIcon />}
                     </span>
                     <span>{document.navTitle}</span>
-                    <TaskProgressBadge document={document} />
                   </button>
                 ))}
               </section>
@@ -307,8 +275,7 @@ function App() {
           </div>
 
           <div className="document-body" onClick={handleDocumentClick}>
-            <DocumentRouteContext.Provider value={active.route}>
-              <MDXProvider components={mdxComponents}>
+            <MDXProvider components={mdxComponents}>
               <Suspense
                 fallback={
                   <div className="document-loading">
@@ -317,10 +284,9 @@ function App() {
                   </div>
                 }
               >
-                  <ActiveDocument />
-                </Suspense>
-              </MDXProvider>
-            </DocumentRouteContext.Provider>
+                <ActiveDocument />
+              </Suspense>
+            </MDXProvider>
           </div>
 
           <nav className="page-turner" aria-label="Previous and next document">

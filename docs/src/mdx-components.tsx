@@ -1,9 +1,7 @@
 import type { MDXComponents } from "mdx/types";
 import {
   Children,
-  createContext,
   isValidElement,
-  useContext,
   useEffect,
   useId,
   useState,
@@ -163,42 +161,6 @@ export function CompareItem({
   );
 }
 
-// The route of the document currently being rendered. App provides it so
-// stateful study components can persist progress per plan.
-export const DocumentRouteContext = createContext<string>("");
-
-export type TaskStore = {
-  done: Record<string, boolean>;
-  total: number;
-};
-
-function taskStorageKey(route: string): string {
-  return `quickspin.tasks.${route}`;
-}
-
-export function readTaskStore(route: string): TaskStore | null {
-  try {
-    const raw = window.localStorage.getItem(taskStorageKey(route));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as TaskStore;
-    if (typeof parsed !== "object" || parsed === null) return null;
-    return { done: parsed.done ?? {}, total: parsed.total ?? 0 };
-  } catch {
-    return null;
-  }
-}
-
-const PROGRESS_EVENT = "quickspin:progress";
-
-export function onTaskProgress(listener: () => void): () => void {
-  window.addEventListener(PROGRESS_EVENT, listener);
-  window.addEventListener("storage", listener);
-  return () => {
-    window.removeEventListener(PROGRESS_EVENT, listener);
-    window.removeEventListener("storage", listener);
-  };
-}
-
 type TaskProps = PropsWithChildren<{ title: string; id?: string }>;
 
 // Task renders nothing on its own; TaskList reads its props and owns the markup.
@@ -207,61 +169,22 @@ export function Task(_props: TaskProps): null {
 }
 
 export function TaskList({ children }: PropsWithChildren) {
-  const route = useContext(DocumentRouteContext);
   const tasks = Children.toArray(children).filter(isValidElement) as ReactElement<TaskProps>[];
-  const ids = tasks.map(
-    (task, index) => task.props.id ?? (slugify(task.props.title) || String(index)),
-  );
-
-  const [done, setDone] = useState<Record<string, boolean>>(
-    () => readTaskStore(route)?.done ?? {},
-  );
-
-  useEffect(() => {
-    window.localStorage.setItem(
-      taskStorageKey(route),
-      JSON.stringify({ done, total: ids.length } satisfies TaskStore),
-    );
-    window.dispatchEvent(new Event(PROGRESS_EVENT));
-  }, [route, done, ids.length]);
-
-  const doneCount = ids.filter((id) => done[id]).length;
-  const percent = ids.length ? Math.round((doneCount / ids.length) * 100) : 0;
 
   return (
     <section className="task-list">
       <header className="task-list__header">
         <span className="task-list__eyebrow">Implementation tasks</span>
-        <span className="task-list__count">
-          {doneCount} / {ids.length}
-        </span>
       </header>
-      <div className="task-list__bar" role="presentation">
-        <div style={{ width: `${percent}%` }} />
-      </div>
       <ol className="task-list__items">
-        {tasks.map((task, index) => {
-          const id = ids[index];
-          const checked = Boolean(done[id]);
-          return (
-            <li key={id} className={checked ? "task--done" : ""}>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() =>
-                    setDone((previous) => ({ ...previous, [id]: !previous[id] }))
-                  }
-                />
-                <span className="task__box" aria-hidden="true" />
-                <span className="task__body">
-                  <strong>{task.props.title}</strong>
-                  {task.props.children ? <span>{task.props.children}</span> : null}
-                </span>
-              </label>
-            </li>
-          );
-        })}
+        {tasks.map((task, index) => (
+          <li key={task.props.id ?? (slugify(task.props.title) || index)}>
+            <span className="task__body">
+              <strong>{task.props.title}</strong>
+              {task.props.children ? <span>{task.props.children}</span> : null}
+            </span>
+          </li>
+        ))}
       </ol>
     </section>
   );
