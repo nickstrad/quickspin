@@ -19,13 +19,13 @@ untested.
 
 ## Three kinds of code
 
-| Kind | What it does | Where it lives | How it is tested |
-| --- | --- | --- | --- |
-| **Pure functions** | Values in, values out. No receiver, no I/O, no clock, no logging, no globals. | `pure.go` in the package, or beside the type they serve | Directly, table-driven. No fixtures, no fakes, no daemon. |
-| **Business logic** | Composes pure functions and mutates the package's own state (sandbox records, worker registry). | Methods on the control plane / worker / reconciler type | Construct the struct, seed its maps, call the method, assert on the state it owns. |
-| **Framework plumbing** | HTTP handlers, Docker SDK calls, `time.Tick` reconcile loops, `slog` lines. | `api.go`, `docker.go`, the loop bodies | Sparingly — `httptest` at the boundary, one integration test against real Docker, or not at all. |
+| Kind                   | What it does                                                                                    | Where it lives                                          | How it is tested                                                                                 |
+| ---------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| **Pure functions**     | Values in, values out. No receiver, no I/O, no clock, no logging, no globals.                   | `pure.go` in the package, or beside the type they serve | Directly, table-driven. No fixtures, no fakes, no daemon.                                        |
+| **Business logic**     | Composes pure functions and mutates the package's own state (sandbox records, worker registry). | Methods on the control plane / worker / reconciler type | Construct the struct, seed its maps, call the method, assert on the state it owns.               |
+| **Framework plumbing** | HTTP handlers, Docker SDK calls, `time.Tick` reconcile loops, `slog` lines.                     | `api.go`, `docker.go`, the loop bodies                  | Sparingly — `httptest` at the boundary, one integration test against real Docker, or not at all. |
 
-The point of the split is that most of what can actually be *wrong* lives in the first two
+The point of the split is that most of what can actually be _wrong_ lives in the first two
 rows, and neither needs a Docker daemon or a live worker to exercise. Plan 02's
 `make test` / `make test-docker` split is the same idea at the Makefile level: keep the
 daemon-free tests fast and separate.
@@ -46,7 +46,7 @@ if desired == nil && observed != nil {
 } // ... and the "both exist but state differs" case, easy to forget
 ```
 
-The decision — *given desired and observed, what should happen* — is tangled with the
+The decision — _given desired and observed, what should happen_ — is tangled with the
 Docker calls that carry it out. You cannot test "an orphan is destroyed" without a daemon,
 and the missing fourth case is invisible.
 
@@ -100,8 +100,8 @@ Good candidates, in rough priority:
    control-plane-owned fields. A field-copy block silently forgetting a field is a classic
    bug; a test pins the list.
 3. **Branching that picks an outcome** — `decideReconcileAction`, legal-state-transition
-   checks (`canTransition(from, to State) bool`). Return an enum or bool describing *what
-   to do*, and let the caller do it.
+   checks (`canTransition(from, to State) bool`). Return an enum or bool describing _what
+   to do_, and let the caller do it.
 4. **Filters and predicates** — "is this container one of mine?", "is this lease expired?"
    over a slice or map.
 
@@ -115,7 +115,7 @@ a bare sentinel). The calling method wraps at the boundary, per
 [`error-handling-and-logging.mdx`](error-handling-and-logging.mdx):
 
 ```go
-id, err := newSandboxID()
+id, err := NewSandboxID()
 if err != nil {
     return Info{}, E("runtime.dockerRuntime.Create", "generating sandbox id", err)
 }
@@ -129,16 +129,16 @@ would still be missing something after reading it.
 
 Worth writing:
 
-| Kind | Example |
-| --- | --- |
-| **A non-obvious fact about a dependency** | `uuid.Parse` also accepts braced and dashless encodings, which is why the canonical round trip exists. |
-| **A decision that could reasonably have gone the other way** | `restarting` counts as running, so the reconciler does not act on a condition that fixes itself. |
-| **A consequence invisible at the call site** | Docker cannot add labels after create, so omitting one here is permanent. |
-| **Why a test exists**, when the name cannot carry it | The row that fails if the sort moves back onto the joined strings. |
+| Kind                                                         | Example                                                                                                |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| **A non-obvious fact about a dependency**                    | `uuid.Parse` also accepts braced and dashless encodings, which is why the canonical round trip exists. |
+| **A decision that could reasonably have gone the other way** | `restarting` counts as running, so the reconciler does not act on a condition that fixes itself.       |
+| **A consequence invisible at the call site**                 | Docker cannot add labels after create, so omitting one here is permanent.                              |
+| **Why a test exists**, when the name cannot carry it         | The row that fails if the sort moves back onto the joined strings.                                     |
 
 Not worth writing:
 
-- Restating the signature. `// newSandboxID mints a new sandbox ID` above `newSandboxID`.
+- Restating the signature. `// NewSandboxID mints a new sandbox ID` above `NewSandboxID`.
 - Narrating control flow. `// loop over the env map`, `// return the error`.
 - Explaining Go itself. That a missing map key yields the zero value, that `append` grows
   a slice, that `errors.Is` walks `Unwrap`.
@@ -202,7 +202,7 @@ Two habits worth keeping:
 - **Pin real bugs by name.** When a bug ships and you fix it, add a test named after it
   (`TestNewSandboxIDIsNeverEmpty`) asserting against the exact broken value. A test named
   after the bug explains itself.
-- **Assert what must *not* change.** A merge test should check that an observed
+- **Assert what must _not_ change.** A merge test should check that an observed
   `runtime.Info` cannot overwrite a control-plane-owned field (the lease, the desired
   state) — the runtime doesn't track those and would send zero, so a careless merge would
   silently erase them. For value-semantics helpers, also assert the arguments were not

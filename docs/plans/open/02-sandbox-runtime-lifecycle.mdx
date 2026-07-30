@@ -10,9 +10,9 @@ a `quickspin sandbox` CLI subcommand, not HTTP. Everything later (exec, files, t
 control plane, other backends) hangs off the interface defined here.
 
 <KeyPoint label="Why this plan matters">
-  This is the spine interface of the whole project. Every later plan either calls it
-  (control plane, CLI, SDKs) or re-implements it (Firecracker). Getting the contract
-  right here is worth more than getting the Docker code pretty.
+  This is the spine interface of the whole project. Every later plan either
+  calls it (control plane, CLI, SDKs) or re-implements it (Firecracker). Getting
+  the contract right here is worth more than getting the Docker code pretty.
 </KeyPoint>
 
 ## Industry context
@@ -26,14 +26,17 @@ how Daytona supports multiple providers and how Kubernetes swapped Docker for
 containerd behind the CRI.
 
 <Compare>
-  <CompareItem eyebrow="What you build" title="Interface first, Docker behind it">
-    Callers hold a `Runtime` value and quickspin IDs. Docker types never appear in a
-    signature, so swapping the backend is a new file, not a refactor.
+  <CompareItem
+    eyebrow="What you build"
+    title="Interface first, Docker behind it"
+  >
+    Callers hold a `Runtime` value and quickspin IDs. Docker types never appear
+    in a signature, so swapping the backend is a new file, not a refactor.
   </CompareItem>
   <CompareItem eyebrow="The anti-pattern" title="Docker types in the API">
     If `container.ID` or `types.ContainerJSON` leaks into a caller, every future
-    backend must fake Docker's shapes. Kubernetes paid years of migration cost for
-    exactly this coupling before the CRI existed.
+    backend must fake Docker's shapes. Kubernetes paid years of migration cost
+    for exactly this coupling before the CRI existed.
   </CompareItem>
 </Compare>
 
@@ -54,35 +57,122 @@ containerd behind the CRI.
 
 The Docker CLI hides that `run` is `ContainerCreate` (allocate the container, write
 its config) followed by `ContainerStart` (actually start the process). Your `Create`
-must make both calls — which means it can fail *between* them, leaving a created but
+must make both calls — which means it can fail _between_ them, leaving a created but
 never-started container on the daemon. That half-state is invisible to a caller who
 only got back an error. Whoever owns the gap owns the cleanup: `Create` must delete
 what it made before returning the error, or every failed create leaks a container.
 
 <Figure caption="Create spans two Docker calls; a failure between them must trigger cleanup before the error returns.">
-  <svg viewBox="0 0 640 190" role="img" aria-label="Create maps to ContainerCreate then ContainerStart, with cleanup on failure">
+  <svg
+    viewBox="0 0 640 190"
+    role="img"
+    aria-label="Create maps to ContainerCreate then ContainerStart, with cleanup on failure"
+  >
     <defs>
-      <marker id="arrow02" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <marker
+        id="arrow02"
+        viewBox="0 0 10 10"
+        refX="9"
+        refY="5"
+        markerWidth="7"
+        markerHeight="7"
+        orient="auto-start-reverse"
+      >
         <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
       </marker>
     </defs>
-    <rect x="10" y="20" width="150" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
-    <text x="85" y="46" textAnchor="middle" fontSize="13" fill="#18231f">Create(ctx, spec)</text>
-    <rect x="240" y="20" width="150" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
-    <text x="315" y="40" textAnchor="middle" fontSize="12" fill="#18231f">ContainerCreate</text>
-    <text x="315" y="56" textAnchor="middle" fontSize="10" fill="#405049">config + labels written</text>
-    <rect x="470" y="20" width="150" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
-    <text x="545" y="40" textAnchor="middle" fontSize="12" fill="#18231f">ContainerStart</text>
-    <text x="545" y="56" textAnchor="middle" fontSize="10" fill="#405049">process running</text>
-    <line x1="160" y1="42" x2="238" y2="42" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow02)" />
-    <line x1="390" y1="42" x2="468" y2="42" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow02)" />
-    <text x="429" y="32" textAnchor="middle" fontSize="10" fill="#8f3423">can fail here</text>
-    <path d="M 429 64 L 429 120 L 320 120" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow02)" />
-    <rect x="170" y="98" width="150" height="44" fill="none" stroke="#caa552" strokeWidth="1.5" />
-    <text x="245" y="118" textAnchor="middle" fontSize="12" fill="#18231f">ContainerRemove</text>
-    <text x="245" y="134" textAnchor="middle" fontSize="10" fill="#405049">then return the error</text>
-    <text x="500" y="122" textAnchor="middle" fontSize="10" fill="#405049">skipping cleanup leaks one</text>
-    <text x="500" y="136" textAnchor="middle" fontSize="10" fill="#405049">container per failed create</text>
+    <rect
+      x="10"
+      y="20"
+      width="150"
+      height="44"
+      fill="none"
+      stroke="#18231f"
+      strokeWidth="1.5"
+    />
+    <text x="85" y="46" textAnchor="middle" fontSize="13" fill="#18231f">
+      Create(ctx, spec)
+    </text>
+    <rect
+      x="240"
+      y="20"
+      width="150"
+      height="44"
+      fill="none"
+      stroke="#18231f"
+      strokeWidth="1.5"
+    />
+    <text x="315" y="40" textAnchor="middle" fontSize="12" fill="#18231f">
+      ContainerCreate
+    </text>
+    <text x="315" y="56" textAnchor="middle" fontSize="10" fill="#405049">
+      config + labels written
+    </text>
+    <rect
+      x="470"
+      y="20"
+      width="150"
+      height="44"
+      fill="none"
+      stroke="#18231f"
+      strokeWidth="1.5"
+    />
+    <text x="545" y="40" textAnchor="middle" fontSize="12" fill="#18231f">
+      ContainerStart
+    </text>
+    <text x="545" y="56" textAnchor="middle" fontSize="10" fill="#405049">
+      process running
+    </text>
+    <line
+      x1="160"
+      y1="42"
+      x2="238"
+      y2="42"
+      stroke="#cf5436"
+      strokeWidth="1.5"
+      markerEnd="url(#arrow02)"
+    />
+    <line
+      x1="390"
+      y1="42"
+      x2="468"
+      y2="42"
+      stroke="#cf5436"
+      strokeWidth="1.5"
+      markerEnd="url(#arrow02)"
+    />
+    <text x="429" y="32" textAnchor="middle" fontSize="10" fill="#8f3423">
+      can fail here
+    </text>
+    <path
+      d="M 429 64 L 429 120 L 320 120"
+      fill="none"
+      stroke="#caa552"
+      strokeWidth="1.5"
+      strokeDasharray="5 4"
+      markerEnd="url(#arrow02)"
+    />
+    <rect
+      x="170"
+      y="98"
+      width="150"
+      height="44"
+      fill="none"
+      stroke="#caa552"
+      strokeWidth="1.5"
+    />
+    <text x="245" y="118" textAnchor="middle" fontSize="12" fill="#18231f">
+      ContainerRemove
+    </text>
+    <text x="245" y="134" textAnchor="middle" fontSize="10" fill="#405049">
+      then return the error
+    </text>
+    <text x="500" y="122" textAnchor="middle" fontSize="10" fill="#405049">
+      skipping cleanup leaks one
+    </text>
+    <text x="500" y="136" textAnchor="middle" fontSize="10" fill="#405049">
+      container per failed create
+    </text>
   </svg>
 </Figure>
 
@@ -90,8 +180,8 @@ what it made before returning the error, or every failed create leaks a containe
 
 A sandbox has two IDs the moment it exists: the quickspin ID you generate
 (`sbx_a1b2c3`) and the container ID Docker generates. They have different owners and
-different lifetimes. The quickspin ID is the *durable, public* identity — it will later
-live in a database row and appear in URLs. The container ID is a *backend detail* that
+different lifetimes. The quickspin ID is the _durable, public_ identity — it will later
+live in a database row and appear in URLs. The container ID is a _backend detail_ that
 changes if the sandbox is ever recreated on another backend or another host. The label
 `quickspin.id=sbx_...` is the join between the two worlds, written at create time so
 the mapping survives even if your process crashes: any future process can list
@@ -114,16 +204,17 @@ flowchart LR
 />
 
 <StudyPrompt question="Why not just use the container ID as the sandbox ID?">
-  Ask what happens in plan 14 when the same sandbox is backed by a Firecracker microVM
-  — there is no container ID. Any identity minted by the backend ties every caller to
-  that backend. Identity that must outlive a backend has to be minted above it, which
-  is why quickspin generates its own IDs and demotes the container ID to a label-joined
-  implementation detail that appears only in logs.
+  Ask what happens in plan 14 when the same sandbox is backed by a Firecracker
+  microVM — there is no container ID. Any identity minted by the backend ties
+  every caller to that backend. Identity that must outlive a backend has to be
+  minted above it, which is why quickspin generates its own IDs and demotes the
+  container ID to a label-joined implementation detail that appears only in
+  logs.
 </StudyPrompt>
 
 ### Concept: sentinel errors as the public contract
 
-Callers of this package will branch on *kinds* of failure — "not found" gets a 404
+Callers of this package will branch on _kinds_ of failure — "not found" gets a 404
 later, "image missing" gets a 400 — but they should never parse error strings or
 depend on `RuntimeError`'s fields. Go's convention is sentinel values tested with
 `errors.Is`, which walks the chain of wrapped errors. Your `RuntimeError` struct rides
@@ -182,10 +273,10 @@ type Runtime interface {
 ```
 
 <Callout tone="system" title="Idempotent destroy is a design commitment">
-  `Destroy` of an unknown ID returns nil, not `ErrNotFound`. Cleanup code runs in
-  retry loops, signal handlers, and reconcilers — if a second destroy fails, every
-  caller must special-case "already gone", and some will get it wrong. Deleting an
-  absent thing has succeeded.
+  `Destroy` of an unknown ID returns nil, not `ErrNotFound`. Cleanup code runs
+  in retry loops, signal handlers, and reconcilers — if a second destroy fails,
+  every caller must special-case "already gone", and some will get it wrong.
+  Deleting an absent thing has succeeded.
 </Callout>
 
 Decisions the plan commits to:
@@ -206,29 +297,117 @@ Decisions the plan commits to:
 - CLI surface: `quickspin sandbox create|list|inspect|destroy`.
 
 <Figure caption="The states a sandbox record can be in from this package's point of view. Plan 05 will widen this into the control-plane state machine.">
-  <svg viewBox="0 0 620 130" role="img" aria-label="Sandbox lifecycle states: created, running, destroyed">
+  <svg
+    viewBox="0 0 620 130"
+    role="img"
+    aria-label="Sandbox lifecycle states: created, running, destroyed"
+  >
     <defs>
-      <marker id="arrow02b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <marker
+        id="arrow02b"
+        viewBox="0 0 10 10"
+        refX="9"
+        refY="5"
+        markerWidth="7"
+        markerHeight="7"
+        orient="auto-start-reverse"
+      >
         <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
       </marker>
     </defs>
     <circle cx="30" cy="55" r="7" fill="#18231f" />
-    <rect x="90" y="33" width="130" height="44" rx="22" fill="none" stroke="#18231f" strokeWidth="1.5" />
-    <text x="155" y="60" textAnchor="middle" fontSize="13" fill="#18231f">running</text>
-    <rect x="290" y="33" width="130" height="44" rx="22" fill="none" stroke="#18231f" strokeWidth="1.5" />
-    <text x="355" y="60" textAnchor="middle" fontSize="13" fill="#18231f">stopped</text>
-    <rect x="480" y="33" width="120" height="44" rx="22" fill="none" stroke="#405049" strokeWidth="1.5" strokeDasharray="5 4" />
-    <text x="540" y="60" textAnchor="middle" fontSize="13" fill="#405049">gone</text>
-    <line x1="37" y1="55" x2="88" y2="55" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow02b)" />
-    <text x="62" y="45" textAnchor="middle" fontSize="10" fill="#8f3423">Create</text>
-    <line x1="220" y1="55" x2="288" y2="55" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow02b)" />
-    <text x="254" y="45" textAnchor="middle" fontSize="10" fill="#8f3423">exits / oom</text>
-    <line x1="420" y1="55" x2="478" y2="55" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow02b)" />
-    <text x="449" y="45" textAnchor="middle" fontSize="10" fill="#8f3423">Destroy</text>
-    <path d="M 155 33 C 220 -8 300 -8 355 33" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" />
-    <text x="255" y="14" textAnchor="middle" fontSize="10" fill="#7f5d43">Destroy also works from running</text>
-    <text x="540" y="100" textAnchor="middle" fontSize="10" fill="#405049">Inspect → ErrNotFound</text>
-    <text x="540" y="114" textAnchor="middle" fontSize="10" fill="#405049">Destroy → nil</text>
+    <rect
+      x="90"
+      y="33"
+      width="130"
+      height="44"
+      rx="22"
+      fill="none"
+      stroke="#18231f"
+      strokeWidth="1.5"
+    />
+    <text x="155" y="60" textAnchor="middle" fontSize="13" fill="#18231f">
+      running
+    </text>
+    <rect
+      x="290"
+      y="33"
+      width="130"
+      height="44"
+      rx="22"
+      fill="none"
+      stroke="#18231f"
+      strokeWidth="1.5"
+    />
+    <text x="355" y="60" textAnchor="middle" fontSize="13" fill="#18231f">
+      stopped
+    </text>
+    <rect
+      x="480"
+      y="33"
+      width="120"
+      height="44"
+      rx="22"
+      fill="none"
+      stroke="#405049"
+      strokeWidth="1.5"
+      strokeDasharray="5 4"
+    />
+    <text x="540" y="60" textAnchor="middle" fontSize="13" fill="#405049">
+      gone
+    </text>
+    <line
+      x1="37"
+      y1="55"
+      x2="88"
+      y2="55"
+      stroke="#cf5436"
+      strokeWidth="1.5"
+      markerEnd="url(#arrow02b)"
+    />
+    <text x="62" y="45" textAnchor="middle" fontSize="10" fill="#8f3423">
+      Create
+    </text>
+    <line
+      x1="220"
+      y1="55"
+      x2="288"
+      y2="55"
+      stroke="#cf5436"
+      strokeWidth="1.5"
+      markerEnd="url(#arrow02b)"
+    />
+    <text x="254" y="45" textAnchor="middle" fontSize="10" fill="#8f3423">
+      exits / oom
+    </text>
+    <line
+      x1="420"
+      y1="55"
+      x2="478"
+      y2="55"
+      stroke="#cf5436"
+      strokeWidth="1.5"
+      markerEnd="url(#arrow02b)"
+    />
+    <text x="449" y="45" textAnchor="middle" fontSize="10" fill="#8f3423">
+      Destroy
+    </text>
+    <path
+      d="M 155 33 C 220 -8 300 -8 355 33"
+      fill="none"
+      stroke="#caa552"
+      strokeWidth="1.5"
+      strokeDasharray="5 4"
+    />
+    <text x="255" y="14" textAnchor="middle" fontSize="10" fill="#7f5d43">
+      Destroy also works from running
+    </text>
+    <text x="540" y="100" textAnchor="middle" fontSize="10" fill="#405049">
+      Inspect → ErrNotFound
+    </text>
+    <text x="540" y="114" textAnchor="middle" fontSize="10" fill="#405049">
+      Destroy → nil
+    </text>
   </svg>
 </Figure>
 
@@ -240,11 +419,11 @@ testable before the daemon is involved at all.
 
 ### Identity
 
-| Symbol | Shape | What it owns |
-| --- | --- | --- |
-| `SandboxIDPrefix` | `const` | The one place `sbx_` is spelled. Nothing else concatenates it by hand. |
-| `newSandboxID` | `() string` | Mints prefix + random suffix. The only function that decides what an ID *looks like*. |
-| `validateSandboxID` | `(string) error` | Answers "could this string have come from `newSandboxID`?" |
+| Symbol              | Shape            | What it owns                                                                          |
+| ------------------- | ---------------- | ------------------------------------------------------------------------------------- |
+| `SandboxIDPrefix`   | `const`          | The one place `sbx_` is spelled. Nothing else concatenates it by hand.                |
+| `NewSandboxID`      | `() string`      | Mints prefix + random suffix. The only function that decides what an ID _looks like_. |
+| `validateSandboxID` | `(string) error` | Answers "could this string have come from `NewSandboxID`?"                            |
 
 Validation earns its place for one reason: it separates "you gave me nonsense" from "that
 sandbox does not exist". Without it, `Inspect("")` builds the filter
@@ -270,34 +449,34 @@ sbx_9f8e7d6c-5b4a-4938-8271-60514f3e2d1c
 A validator built on `uuid.Parse` alone is **weaker than that format**, because
 `uuid.Parse` is a permissive reader, not a format checker. What it accepts:
 
-| Input | `uuid.Parse` | Can `newSandboxID` produce it? |
-| --- | --- | --- |
-| `9f8e7d6c-5b4a-4938-8271-60514f3e2d1c` | accepts | yes — the only true form |
-| `9F8E7D6C-5B4A-…` uppercase or mixed | accepts | no — hex decodes case-insensitively |
-| `9f8e7d6c5b4a4938827160514f3e2d1c` (32, no hyphens) | accepts | no |
-| `{9f8e7d6c-…}` (38, braced) | accepts | no |
-| `urn:uuid:9f8e7d6c-…` (45) | accepts | no — and the scheme is case-insensitive too |
-| `00000000-0000-0000-0000-000000000000` | accepts | no — the nil UUID, and `uuid.UUID`'s zero value |
-| `9f8e7d6c-5b4a-1938-…` version nibble 1, 0, or f | accepts | no — **version is never checked** |
-| `9f8e7d6c-5b4a-4938-0271-…` variant nibble 0 | accepts | no — **variant is never checked** |
+| Input                                               | `uuid.Parse` | Can `NewSandboxID` produce it?                  |
+| --------------------------------------------------- | ------------ | ----------------------------------------------- |
+| `9f8e7d6c-5b4a-4938-8271-60514f3e2d1c`              | accepts      | yes — the only true form                        |
+| `9F8E7D6C-5B4A-…` uppercase or mixed                | accepts      | no — hex decodes case-insensitively             |
+| `9f8e7d6c5b4a4938827160514f3e2d1c` (32, no hyphens) | accepts      | no                                              |
+| `{9f8e7d6c-…}` (38, braced)                         | accepts      | no                                              |
+| `urn:uuid:9f8e7d6c-…` (45)                          | accepts      | no — and the scheme is case-insensitive too     |
+| `00000000-0000-0000-0000-000000000000`              | accepts      | no — the nil UUID, and `uuid.UUID`'s zero value |
+| `9f8e7d6c-5b4a-1938-…` version nibble 1, 0, or f    | accepts      | no — **version is never checked**               |
+| `9f8e7d6c-5b4a-4938-0271-…` variant nibble 0        | accepts      | no — **variant is never checked**               |
 
 And what it already rejects, so these need no extra code:
 
-| Input | Why it fails |
-| --- | --- |
-| `9f8e7d6c_5b4a_…` underscores for hyphens | separator must be `-` |
-| `9f8e7d6-c5b4a-…` hyphens in the wrong positions | group widths are fixed |
-| 35 or 37 characters | length is exact per accepted form |
-| leading space, trailing newline | not trimmed — whitespace is a parse failure |
-| `9f8e7d6g-…` non-hex character | `g` is not hex |
-| `{9f8e7d6c5b4a…}` braced *and* dashless | the braced form still requires hyphens |
+| Input                                            | Why it fails                                |
+| ------------------------------------------------ | ------------------------------------------- |
+| `9f8e7d6c_5b4a_…` underscores for hyphens        | separator must be `-`                       |
+| `9f8e7d6-c5b4a-…` hyphens in the wrong positions | group widths are fixed                      |
+| 35 or 37 characters                              | length is exact per accepted form           |
+| leading space, trailing newline                  | not trimmed — whitespace is a parse failure |
+| `9f8e7d6g-…` non-hex character                   | `g` is not hex                              |
+| `{9f8e7d6c5b4a…}` braced _and_ dashless          | the braced form still requires hyphens      |
 
 None of this is a safety boundary, and it is worth being precise about why, because the
 opposite is easy to assume. Docker's label filters match a value **exactly**, not by
 prefix, so a truncated or empty ID under-matches rather than over-matches — it finds
 nothing. And `filters.Args` is a structured map serialized to JSON, not a string the ID
 is concatenated into, so a `,` or `=` in a value is just a byte in that value with no
-delimiter to escape from. What is left is a *correctness* gap: these forms let in IDs
+delimiter to escape from. What is left is a _correctness_ gap: these forms let in IDs
 that no `Create` ever minted, and an `Inspect` on one is guaranteed to find nothing.
 
 Every encoding row above closes with one line — re-format the parsed value and compare it
@@ -336,27 +515,28 @@ than formatting the value to compare against a zeros literal.
   found`, which is the one thing validation genuinely earns: a client debugging a typo can
   act on the first and is misled by the second.
 
-  The nil UUID arrives from **inside**. It is `uuid.UUID`'s zero value, so it is what an
-  unassigned struct field, a decode that skipped a key, or a discarded error produces —
-  never something a caller types. Catching it turns a whole class of internal bug into an
-  immediate error instead of a daemon round trip that reports a sandbox nobody named does
-  not exist. It is also the only rule here that survives any future ID format change,
-  since all-zeros is never a legitimate value.
+The nil UUID arrives from **inside**. It is `uuid.UUID`'s zero value, so it is what an
+unassigned struct field, a decode that skipped a key, or a discarded error produces —
+never something a caller types. Catching it turns a whole class of internal bug into an
+immediate error instead of a daemon round trip that reports a sandbox nobody named does
+not exist. It is also the only rule here that survives any future ID format change,
+since all-zeros is never a legitimate value.
 
-  That asymmetry is where to stop. Version and variant checks are left out: they only
-  catch outside input, the payoff is one avoided lookup, and each is something to migrate
-  if the format ever moves — a `Version() == 4` check would reject UUIDv7 the day you
-  decide time-ordered IDs are worth having.
+That asymmetry is where to stop. Version and variant checks are left out: they only
+catch outside input, the payoff is one avoided lookup, and each is something to migrate
+if the format ever moves — a `Version() == 4` check would reject UUIDv7 the day you
+decide time-ordered IDs are worth having.
+
 </Callout>
 
 ### Labels
 
-| Symbol | Shape | What it owns |
-| --- | --- | --- |
-| `labelSandboxID`, `labelManaged` | `const` | The two label keys, spelled once. |
-| `managedLabels` | `(id string) map[string]string` | The labels written into `container.Config` at create time. |
-| `isManaged` | `(labels map[string]string) bool` | "Is this container one of mine?" |
-| `sandboxIDFromLabels` | `(labels map[string]string) (string, error)` | The inverse of `managedLabels`: recovers the sandbox ID off a container. |
+| Symbol                           | Shape                                        | What it owns                                                             |
+| -------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------ |
+| `labelSandboxID`, `labelManaged` | `const`                                      | The two label keys, spelled once.                                        |
+| `managedLabels`                  | `(id string) map[string]string`              | The labels written into `container.Config` at create time.               |
+| `isManaged`                      | `(labels map[string]string) bool`            | "Is this container one of mine?"                                         |
+| `sandboxIDFromLabels`            | `(labels map[string]string) (string, error)` | The inverse of `managedLabels`: recovers the sandbox ID off a container. |
 
 Two directions plus a predicate — write, read, and test. Round-tripping `managedLabels`
 into `sandboxIDFromLabels` pins the key name in both places with one assertion, which is
@@ -364,18 +544,19 @@ the failure you actually get: renaming the key in the writer only, leaving every
 container unreadable to its own reader.
 
 <Callout tone="warning" title="A missing label at create time is permanent">
-  Labels go into `ContainerCreate` and cannot be added afterward. If `managedLabels`
-  omits `quickspin.managed`, every container it creates is invisible to `List` for the
-  rest of its life — and invisible to the leak check that is supposed to catch exactly
-  this. Assert both keys, not just the one you were thinking about.
+  Labels go into `ContainerCreate` and cannot be added afterward. If
+  `managedLabels` omits `quickspin.managed`, every container it creates is
+  invisible to `List` for the rest of its life — and invisible to the leak check
+  that is supposed to catch exactly this. Assert both keys, not just the one you
+  were thinking about.
 </Callout>
 
 ### Translation
 
-| Symbol | Shape | What it owns |
-| --- | --- | --- |
-| `stateFromContainerState` | `(string) State` | Collapses Docker's seven container states into this package's two. |
-| `envToArgs` | `(map[string]string) []string` | Turns `Spec.Env` into Docker's `KEY=VALUE` slice, in sorted order. |
+| Symbol                    | Shape                          | What it owns                                                       |
+| ------------------------- | ------------------------------ | ------------------------------------------------------------------ |
+| `stateFromContainerState` | `(string) State`               | Collapses Docker's seven container states into this package's two. |
+| `envToArgs`               | `(map[string]string) []string` | Turns `Spec.Env` into Docker's `KEY=VALUE` slice, in sorted order. |
 
 Neither is named in the task, but both are decisions by the code-structure reference's
 own criteria, and both otherwise end up buried in a `docker.go` method where nothing can
@@ -388,18 +569,19 @@ sorting the output differs run to run and there is nothing stable to assert agai
 
 <StudyPrompt question="Should the label helpers return Docker's filters.Args, or plain Go values?">
   `ContainerList` wants `filters.Args`, so returning it saves a conversion. But
-  `filters` is a moby type, and a pure layer that returns one means the daemon-free test
-  binary links the Docker SDK — the coupling this plan's opening section argues against.
-  The alternative keeps the helpers in label key/value pairs and lets `docker.go` do the
-  one-line translation at the boundary, where it is obvious and unreviewed. These
-  helpers are unexported either way, so nothing leaks to callers; the question is only
-  what the fast test suite has to link against.
+  `filters` is a moby type, and a pure layer that returns one means the
+  daemon-free test binary links the Docker SDK — the coupling this plan's
+  opening section argues against. The alternative keeps the helpers in label
+  key/value pairs and lets `docker.go` do the one-line translation at the
+  boundary, where it is obvious and unreviewed. These helpers are unexported
+  either way, so nothing leaks to callers; the question is only what the fast
+  test suite has to link against.
 </StudyPrompt>
 
-### `newSandboxID` is the one that is not pure
+### `NewSandboxID` is the one that is not pure
 
 It reads a random source, so it has no fixed input/output pairs and a table has nothing
-to tabulate. That is why its two tests in Definition of done are *property* assertions —
+to tabulate. That is why its two tests in Definition of done are _property_ assertions —
 call it a thousand times; every result non-empty, correctly prefixed, all distinct —
 rather than rows. The table belongs to `validateSandboxID`, and the pairing is the point:
 generate-then-validate in a loop asserts the two agree about the suffix alphabet. A
@@ -408,7 +590,7 @@ generator and a validator that disagree means every `Create` mints an ID its own
 
 Two choices worth making deliberately rather than inheriting. `uuid.New` panics if the
 random source fails where `uuid.NewRandom` returns an error — the panic is defensible (a
-broken CSPRNG is not recoverable) but it decides whether `newSandboxID` returns an error,
+broken CSPRNG is not recoverable) but it decides whether `NewSandboxID` returns an error,
 which decides whether every `Create` carries an extra error branch. And a full UUID
 suffix is 36 characters, so IDs read as `sbx_9f8e7d6c-…`; truncating buys readable CLI
 output and log lines at the cost of collision headroom that, at one host and one
@@ -459,6 +641,7 @@ developer, you have in vast surplus.
     the plan 01 socket, and the gate is `QUICKSPIN_TEST_DOCKER=1` rather than a build
     tag. The requirement below — that `make test` stay fast and Docker-free — is
     unchanged.
+
   </Task>
 </TaskList>
 
@@ -578,8 +761,8 @@ one create equals one cold container, measured honestly, until plan 11.
     title="Docker Engine SDK for Go"
     href="https://docs.docker.com/reference/api/engine/sdk/"
   >
-    The official on-ramp for the client this plan is built on, with examples of the
-    create/start/inspect calls you are wrapping.
+    The official on-ramp for the client this plan is built on, with examples of
+    the create/start/inspect calls you are wrapping.
   </Resource>
   <Resource
     kind="docs"
@@ -595,8 +778,8 @@ one create equals one cold container, measured honestly, until plan 11.
     href="https://go.dev/blog/go1.13-errors"
     by="The Go Blog"
   >
-    The canonical explanation of wrapping, `errors.Is`, and `Unwrap` — the machinery
-    behind this plan's sentinel-error contract.
+    The canonical explanation of wrapping, `errors.Is`, and `Unwrap` — the
+    machinery behind this plan's sentinel-error contract.
   </Resource>
   <Resource
     kind="article"
@@ -604,15 +787,15 @@ one create equals one cold container, measured honestly, until plan 11.
     href="https://kubernetes.io/blog/2016/12/container-runtime-interface-cri-in-kubernetes/"
     by="Kubernetes Blog"
   >
-    The industrial-scale version of this plan's core move: a backend-neutral runtime
-    interface that later let Kubernetes swap Docker for containerd.
+    The industrial-scale version of this plan's core move: a backend-neutral
+    runtime interface that later let Kubernetes swap Docker for containerd.
   </Resource>
   <Resource
     kind="book"
     title="The Go Programming Language"
     by="Donovan &amp; Kernighan, ch. 7 (Interfaces)"
   >
-    The deepest treatment of designing small Go interfaces like `Runtime` — satisfied
-    implicitly, defined by the consumer.
+    The deepest treatment of designing small Go interfaces like `Runtime` —
+    satisfied implicitly, defined by the consumer.
   </Resource>
 </Resources>
