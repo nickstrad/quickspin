@@ -102,6 +102,29 @@ make env-cleanup    # stop/delete the VM and remove the docker context
 
 `make lima-vm-shell` drops you inside the VM.
 
+## Run the CLI locally
+
+After `make env-create`, run the CLI on the host with `make run` and pass its arguments
+through `ARGS`:
+
+```sh
+make run ARGS="sandbox list"
+make run ARGS="sandbox create alpine:3.20"
+```
+
+To run the CLI itself inside Lima, cross-compile it first, then enter the VM. Lima mounts
+the host home directory, so the checkout and built binary are available at the same
+absolute path:
+
+```sh
+make build-linux
+make lima-vm-shell
+
+# Inside Lima:
+cd /absolute/path/to/quickspin
+./bin/linux-arm64/quickspin sandbox list
+```
+
 ## CLI
 
 The binary is `quickspin`; all sandbox verbs live under `quickspin sandbox`.

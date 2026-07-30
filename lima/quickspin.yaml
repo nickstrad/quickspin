@@ -49,6 +49,14 @@ provision:
       systemctl --user start dbus
       dockerd-rootless-setuptool.sh install
       docker context use rootless
+  - mode: system
+    # The docker CLI follows the rootless context set above, but SDK clients
+    # (quickspin) only read DOCKER_HOST and would default to the rootful socket.
+    # /etc/environment reaches every SSH session, interactive or not.
+    script: |
+      #!/bin/sh
+      grep -q '^DOCKER_HOST=' /etc/environment || \
+        echo 'DOCKER_HOST=unix:///run/user/{{.UID}}/docker.sock' >> /etc/environment
 probes:
   - script: |
       #!/bin/bash

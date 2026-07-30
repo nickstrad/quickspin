@@ -129,11 +129,14 @@ run_or_fail "make build-linux failed." \
 
 # `--` separates limactl's own flags from the guest command. The binary lives
 # under $HOME, which Lima mounts into the guest, so no copy step is needed.
+# `sandbox list` proves both that the binary runs and that the guest session
+# carries DOCKER_HOST for the rootless daemon (provisioned via /etc/environment,
+# which PAM applies even to this non-interactive SSH command).
 # `fail` inside a command substitution can only exit that subshell, so the
 # explicit `|| exit 1` is what stops the script here.
-guest_output="$(run_or_fail "The linux/${LINUX_ARCH} binary did not run inside '${VM_NAME}'." \
-    limactl shell "$VM_NAME" -- "$LINUX_BIN" validate)" || exit 1
+guest_output="$(run_or_fail "The linux/${LINUX_ARCH} binary could not list sandboxes inside '${VM_NAME}'. Is DOCKER_HOST set in the guest's /etc/environment?" \
+    limactl shell "$VM_NAME" -- "$LINUX_BIN" sandbox list --output json)" || exit 1
 
-pass "Cross-compiled binary runs in the VM (output: ${guest_output})."
+pass "Cross-compiled binary reaches the guest Docker daemon (sandbox list: ${guest_output})."
 
 printf '\nAll checks passed.\n'
