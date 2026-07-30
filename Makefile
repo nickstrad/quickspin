@@ -91,9 +91,14 @@ docs-build: $(DOCS_DEPS) ## Type-check and build the documentation reader
 clean: ## Remove build artifacts
 	rm -rf $(BIN_DIR)
 
+# Lima gives the guest user the host's UID, so the rootless Docker socket lands
+# under the same numeric path on both sides.
+HOST_UID := $(shell id -u)
+
 .PHONY: lima-vm-create
 lima-vm-create:
-	limactl start lima/quickspin.yaml --name=$(VM_NAME)
+	limactl start lima/quickspin.yaml --name=$(VM_NAME) \
+		--set '.env.DOCKER_HOST = "unix:///run/user/$(HOST_UID)/docker.sock"'
 
 .PHONY: lima-vm-delete
 lima-vm-delete:

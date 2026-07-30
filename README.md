@@ -102,6 +102,39 @@ make env-cleanup    # stop/delete the VM and remove the docker context
 
 `make lima-vm-shell` drops you inside the VM.
 
+### Starting the VM without make
+
+`make lima-vm-create` does not just call `limactl start` — it injects the guest's
+`DOCKER_HOST`:
+
+```sh
+limactl start lima/quickspin.yaml --name=quickspin \
+  --set '.env.DOCKER_HOST = "unix:///run/user/'"$(id -u)"'/docker.sock"'
+```
+
+Without that flag the VM still boots and the host-side context still works, but the
+Quickspin binary *inside* the VM fails with `permission denied ... /var/run/docker.sock`.
+The VM runs **rootless** Docker at `/run/user/<uid>/docker.sock`; the `docker` CLI finds
+it through the `rootless` context, but Go SDK clients such as Quickspin read only
+`DOCKER_HOST` and otherwise fall back to the rootful socket, which does not exist here.
+
+The value cannot live in `lima/quickspin.yaml` because Lima expands `{{.UID}}` in only
+certain fields and `env` is not one of them — hence the `$(id -u)` on the command line.
+Lima gives the guest user the host's UID, so the two paths match.
+
+If you already have a VM without it, fix it in place and reboot the instance:
+
+```sh
+limactl shell quickspin -- sudo sh -c \
+  "echo DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock >> /etc/environment"
+limactl stop quickspin && limactl start quickspin
+```
+
+The restart is required, not cosmetic. `/etc/environment` is read by PAM once per SSH
+*connection*, and Lima multiplexes every `limactl shell` over one long-lived connection
+opened at boot — so a running instance keeps serving the environment it had before the
+edit.
+
 ## Run the CLI locally
 
 After `make env-create`, run the CLI on the host with `make run` and pass its arguments
