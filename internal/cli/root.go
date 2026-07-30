@@ -45,9 +45,6 @@ func NewCommand(rt runtime.Runtime, logger *slog.Logger, logLevel *slog.LevelVar
   # -o yaml and -o json work on every command that prints a record.
   quickspin sandbox list -o yaml
 
-  # create and exec also accept their inputs as a YAML or JSON file.
-  quickspin sandbox create -f sandbox.yaml
-
   # Anything unexpected: ask the CLI what it is doing.
   quickspin --log-level debug sandbox list`,
 		SilenceErrors: true,
