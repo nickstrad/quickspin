@@ -12,10 +12,11 @@ default, idempotent lifecycle operations, and a conformance suite every backend 
 pass, so container and microVM isolation sit behind the same API.
 
 > **Status: early.** What exists today is the sandbox runtime layer and a CLI over it —
-> create, inspect, list, exec, and destroy Docker-backed sandboxes, with cgroup v2
-> CPU/memory/pids limits and network off by default. The control plane, guest agent,
-> filesystem API, SDKs, and the Firecracker/Kata backends are planned, not built. See
-> [Roadmap](#roadmap) below.
+> create, inspect, list, exec, copy files into and out of, list paths in, remove paths
+> from, and destroy Docker-backed sandboxes. Sandboxes have cgroup v2 CPU/memory/pids
+> limits and network off by default; file operations enforce absolute-path validation
+> and bounded transfers. The control plane, guest agent, SDKs, and the Firecracker/Kata
+> backends are planned, not built. See [Roadmap](#roadmap) below.
 
 ## Architecture
 
@@ -293,7 +294,7 @@ The plans in [`docs/plans/open/`](docs/plans/open/) sequence the platform. Abbre
 | Plans | Track |
 | --- | --- |
 | 01–02 | Lima lab environment; the `Runtime` interface and Docker backend *(done)* |
-| 03–04 | exec with real exit codes, cgroup limits, network policy *(in progress)*; filesystem API |
+| 03–04 | exec with real exit codes, cgroup limits, network policy; filesystem API *(done)* |
 | 05–08 | HTTP control plane, reconciler and leases, in-sandbox guest agent, auth/tenancy/quotas |
 | 09–12 | TypeScript and Python SDKs, snapshots, an agent-harness capstone demo |
 | 15–18 | production: Postgres store, live Docker-backed host, control-plane/worker split with heartbeats and a failure-injection suite, fleet provisioning and observability |
