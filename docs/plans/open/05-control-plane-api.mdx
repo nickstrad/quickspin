@@ -23,8 +23,8 @@ produce two billed sandboxes.
 
 ## What you'll learn
 
-- Production-shaped Go HTTP services: `net/http` with Go 1.22+ method routing,
-  middleware, graceful shutdown, structured logging (`log/slog`), request IDs.
+- Production-shaped Go HTTP services: `chi` for routing, middleware, graceful
+  shutdown, structured logging (`log/slog`), request IDs.
 - SQLite from Go: schema migrations, transactions, and why "state machine in a
   database" is a transactional problem.
 - The error/logging conventions at a second layer: `ControlPlaneError` with `Wrap`
@@ -210,6 +210,9 @@ updated_at)` and `idempotency_keys(key, sandbox_id, created_at)`.
 
 Committed decisions:
 
+- Routing uses `github.com/go-chi/chi/v5` — the project's first HTTP dependency.
+  chi routers and middleware are plain `net/http` handlers, so nothing else in the
+  plan (middleware shape, `httptest` suites, graceful shutdown) changes with it.
 - Create is **synchronous** in this plan (request returns when the sandbox is running
   or failed). Plan 06 revisits this honestly; note it now as a known simplification.
 - The store is behind a small Go interface so tests can use `:memory:` SQLite. Per the
@@ -294,14 +297,16 @@ Committed decisions:
     kill.
   </Hint>
   <Hint
-    title="Use Go 1.22 method routing and wrap it in middleware"
+    title="Use chi for routing and wrap it in middleware"
     check="A request to any endpoint logs one line with a request ID, method, path, status, and duration; a panicking handler returns 500 instead of killing the server."
   >
-    `http.NewServeMux` now matches patterns like `"POST /v1/sandboxes/{id}/exec"`,
-    with `r.PathValue("id")` in the handler — no router dependency. Middleware is
-    `func(http.Handler) http.Handler` layered around the mux: request ID (put it in
-    the request context and the child logger), logging (wrap `ResponseWriter` to
-    capture the status), recovery (deferred `recover()` → 500). Graceful shutdown:
+    `chi.NewRouter()` registers routes like `r.Post("/v1/sandboxes/{id}/exec", h)`,
+    with `chi.URLParam(r, "id")` in the handler. chi middleware is plain
+    `func(http.Handler) http.Handler` attached via `r.Use(...)`: request ID (put it in
+    the request context and the child logger — chi's `middleware.RequestID` is a
+    starting point), logging (wrap `ResponseWriter` to capture the status, or study
+    `middleware.Logger` before replacing it with a `slog` version), recovery (deferred
+    `recover()` → 500, as in `middleware.Recoverer`). Graceful shutdown:
     `signal.NotifyContext` for SIGTERM, then `server.Shutdown(ctx)` with a deadline so
     in-flight execs finish.
   </Hint>
@@ -401,13 +406,13 @@ ordering is what plan 06 builds on.
 
 <Resources>
   <Resource
-    kind="article"
-    title="Routing Enhancements for Go 1.22"
-    href="https://go.dev/blog/routing-enhancements"
-    by="The Go Blog"
+    kind="docs"
+    title="chi router"
+    href="https://go-chi.io/"
+    by="go-chi"
   >
-    The method-and-wildcard `net/http` routing this plan builds on, explained by its
-    authors — including precedence rules that surprise people coming from mux libraries.
+    The router this plan builds on — lightweight, `net/http`-compatible, with the
+    `Use`/`Route`/`URLParam` patterns and stock middleware the server skeleton uses.
   </Resource>
   <Resource
     kind="article"
