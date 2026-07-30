@@ -10,14 +10,14 @@ import (
 
 type Runtime interface {
 	Create(ctx context.Context, spec Spec) (Info, error)
-	Inspect(ctx context.Context, platformID string) (Info, error)
+	Inspect(ctx context.Context, sandboxID string) (Info, error)
 	List(ctx context.Context) ([]Info, error)
-	Destroy(ctx context.Context, platformID string) error
-	Exec(ctx context.Context, platformID string, cmd []string, opts ExecOpts) (ExecResult, error)
-	WriteFile(ctx context.Context, platformID, path string, content []byte, mode fs.FileMode) error
-	ReadFile(ctx context.Context, platformID, path string) ([]byte, error)
-	ListDir(ctx context.Context, platformID, path string) ([]FileInfo, error)
-	RemovePath(ctx context.Context, platformID, path string) error
+	Destroy(ctx context.Context, sandboxID string) error
+	Exec(ctx context.Context, sandboxID string, cmd []string, opts ExecOpts) (ExecResult, error)
+	WriteFile(ctx context.Context, sandboxID, path string, content []byte, mode fs.FileMode) error
+	ReadFile(ctx context.Context, sandboxID, path string) ([]byte, error)
+	ListDir(ctx context.Context, sandboxID, path string) ([]FileInfo, error)
+	RemovePath(ctx context.Context, sandboxID, path string) error
 }
 
 type Spec struct {

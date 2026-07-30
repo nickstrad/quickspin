@@ -58,7 +58,7 @@ func NewDockerRuntime(c *client.Client, logger *slog.Logger) (*DockerRuntime, er
 
 // newContainerConfigs is the one place Spec becomes Docker's vocabulary.
 // Receiver-free so the field mapping can be tested without a live daemon.
-func newContainerConfigs(spec Spec, platformID string) (container.Config, container.HostConfig, error) {
+func newContainerConfigs(spec Spec, sandboxID string) (container.Config, container.HostConfig, error) {
 	const op = "runtime.newContainerConfigs"
 
 	if err := spec.Validate(); err != nil {
@@ -73,7 +73,7 @@ func newContainerConfigs(spec Spec, platformID string) (container.Config, contai
 	return container.Config{
 			Image:  spec.Image,
 			Env:    envToArgs(spec.Env),
-			Labels: managedLabels(platformID),
+			Labels: managedLabels(sandboxID),
 		}, container.HostConfig{
 			RestartPolicy:   container.RestartPolicy{Name: container.RestartPolicyAlways},
 			PublishAllPorts: true,
@@ -163,8 +163,8 @@ func (d *DockerRuntime) Create(ctx context.Context, spec Spec) (Info, error) {
 
 	// Configs are built before the pull so an invalid spec fails without a
 	// registry round trip.
-	platformID := newSandboxID()
-	containerConfig, hostConfig, err := newContainerConfigs(spec, platformID)
+	sandboxID := newSandboxID()
+	containerConfig, hostConfig, err := newContainerConfigs(spec, sandboxID)
 	if err != nil {
 		return Info{}, Wrap(op, "", err)
 	}
@@ -184,30 +184,30 @@ func (d *DockerRuntime) Create(ctx context.Context, spec Spec) (Info, error) {
 	}
 
 	logger := d.logger.With(
-		"sandboxID", platformID,
+		"sandboxID", sandboxID,
 		"containerID", created.ID,
 		"image", spec.Image,
 	)
 	logger.DebugContext(ctx, "created container")
 
 	if _, err := d.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
-		return Info{}, d.cleanupFailed(ctx, op, platformID, created.ID,
-			E(op, fmt.Sprintf("starting container %s for sandbox %s", created.ID, platformID), err))
+		return Info{}, d.cleanupFailed(ctx, op, sandboxID, created.ID,
+			E(op, fmt.Sprintf("starting container %s for sandbox %s", created.ID, sandboxID), err))
 	}
 
 	// ContainerStart succeeding is what "running" means here; callers who need
 	// current state call Inspect. CreatedAt is the local clock because
 	// ContainerCreateResult carries no timestamp; List and Inspect report the
 	// daemon's.
-	info := NewInfo(platformID, StateRunning, time.Now().UTC())
+	info := NewInfo(sandboxID, StateRunning, time.Now().UTC())
 	logger.InfoContext(ctx, "sandbox created", "state", info.State)
 	return info, nil
 }
 
-func (d *DockerRuntime) Exec(ctx context.Context, platformID string, cmd []string, opts ExecOpts) (ExecResult, error) {
+func (d *DockerRuntime) Exec(ctx context.Context, sandboxID string, cmd []string, opts ExecOpts) (ExecResult, error) {
 	const op = "runtime.DockerRuntime.Exec"
 
-	logger := d.logger.With("sandboxID", platformID)
+	logger := d.logger.With("sandboxID", sandboxID)
 	logger.DebugContext(ctx, "executing command", "cmd", strings.Join(cmd, " "))
 
 	to := opts.Timeout
@@ -240,13 +240,13 @@ func (d *DockerRuntime) Exec(ctx context.Context, platformID string, cmd []strin
 	// pre-check can pass and the very next call still die on the deadline.
 	doneErr := func(stage string) error {
 		return classifyExecDone(op,
-			fmt.Sprintf("exec command timed out %s for sandbox %s", stage, platformID),
-			fmt.Sprintf("exec command cancelled %s for sandbox %s", stage, platformID),
+			fmt.Sprintf("exec command timed out %s for sandbox %s", stage, sandboxID),
+			fmt.Sprintf("exec command cancelled %s for sandbox %s", stage, sandboxID),
 			ctx.Err(), finalCtx.Err())
 	}
 
 	// finalCtx, not ctx: the lookup should count against the exec deadline.
-	c, err := d.getContainerByPlatformID(finalCtx, platformID)
+	c, err := d.getContainerBysandboxID(finalCtx, sandboxID)
 	if err != nil {
 		if finalCtx.Err() != nil {
 			return partial(), doneErr("while resolving the container")
@@ -267,7 +267,7 @@ func (d *DockerRuntime) Exec(ctx context.Context, platformID string, cmd []strin
 		if finalCtx.Err() != nil {
 			return partial(), doneErr("while creating the exec")
 		}
-		return partial(), E(op, fmt.Sprintf("executing command in container %s for sandbox %s", c.ID, platformID), err)
+		return partial(), E(op, fmt.Sprintf("executing command in container %s for sandbox %s", c.ID, sandboxID), err)
 	}
 
 	execAttachOpts := client.ExecAttachOptions{
@@ -281,14 +281,14 @@ func (d *DockerRuntime) Exec(ctx context.Context, platformID string, cmd []strin
 		if finalCtx.Err() != nil {
 			return partial(), doneErr("while attaching to the exec")
 		}
-		return partial(), E(op, fmt.Sprintf("attached to exec command in container %s for sandbox %s", c.ID, platformID), err)
+		return partial(), E(op, fmt.Sprintf("attached to exec command in container %s for sandbox %s", c.ID, sandboxID), err)
 	}
 	defer attachResult.Close()
 
 	// abandon reaps the command being given up on and returns what it had
 	// written; without the kill the process keeps running in the container.
 	abandon := func(cause error) (ExecResult, error) {
-		if killErr := d.killExec(ctx, c.ID, platformID, cmd, opts); killErr != nil {
+		if killErr := d.killExec(ctx, c.ID, sandboxID, cmd, opts); killErr != nil {
 			return partial(), errors.Join(cause, killErr)
 		}
 		return partial(), cause
@@ -318,7 +318,7 @@ func (d *DockerRuntime) Exec(ctx context.Context, platformID string, cmd []strin
 	}
 
 	if copyErr != nil {
-		return abandon(E(op, fmt.Sprintf("streaming container stdout and stderr in container %s for sandbox %s", c.ID, platformID), copyErr))
+		return abandon(E(op, fmt.Sprintf("streaming container stdout and stderr in container %s for sandbox %s", c.ID, sandboxID), copyErr))
 	}
 
 	exitCode, err := d.awaitExecExit(finalCtx, execCreateResult.ID)
@@ -326,7 +326,7 @@ func (d *DockerRuntime) Exec(ctx context.Context, platformID string, cmd []strin
 		if finalCtx.Err() != nil {
 			return abandon(doneErr("while awaiting the exit code"))
 		}
-		return abandon(E(op, fmt.Sprintf("inspecting exec status in container %s for sandbox %s", c.ID, platformID), err))
+		return abandon(E(op, fmt.Sprintf("inspecting exec status in container %s for sandbox %s", c.ID, sandboxID), err))
 	}
 
 	logger.DebugContext(ctx, "executed command",
@@ -338,14 +338,14 @@ func (d *DockerRuntime) Exec(ctx context.Context, platformID string, cmd []strin
 	return result(exitCode), nil
 }
 
-func (d *DockerRuntime) WriteFile(ctx context.Context, platformID string, filePath string, content []byte, mode fs.FileMode) error {
+func (d *DockerRuntime) WriteFile(ctx context.Context, sandboxID string, filePath string, content []byte, mode fs.FileMode) error {
 	const op = "runtime.DockerRuntime.WriteFile"
 
-	logger := d.logger.With("sandboxID", platformID, "path", filePath)
+	logger := d.logger.With("sandboxID", sandboxID, "path", filePath)
 	logger.DebugContext(ctx, "writing file", "size", len(content))
 
 	if err := validateWrite(filePath, content); err != nil {
-		return E(op, fmt.Sprintf("writing file %s for sandbox %s", filePath, platformID), err)
+		return E(op, fmt.Sprintf("writing file %s for sandbox %s", filePath, sandboxID), err)
 	}
 
 	finalCtx, cancel := context.WithTimeout(ctx, fileCopyTimeout)
@@ -353,7 +353,7 @@ func (d *DockerRuntime) WriteFile(ctx context.Context, platformID string, filePa
 
 	// Lookup before archiving: a missing sandbox should not pay for a
 	// MaxFileSize-scale allocation it can never use.
-	c, err := d.getContainerByPlatformID(finalCtx, platformID)
+	c, err := d.getContainerBysandboxID(finalCtx, sandboxID)
 	if err != nil {
 		return Wrap(op, "", err)
 	}
@@ -371,34 +371,34 @@ func (d *DockerRuntime) WriteFile(ctx context.Context, platformID string, filePa
 	}
 
 	if _, err := d.Client.CopyToContainer(finalCtx, c.ID, copyToContainerOpts); err != nil {
-		return E(op, fmt.Sprintf("copying to container %s for sandbox %s", c.ID, platformID), err)
+		return E(op, fmt.Sprintf("copying to container %s for sandbox %s", c.ID, sandboxID), err)
 	}
 
 	logger.DebugContext(ctx, "wrote file", "containerID", c.ID)
 	return nil
 }
 
-func (d *DockerRuntime) ReadFile(ctx context.Context, platformID, filePath string) ([]byte, error) {
+func (d *DockerRuntime) ReadFile(ctx context.Context, sandboxID, filePath string) ([]byte, error) {
 	const op = "runtime.DockerRuntime.ReadFile"
 
-	logger := d.logger.With("sandboxID", platformID, "path", filePath)
+	logger := d.logger.With("sandboxID", sandboxID, "path", filePath)
 	logger.DebugContext(ctx, "reading file")
 
 	if err := validateRead(filePath); err != nil {
-		return nil, E(op, fmt.Sprintf("reading file %s for sandbox %s", filePath, platformID), err)
+		return nil, E(op, fmt.Sprintf("reading file %s for sandbox %s", filePath, sandboxID), err)
 	}
 
 	finalCtx, cancel := context.WithTimeout(ctx, fileCopyTimeout)
 	defer cancel()
 
-	c, err := d.getContainerByPlatformID(finalCtx, platformID)
+	c, err := d.getContainerBysandboxID(finalCtx, sandboxID)
 	if err != nil {
 		return nil, Wrap(op, "", err)
 	}
 
 	res, err := d.Client.CopyFromContainer(finalCtx, c.ID, client.CopyFromContainerOptions{SourcePath: filePath})
 	if err != nil {
-		return nil, classifyNotFound(op, fmt.Sprintf("loading tar reader from container %s for sandbox %s", c.ID, platformID), ErrPathNotFound, err)
+		return nil, classifyNotFound(op, fmt.Sprintf("loading tar reader from container %s for sandbox %s", c.ID, sandboxID), ErrPathNotFound, err)
 	}
 	defer res.Content.Close()
 
@@ -409,64 +409,64 @@ func (d *DockerRuntime) ReadFile(ctx context.Context, platformID, filePath strin
 	}
 	fileBytes, err := fileUnarchive(filePath, res.Content)
 	if err != nil {
-		return nil, E(op, fmt.Sprintf("unarchiving tar contents from container %s for sandbox %s", c.ID, platformID), err)
+		return nil, E(op, fmt.Sprintf("unarchiving tar contents from container %s for sandbox %s", c.ID, sandboxID), err)
 	}
 
 	logger.DebugContext(ctx, "read file", "containerID", c.ID)
 	return fileBytes, nil
 }
 
-func (d *DockerRuntime) ListDir(ctx context.Context, platformID, dirPath string) ([]FileInfo, error) {
+func (d *DockerRuntime) ListDir(ctx context.Context, sandboxID, dirPath string) ([]FileInfo, error) {
 	const op = "runtime.DockerRuntime.ListDir"
 
-	logger := d.logger.With("sandboxID", platformID, "path", dirPath)
+	logger := d.logger.With("sandboxID", sandboxID, "path", dirPath)
 	logger.DebugContext(ctx, "listing directory")
 
 	if err := validatePath(dirPath); err != nil {
-		return nil, E(op, fmt.Sprintf("listing directory %s for sandbox %s", dirPath, platformID), err)
+		return nil, E(op, fmt.Sprintf("listing directory %s for sandbox %s", dirPath, sandboxID), err)
 	}
 
 	finalCtx, cancel := context.WithTimeout(ctx, fileCopyTimeout)
 	defer cancel()
 
-	c, err := d.getContainerByPlatformID(finalCtx, platformID)
+	c, err := d.getContainerBysandboxID(finalCtx, sandboxID)
 	if err != nil {
 		return nil, Wrap(op, "", err)
 	}
 
 	res, err := d.Client.CopyFromContainer(finalCtx, c.ID, client.CopyFromContainerOptions{SourcePath: dirPath})
 	if err != nil {
-		return nil, classifyNotFound(op, fmt.Sprintf("loading tar reader from container %s for sandbox %s", c.ID, platformID), ErrPathNotFound, err)
+		return nil, classifyNotFound(op, fmt.Sprintf("loading tar reader from container %s for sandbox %s", c.ID, sandboxID), ErrPathNotFound, err)
 	}
 	defer res.Content.Close()
 
 	fileInfos, err := listDirectoryFromTarStream(dirPath, res.Content)
 	if err != nil {
-		return nil, E(op, fmt.Sprintf("listing directory from container %s for sandbox %s", c.ID, platformID), err)
+		return nil, E(op, fmt.Sprintf("listing directory from container %s for sandbox %s", c.ID, sandboxID), err)
 	}
 
 	logger.DebugContext(ctx, "listed directory", "containerID", c.ID)
 	return fileInfos, nil
 }
 
-func (d *DockerRuntime) RemovePath(ctx context.Context, platformID, filePath string) error {
+func (d *DockerRuntime) RemovePath(ctx context.Context, sandboxID, filePath string) error {
 	const op = "runtime.DockerRuntime.RemovePath"
 
-	logger := d.logger.With("sandboxID", platformID, "path", filePath)
+	logger := d.logger.With("sandboxID", sandboxID, "path", filePath)
 	logger.DebugContext(ctx, "removing path")
 
 	if err := validateRemove(filePath); err != nil {
-		return E(op, fmt.Sprintf("removing path %s for sandbox %s", filePath, platformID), err)
+		return E(op, fmt.Sprintf("removing path %s for sandbox %s", filePath, sandboxID), err)
 	}
 
-	execResult, err := d.Exec(ctx, platformID, []string{"rm", "-rf", filePath}, ExecOpts{})
+	execResult, err := d.Exec(ctx, sandboxID, []string{"rm", "-rf", filePath}, ExecOpts{})
 	if err != nil {
 		return Wrap(op, "", err)
 	}
 
 	if execResult.ExitCode != 0 {
 		logger.WarnContext(ctx, "remove path command failed", "exitCode", execResult.ExitCode)
-		return E(op, fmt.Sprintf("removing path %s for sandbox %s", filePath, platformID),
+		return E(op, fmt.Sprintf("removing path %s for sandbox %s", filePath, sandboxID),
 			fmt.Errorf("rm exited %d: %s", execResult.ExitCode, execResult.Stderr))
 	}
 
@@ -477,7 +477,7 @@ func (d *DockerRuntime) RemovePath(ctx context.Context, platformID, filePath str
 // killExec reaps a command its caller is abandoning. The kill runs on a
 // detached context: every call happens because the exec's context just died,
 // and a kill issued on it would never reach the daemon.
-func (d *DockerRuntime) killExec(ctx context.Context, containerID, platformID string, cmd []string, opts ExecOpts) error {
+func (d *DockerRuntime) killExec(ctx context.Context, containerID, sandboxID string, cmd []string, opts ExecOpts) error {
 	const op = "runtime.DockerRuntime.killExec"
 
 	killCtx, cancelKill := context.WithTimeout(context.WithoutCancel(ctx), execKillTimeout)
@@ -493,23 +493,23 @@ func (d *DockerRuntime) killExec(ctx context.Context, containerID, platformID st
 
 	killExecCreate, err := d.Client.ExecCreate(killCtx, containerID, killExecConfig)
 	if err != nil {
-		return E(op, fmt.Sprintf("creating kill command to stop exec command in container %s for sandbox %s", containerID, platformID), err)
+		return E(op, fmt.Sprintf("creating kill command to stop exec command in container %s for sandbox %s", containerID, sandboxID), err)
 	}
 
 	if _, err := d.Client.ExecStart(killCtx, killExecCreate.ID, client.ExecStartOptions{}); err != nil {
-		return E(op, fmt.Sprintf("starting kill command to stop exec command in container %s for sandbox %s", containerID, platformID), err)
+		return E(op, fmt.Sprintf("starting kill command to stop exec command in container %s for sandbox %s", containerID, sandboxID), err)
 	}
 
 	exitCode, err := d.awaitExecExit(killCtx, killExecCreate.ID)
 	if err != nil {
-		return E(op, fmt.Sprintf("inspecting kill command results to stop exec command in container %s for sandbox %s", containerID, platformID), err)
+		return E(op, fmt.Sprintf("inspecting kill command results to stop exec command in container %s for sandbox %s", containerID, sandboxID), err)
 	}
 	if msg, ok := classifyPkillExit(exitCode); !ok {
-		return E(op, fmt.Sprintf("stopping exec command in container %s for sandbox %s: %s", containerID, platformID, msg), ErrExecNotKilled)
+		return E(op, fmt.Sprintf("stopping exec command in container %s for sandbox %s: %s", containerID, sandboxID, msg), ErrExecNotKilled)
 	}
 
 	d.logger.DebugContext(ctx, "killed abandoned exec command",
-		"sandboxID", platformID,
+		"sandboxID", sandboxID,
 		"containerID", containerID,
 	)
 	return nil
@@ -570,20 +570,20 @@ const cleanupTimeout = 30 * time.Second
 // join reports the leak. The removal runs detached — WithoutCancel plus a fresh
 // deadline — because the caller cancelling mid-create is exactly when there is
 // something to clean up; see docs/reference/runtime-backend-testing.mdx.
-func (d *DockerRuntime) cleanupFailed(ctx context.Context, op, platformID, containerID string, cause error) error {
+func (d *DockerRuntime) cleanupFailed(ctx context.Context, op, sandboxID, containerID string, cause error) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
 
 	if err := d.removeContainer(cleanupCtx, containerID); err != nil {
 		return Wrap(op,
-			fmt.Sprintf("sandbox %s leaked container %s", platformID, containerID),
+			fmt.Sprintf("sandbox %s leaked container %s", sandboxID, containerID),
 			errors.Join(cause, err))
 	}
 
 	// cause is logged upstream; this is the only record that the container was
 	// removed rather than leaked.
 	d.logger.WarnContext(cleanupCtx, "removed container after failed operation",
-		"sandboxID", platformID,
+		"sandboxID", sandboxID,
 		"containerID", containerID,
 	)
 	return cause
@@ -626,15 +626,15 @@ func (d *DockerRuntime) removeContainer(ctx context.Context, containerID string)
 }
 
 // Destroy of an unknown id returns nil; cleanup needs to be retry safe.
-func (d *DockerRuntime) Destroy(ctx context.Context, platformID string) error {
+func (d *DockerRuntime) Destroy(ctx context.Context, sandboxID string) error {
 	const op = "runtime.DockerRuntime.Destroy"
 
-	d.logger.DebugContext(ctx, "destroying sandbox", "sandboxID", platformID)
+	d.logger.DebugContext(ctx, "destroying sandbox", "sandboxID", sandboxID)
 
-	c, err := d.getContainerByPlatformID(ctx, platformID)
+	c, err := d.getContainerBysandboxID(ctx, sandboxID)
 	// Absent is success; a malformed id is a caller bug and still errors below.
 	if errors.Is(err, ErrNotFound) {
-		d.logger.DebugContext(ctx, "sandbox already absent", "sandboxID", platformID)
+		d.logger.DebugContext(ctx, "sandbox already absent", "sandboxID", sandboxID)
 		return nil
 	}
 	if err != nil {
@@ -642,59 +642,59 @@ func (d *DockerRuntime) Destroy(ctx context.Context, platformID string) error {
 	}
 
 	if err := d.removeContainer(ctx, c.ID); err != nil {
-		return Wrap(op, fmt.Sprintf("destroying sandbox %s", platformID), err)
+		return Wrap(op, fmt.Sprintf("destroying sandbox %s", sandboxID), err)
 	}
 
 	d.logger.InfoContext(ctx, "sandbox destroyed",
-		"sandboxID", platformID,
+		"sandboxID", sandboxID,
 		"containerID", c.ID,
 	)
 	return nil
 }
 
-func (d *DockerRuntime) Inspect(ctx context.Context, platformID string) (Info, error) {
+func (d *DockerRuntime) Inspect(ctx context.Context, sandboxID string) (Info, error) {
 	const op = "runtime.DockerRuntime.Inspect"
 
-	d.logger.DebugContext(ctx, "inspecting sandbox", "sandboxID", platformID)
+	d.logger.DebugContext(ctx, "inspecting sandbox", "sandboxID", sandboxID)
 
 	// The list summary already carries the state; ContainerInspect would be a
 	// second round trip to re-read one string.
-	c, err := d.getContainerByPlatformID(ctx, platformID)
+	c, err := d.getContainerBysandboxID(ctx, sandboxID)
 	if err != nil {
 		return Info{}, Wrap(op, "", err)
 	}
 
-	info := NewInfo(platformID, stateFromContainerState(string(c.State)), createdAtFromUnix(c.Created))
+	info := NewInfo(sandboxID, stateFromContainerState(string(c.State)), createdAtFromUnix(c.Created))
 	d.logger.DebugContext(ctx, "inspected sandbox",
-		"sandboxID", platformID,
+		"sandboxID", sandboxID,
 		"containerID", c.ID,
 		"state", info.State,
 	)
 	return info, nil
 }
 
-func (d *DockerRuntime) getContainerByPlatformID(ctx context.Context, platformID string) (container.Summary, error) {
-	const op = "runtime.DockerRuntime.getContainerByPlatformID"
+func (d *DockerRuntime) getContainerBysandboxID(ctx context.Context, sandboxID string) (container.Summary, error) {
+	const op = "runtime.DockerRuntime.getContainerBysandboxID"
 
-	if err := validateSandboxID(platformID); err != nil {
-		return container.Summary{}, E(op, fmt.Sprintf("resolving sandbox %q", platformID), err)
+	if err := validateSandboxID(sandboxID); err != nil {
+		return container.Summary{}, E(op, fmt.Sprintf("resolving sandbox %q", sandboxID), err)
 	}
 
 	result, err := d.Client.ContainerList(ctx, client.ContainerListOptions{
 		All:     true,
-		Filters: labelFilter(managedLabels(platformID)),
+		Filters: labelFilter(managedLabels(sandboxID)),
 	})
 	if err != nil {
-		return container.Summary{}, E(op, fmt.Sprintf("listing containers for sandbox %s", platformID), err)
+		return container.Summary{}, E(op, fmt.Sprintf("listing containers for sandbox %s", sandboxID), err)
 	}
 
 	// The daemon already filtered on both labels; re-checking here keeps a wrong
 	// filter from silently widening the match.
 	for _, c := range result.Items {
-		if id, ok := managedSandboxID(c.Labels); ok && id == platformID {
+		if id, ok := managedSandboxID(c.Labels); ok && id == sandboxID {
 			return c, nil
 		}
 	}
 
-	return container.Summary{}, E(op, fmt.Sprintf("no container labelled %s=%s", labelSandboxID, platformID), ErrNotFound)
+	return container.Summary{}, E(op, fmt.Sprintf("no container labelled %s=%s", labelSandboxID, sandboxID), ErrNotFound)
 }
