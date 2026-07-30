@@ -10,7 +10,11 @@ func (app *application) newRemovePathCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rm ID PATH",
 		Short: "Remove a path inside a sandbox",
-		Args:  cobra.ExactArgs(2),
+		Example: `  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .id)
+
+  quickspin sandbox rm "$ID" /app/config.yaml
+  quickspin sandbox rm "$ID" /app`,
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id, filePath := args[0], args[1]
 			app.logCommand(cmd, "sandboxID", id, "path", filePath)

@@ -10,7 +10,11 @@ func (app *application) newInspectCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "inspect ID",
 		Short: "Inspect a sandbox",
-		Args:  cobra.ExactArgs(1),
+		Example: `  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .id)
+
+  quickspin sandbox inspect "$ID"
+  quickspin sandbox inspect "$ID" -o yaml`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app.logCommand(cmd, "sandboxID", args[0])
 

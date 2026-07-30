@@ -13,7 +13,12 @@ func (app *application) newListCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List sandboxes",
-		Args:  cobra.NoArgs,
+		Example: `  quickspin sandbox list
+  quickspin sandbox list -o yaml
+
+  # Every ID, one per line.
+  quickspin sandbox list -o json | jq -r '.[].id'`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			app.logCommand(cmd)
 

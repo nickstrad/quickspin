@@ -28,7 +28,20 @@ func (app *application) newCopyCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "cp SOURCE DESTINATION",
 		Short: "Copy a file into or out of a sandbox",
-		Args:  cobra.ExactArgs(2),
+		Long: "Copy a file into or out of a sandbox.\n\n" +
+			"Exactly one of SOURCE and DESTINATION is a sandbox path, written\n" +
+			"ID:/absolute/path. The other is a local path. Copying in preserves the\n" +
+			"local file's permission bits.",
+		Example: `  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .id)
+
+  # In, then back out.
+  quickspin sandbox cp ./config.yaml "$ID":/app/config.yaml
+  quickspin sandbox cp "$ID":/app/out.txt ./out.txt
+
+  # Write a file without creating one locally first, using bash/zsh process
+  # substitution. The pipe's mode comes along, so the file lands read-only.
+  quickspin sandbox cp <(echo 'port: 8080') "$ID":/app/config.yaml`,
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			source, sourceInSandbox := parseSandboxPath(args[0])
 			destination, destinationInSandbox := parseSandboxPath(args[1])

@@ -35,8 +35,21 @@ func NewCommand(rt runtime.Runtime, logger *slog.Logger, logLevel *slog.LevelVar
 	}
 
 	cmd := &cobra.Command{
-		Use:           "quickspin",
-		Short:         "Create and manage Quickspin sandboxes",
+		Use:   "quickspin",
+		Short: "Create and manage Quickspin sandboxes",
+		Example: `  # A whole session: create, use, destroy.
+  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .id)
+  quickspin sandbox exec "$ID" -- sh -c 'echo hello'
+  quickspin sandbox destroy "$ID"
+
+  # -o yaml and -o json work on every command that prints a record.
+  quickspin sandbox list -o yaml
+
+  # create and exec also accept their inputs as a YAML or JSON file.
+  quickspin sandbox create -f sandbox.yaml
+
+  # Anything unexpected: ask the CLI what it is doing.
+  quickspin --log-level debug sandbox list`,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		Args:          cobra.NoArgs,

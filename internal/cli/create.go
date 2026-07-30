@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -18,33 +19,103 @@ const (
 	defaultPidsLimit = 256
 )
 
+// createFlags collects what the create flags carry, so resolveCreateSpec can be
+// tested without building a cobra command.
+type createFlags struct {
+	env          []string
+	cpus         float64
+	memory       string
+	pidsLimit    int64
+	allowNetwork bool
+}
+
+// args holds the IMAGE argument, if the caller gave one. An empty argument list
+// is allowed only because the spec file can name the image instead.
+func resolveCreateSpec(
+	args []string,
+	file specFile,
+	flags createFlags,
+	flagSet func(name string) bool,
+) (runtime.Spec, error) {
+	var argImage string
+	if len(args) == 1 {
+		argImage = args[0]
+	}
+	image := resolve("", file.Image, argImage != "", argImage)
+	if image == "" {
+		return runtime.Spec{}, errors.New("no image: pass IMAGE as an argument or set image in the spec file")
+	}
+
+	environment, err := resolveEnvironment(file.Env, flags.env)
+	if err != nil {
+		return runtime.Spec{}, err
+	}
+
+	memory := resolve(defaultMemory, file.Memory, flagSet("memory"), flags.memory)
+	memoryBytes, err := parseMemory(memory)
+	if err != nil {
+		return runtime.Spec{}, err
+	}
+
+	return runtime.NewSpec(
+		image,
+		environment,
+		resolve(defaultCPUs, file.CPUs, flagSet("cpus"), flags.cpus),
+		memoryBytes,
+		resolve(defaultPidsLimit, file.PidsLimit, flagSet("pids-limit"), flags.pidsLimit),
+		resolve(false, file.AllowNetwork, flagSet("allow-network"), flags.allowNetwork),
+	), nil
+}
+
 func (app *application) newCreateCommand() *cobra.Command {
 	var (
-		env          []string
-		cpus         float64
-		memory       string
-		pidsLimit    int64
-		allowNetwork bool
+		specPath string
+		flags    createFlags
 	)
 
 	cmd := &cobra.Command{
-		Use:   "create IMAGE",
+		Use:   "create [IMAGE]",
 		Short: "Create a sandbox",
-		Args:  cobra.ExactArgs(1),
+		Long: "Create a sandbox.\n\n" +
+			"Inputs may come from flags, from a --file spec, or from both. The file may\n" +
+			"be YAML or JSON; its keys match the flag names. Flags win over the file,\n" +
+			"and --env merges into the file's env one variable at a time.",
+		Example: `  # Defaults: 1 CPU, 512m memory, 256 pids, no network.
+  quickspin sandbox create alpine:3.20
+
+  # The same request as a spec file. Keys match the flag names, and the file
+  # may be YAML or JSON. Runnable as written with a bash/zsh heredoc; the EOF
+  # terminator must sit at the start of its own line.
+  quickspin sandbox create -f <(cat <<'EOF'
+image: alpine:3.20
+cpus: 0.5
+memory: 256m
+pids-limit: 64
+allow-network: true
+env:
+  GREETING: hello
+  NAME: world
+EOF
+  )
+
+  # Flags beat the file, so one spec covers many runs.
+  quickspin sandbox create -f sandbox.yaml --memory 1g -e GREETING=hi
+
+  # Keep the ID for the commands that follow.
+  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .id)`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			app.logCommand(cmd, "image", args[0])
-
-			environment, err := parseEnvironment(env)
+			file, err := loadFile[specFile](specPath)
 			if err != nil {
 				return err
 			}
 
-			memoryBytes, err := parseMemory(memory)
+			spec, err := resolveCreateSpec(args, file, flags, cmd.Flags().Changed)
 			if err != nil {
 				return err
 			}
+			app.logCommand(cmd, "image", spec.Image, "specFile", specPath)
 
-			spec := runtime.NewSpec(args[0], environment, cpus, memoryBytes, pidsLimit, allowNetwork)
 			// Validating here rather than letting Create do it turns a bad flag into
 			// a usage error before any daemon work starts. Create validates again;
 			// it cannot trust that every caller is this command.
@@ -60,8 +131,9 @@ func (app *application) newCreateCommand() *cobra.Command {
 			return app.renderer.writeInfo(cmd.OutOrStdout(), info)
 		},
 	}
+	addSpecFileFlag(cmd, &specPath, "read the sandbox spec from a YAML or JSON file (flags override it)")
 	cmd.Flags().StringArrayVarP(
-		&env,
+		&flags.env,
 		"env",
 		"e",
 		nil,
@@ -72,26 +144,26 @@ func (app *application) newCreateCommand() *cobra.Command {
 	// the container's cgroup. The flag names match Docker's so what is learned
 	// here transfers, but the enforcement is the kernel's either way.
 	cmd.Flags().Float64Var(
-		&cpus,
+		&flags.cpus,
 		"cpus",
 		defaultCPUs,
 		"CPU cores the sandbox may use (fractional allowed, e.g. 0.5)",
 	)
 	cmd.Flags().StringVarP(
-		&memory,
+		&flags.memory,
 		"memory",
 		"m",
 		defaultMemory,
 		"memory limit, with an optional b/k/m/g suffix (e.g. 512m)",
 	)
 	cmd.Flags().Int64Var(
-		&pidsLimit,
+		&flags.pidsLimit,
 		"pids-limit",
 		defaultPidsLimit,
 		"maximum number of processes the sandbox may have",
 	)
 	cmd.Flags().BoolVar(
-		&allowNetwork,
+		&flags.allowNetwork,
 		"allow-network",
 		false,
 		"give the sandbox network access (default: no network)",
