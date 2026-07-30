@@ -245,6 +245,45 @@ func TestListDir(t *testing.T) {
 	})
 }
 
+func TestRemovePath(t *testing.T) {
+	rt := liveDocker(t)
+	id := newSandbox(t, rt, liveSpec(t))
+
+	t.Run("removes a directory recursively", func(t *testing.T) {
+		const path = "/work/remove-tree/child.txt"
+		writeOrFatal(t, rt, id, path, []byte("child"), 0o600)
+
+		if err := rt.RemovePath(t.Context(), id, "/work/remove-tree"); err != nil {
+			t.Fatalf("RemovePath(directory) error = %v, want nil", err)
+		}
+		if _, err := rt.ReadFile(t.Context(), id, path); !errors.Is(err, runtime.ErrPathNotFound) {
+			t.Errorf("ReadFile(removed child) error = %v, want ErrPathNotFound", err)
+		}
+	})
+
+	t.Run("passes the path as one argv element and is idempotent", func(t *testing.T) {
+		// If RemovePath interpolates this into `sh -c`, the suffix creates
+		// /pwned. Passed directly to rm as one argv element, it is only a
+		// peculiar but valid filename.
+		const path = "/work/remove-me;touch${IFS}pwned"
+		writeOrFatal(t, rt, id, path, []byte("remove me"), 0o600)
+
+		if err := rt.RemovePath(t.Context(), id, path); err != nil {
+			t.Fatalf("RemovePath(adversarial filename) error = %v, want nil", err)
+		}
+		if _, err := rt.ReadFile(t.Context(), id, path); !errors.Is(err, runtime.ErrPathNotFound) {
+			t.Errorf("ReadFile(removed path) error = %v, want ErrPathNotFound", err)
+		}
+		if _, err := rt.ReadFile(t.Context(), id, "/pwned"); !errors.Is(err, runtime.ErrPathNotFound) {
+			t.Errorf("ReadFile(shell-injection marker) error = %v, want ErrPathNotFound", err)
+		}
+
+		if err := rt.RemovePath(t.Context(), id, path); err != nil {
+			t.Errorf("second RemovePath error = %v, want nil for an absent path", err)
+		}
+	})
+}
+
 func writeOrFatal(t *testing.T, rt *runtime.DockerRuntime, id, path string, content []byte, mode fs.FileMode) {
 	t.Helper()
 

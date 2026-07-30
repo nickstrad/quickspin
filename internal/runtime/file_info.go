@@ -48,6 +48,12 @@ func validateRead(filePath string) error {
 	return nil
 }
 
+// A remove must never target the sandbox root; the shared not-root check is
+// the guard that enforces it.
+func validateRemove(p string) error {
+	return validateRead(p)
+}
+
 func validateWrite(filePath string, content []byte) error {
 	if err := validateRead(filePath); err != nil {
 		return err

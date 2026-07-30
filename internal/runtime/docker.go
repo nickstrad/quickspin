@@ -449,6 +449,31 @@ func (d *DockerRuntime) ListDir(ctx context.Context, platformID, dirPath string)
 	return fileInfos, nil
 }
 
+func (d *DockerRuntime) RemovePath(ctx context.Context, platformID, filePath string) error {
+	const op = "runtime.DockerRuntime.RemovePath"
+
+	logger := d.logger.With("sandboxID", platformID, "path", filePath)
+	logger.DebugContext(ctx, "removing path")
+
+	if err := validateRemove(filePath); err != nil {
+		return E(op, fmt.Sprintf("removing path %s for sandbox %s", filePath, platformID), err)
+	}
+
+	execResult, err := d.Exec(ctx, platformID, []string{"rm", "-rf", filePath}, ExecOpts{})
+	if err != nil {
+		return Wrap(op, "", err)
+	}
+
+	if execResult.ExitCode != 0 {
+		logger.WarnContext(ctx, "remove path command failed", "exitCode", execResult.ExitCode)
+		return E(op, fmt.Sprintf("removing path %s for sandbox %s", filePath, platformID),
+			fmt.Errorf("rm exited %d: %s", execResult.ExitCode, execResult.Stderr))
+	}
+
+	logger.DebugContext(ctx, "removed path")
+	return nil
+}
+
 // killExec reaps a command its caller is abandoning. The kill runs on a
 // detached context: every call happens because the exec's context just died,
 // and a kill issued on it would never reach the daemon.
@@ -604,6 +629,8 @@ func (d *DockerRuntime) removeContainer(ctx context.Context, containerID string)
 func (d *DockerRuntime) Destroy(ctx context.Context, platformID string) error {
 	const op = "runtime.DockerRuntime.Destroy"
 
+	d.logger.DebugContext(ctx, "destroying sandbox", "sandboxID", platformID)
+
 	c, err := d.getContainerByPlatformID(ctx, platformID)
 	// Absent is success; a malformed id is a caller bug and still errors below.
 	if errors.Is(err, ErrNotFound) {
@@ -627,6 +654,8 @@ func (d *DockerRuntime) Destroy(ctx context.Context, platformID string) error {
 
 func (d *DockerRuntime) Inspect(ctx context.Context, platformID string) (Info, error) {
 	const op = "runtime.DockerRuntime.Inspect"
+
+	d.logger.DebugContext(ctx, "inspecting sandbox", "sandboxID", platformID)
 
 	// The list summary already carries the state; ContainerInspect would be a
 	// second round trip to re-read one string.

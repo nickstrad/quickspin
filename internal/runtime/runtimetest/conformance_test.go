@@ -190,6 +190,29 @@ func TestMemRuntimeListDirSharesTheIdentitySentinels(t *testing.T) {
 	}
 }
 
+// RemovePath is idempotent for a missing path, but only after the sandbox
+// identity has been resolved: a missing sandbox must not look like a successful
+// removal inside one.
+func TestMemRuntimeRemovePathSharesTheIdentitySentinels(t *testing.T) {
+	rt := new(memRuntime)
+	ctx := context.Background()
+
+	if err := rt.RemovePath(ctx, "not-a-sandbox-id", "/work/main.go"); !errors.Is(err, runtime.ErrInvalidSandboxID) {
+		t.Errorf("RemovePath(malformed id) error = %v, want ErrInvalidSandboxID", err)
+	}
+	if err := rt.RemovePath(ctx, "sbx_unknown", "/work/main.go"); !errors.Is(err, runtime.ErrNotFound) {
+		t.Errorf("RemovePath(unknown id) error = %v, want ErrNotFound", err)
+	}
+
+	created, err := rt.Create(ctx, runtime.Spec{})
+	if err != nil {
+		t.Fatalf("Create error = %v, want nil", err)
+	}
+	if err := rt.RemovePath(ctx, created.ID, "/work/main.go"); err != nil {
+		t.Errorf("RemovePath(existing sandbox) error = %v, want nil for an idempotent removal", err)
+	}
+}
+
 func TestPollReportsItsLastObservation(t *testing.T) {
 	wantErr := errors.New("daemon unreachable")
 
@@ -402,6 +425,21 @@ func (m *memRuntime) ListDir(_ context.Context, id, _ string) ([]runtime.FileInf
 		return nil, runtime.ErrNotFound
 	}
 	return nil, runtime.ErrPathNotFound
+}
+
+// RemovePath stores nothing, so every removal in a known sandbox is already
+// complete; this matches the real runtime's rm -rf idempotency.
+func (m *memRuntime) RemovePath(_ context.Context, id, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := validateMemID(id); err != nil {
+		return err
+	}
+	if _, ok := m.sandboxes[id]; !ok {
+		return runtime.ErrNotFound
+	}
+	return nil
 }
 
 // validateMemID applies the prefix rule alone. The double deliberately does not

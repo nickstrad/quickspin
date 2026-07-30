@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -897,13 +898,16 @@ type fakeDaemon struct {
 	mu       sync.Mutex
 	recorded []recordedRequest
 
-	pull     http.HandlerFunc
-	create   http.HandlerFunc
-	start    http.HandlerFunc
-	list     http.HandlerFunc
-	remove   http.HandlerFunc
-	copyTo   http.HandlerFunc
-	copyFrom http.HandlerFunc
+	pull        http.HandlerFunc
+	create      http.HandlerFunc
+	start       http.HandlerFunc
+	list        http.HandlerFunc
+	remove      http.HandlerFunc
+	copyTo      http.HandlerFunc
+	copyFrom    http.HandlerFunc
+	execCreate  http.HandlerFunc
+	execStart   http.HandlerFunc
+	execInspect http.HandlerFunc
 }
 
 type recordedRequest struct {
@@ -941,6 +945,13 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 		// a test that has not staged content gets ErrPathNotFound rather than a
 		// decode failure it did not ask about.
 		copyFrom: copyFromOK(t, nil),
+		execCreate: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, map[string]string{"Id": "exec-good"})
+		},
+		execStart: hijackExec(t, nil, nil),
+		execInspect: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, map[string]any{"ID": "exec-good", "Running": false, "ExitCode": 0})
+		},
 	}
 }
 
@@ -965,6 +976,12 @@ func (d *fakeDaemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		d.pull(w, r)
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/containers/create"):
 		d.create(w, r)
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/exec"):
+		d.execCreate(w, r)
+	case r.Method == http.MethodPost && strings.Contains(path, "/exec/") && strings.HasSuffix(path, "/start"):
+		d.execStart(w, r)
+	case r.Method == http.MethodGet && strings.Contains(path, "/exec/") && strings.HasSuffix(path, "/json"):
+		d.execInspect(w, r)
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
 		d.start(w, r)
 	case r.Method == http.MethodGet && strings.HasSuffix(path, "/containers/json"):
@@ -1023,6 +1040,20 @@ func (d *fakeDaemon) lastMatching(method string) recordedRequest {
 	return recordedRequest{}
 }
 
+func (d *fakeDaemon) lastMatchingPath(method, suffix string) recordedRequest {
+	d.t.Helper()
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, r := range slices.Backward(d.recorded) {
+		if r.method == method && strings.HasSuffix(r.path, suffix) {
+			return r
+		}
+	}
+	d.t.Fatalf("no %s request ending in %q among %v", method, suffix, d.recorded)
+	return recordedRequest{}
+}
+
 // dockerError answers the way the daemon does, so the Moby client's own decoder
 // classifies it: a 404 becomes an errdefs not-found without this test knowing
 // how that mapping works.
@@ -1037,6 +1068,50 @@ func dockerError(status int, message string) http.HandlerFunc {
 func copyFromOK(t *testing.T, archive []byte) http.HandlerFunc {
 	t.Helper()
 	return copyFromStat(t, container.PathStat{}, archive)
+}
+
+func hijackExec(t *testing.T, stdout, stderr []byte) http.HandlerFunc {
+	t.Helper()
+
+	return func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack exec connection: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		if _, err := fmt.Fprint(conn,
+			"HTTP/1.1 101 UPGRADED\r\n"+
+				"Content-Type: application/vnd.docker.raw-stream\r\n"+
+				"Connection: Upgrade\r\n"+
+				"Upgrade: tcp\r\n\r\n"); err != nil {
+			t.Errorf("write exec upgrade response: %v", err)
+			return
+		}
+		if len(stdout) != 0 {
+			if err := writeExecStream(conn, 1, stdout); err != nil {
+				t.Errorf("write exec stdout: %v", err)
+				return
+			}
+		}
+		if len(stderr) != 0 {
+			if err := writeExecStream(conn, 2, stderr); err != nil {
+				t.Errorf("write exec stderr: %v", err)
+			}
+		}
+	}
+}
+
+func writeExecStream(w io.Writer, stream byte, content []byte) error {
+	header := make([]byte, 8)
+	header[0] = stream
+	binary.BigEndian.PutUint32(header[4:], uint32(len(content)))
+	if _, err := w.Write(header); err != nil {
+		return err
+	}
+	_, err := w.Write(content)
+	return err
 }
 
 // copyFromStat answers the way the daemon does. The stat header is not optional
@@ -1091,7 +1166,10 @@ func newDockerTestRuntime(
 	// /version round trip per test and put the SDK's handshake into the recorded
 	// request list.
 	dockerClient, err := client.New(
-		client.WithHost(server.URL),
+		// ExecAttach dials the configured scheme as a network. The ordinary
+		// HTTP endpoints tolerate http:// here, but a hijacked exec connection
+		// requires Docker's tcp:// host form.
+		client.WithHost("tcp://"+server.Listener.Addr().String()),
 		client.WithAPIVersion(client.MaxAPIVersion),
 	)
 	if err != nil {

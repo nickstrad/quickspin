@@ -17,7 +17,7 @@ type Runtime interface {
 	WriteFile(ctx context.Context, platformID, path string, content []byte, mode fs.FileMode) error
 	ReadFile(ctx context.Context, platformID, path string) ([]byte, error)
 	ListDir(ctx context.Context, platformID, path string) ([]FileInfo, error)
-	// RemovePath(ctx context.Context, platformID, path string) error
+	RemovePath(ctx context.Context, platformID, path string) error
 }
 
 type Spec struct {
