@@ -28,15 +28,21 @@ func (app *application) newListCommand() *cobra.Command {
 }
 
 func sortedInfos(infos []runtime.Info) []runtime.Info {
-	sorted := slices.Clone(infos)
-	slices.SortFunc(sorted, func(a, b runtime.Info) int {
+	return sortedCopy(infos, func(a, b runtime.Info) int {
 		if created := a.CreatedAt.Compare(b.CreatedAt); created != 0 {
 			return created
 		}
 		return strings.Compare(a.ID, b.ID)
 	})
+}
+
+// Returns an empty (never nil) slice so JSON output renders [] instead of null,
+// and never sorts the runtime-owned slice in place.
+func sortedCopy[T any](items []T, cmp func(a, b T) int) []T {
+	sorted := slices.Clone(items)
+	slices.SortFunc(sorted, cmp)
 	if sorted == nil {
-		return []runtime.Info{}
+		return []T{}
 	}
 	return sorted
 }

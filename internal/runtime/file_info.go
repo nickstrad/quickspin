@@ -7,10 +7,10 @@ import (
 )
 
 type FileInfo struct {
-	Path  string
-	Size  int64
-	Mode  fs.FileMode
-	IsDir bool
+	Path  string      `json:"path" yaml:"path"`
+	Size  int64       `json:"size" yaml:"size"`
+	Mode  fs.FileMode `json:"mode" yaml:"mode"`
+	IsDir bool        `json:"is_dir" yaml:"is_dir"`
 }
 
 const MaxFileSize = 10 << 20 // 10 MiB

@@ -29,6 +29,10 @@ func (r renderer) writeDestroyResult(w io.Writer, result destroyResult) error {
 	})
 }
 
+func (r renderer) writeFileInfos(w io.Writer, infos []runtime.FileInfo) error {
+	return r.write(w, infos, fileInfoTableRows(infos))
+}
+
 func (r renderer) write(w io.Writer, value any, tableRows [][]string) error {
 	switch r.format {
 	case outputTable:
@@ -50,6 +54,20 @@ func infoTableRows(infos []runtime.Info) [][]string {
 			info.ID,
 			string(info.State),
 			info.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	return rows
+}
+
+func fileInfoTableRows(infos []runtime.FileInfo) [][]string {
+	rows := make([][]string, 1, len(infos)+1)
+	rows[0] = []string{"PATH", "SIZE", "MODE", "IS DIR"}
+	for _, info := range infos {
+		rows = append(rows, []string{
+			info.Path,
+			fmt.Sprintf("%d", info.Size),
+			info.Mode.String(),
+			fmt.Sprintf("%t", info.IsDir),
 		})
 	}
 	return rows

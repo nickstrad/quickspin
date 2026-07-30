@@ -5,7 +5,7 @@ import "github.com/spf13/cobra"
 func (app *application) newSandboxCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sandbox",
-		Short: "Manage sandbox lifecycles",
+		Short: "Manage sandboxes",
 		Args:  cobra.NoArgs,
 		RunE:  showHelp,
 	}
@@ -14,6 +14,9 @@ func (app *application) newSandboxCommand() *cobra.Command {
 		app.newListCommand(),
 		app.newInspectCommand(),
 		app.newExecCommand(),
+		app.newCopyCommand(),
+		app.newListPathCommand(),
+		app.newRemovePathCommand(),
 		app.newDestroyCommand(),
 	)
 
