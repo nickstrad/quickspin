@@ -21,12 +21,12 @@ func TestNewSandboxIDHasPrefixAndIsUnique(t *testing.T) {
 
 	seen := make(map[string]struct{}, n)
 	for range n {
-		id := newSandboxID()
+		id := NewSandboxID()
 		if !strings.HasPrefix(id, sandboxIDPrefix) {
-			t.Fatalf("newSandboxID() = %q, want prefix %q", id, sandboxIDPrefix)
+			t.Fatalf("NewSandboxID() = %q, want prefix %q", id, sandboxIDPrefix)
 		}
 		if _, dup := seen[id]; dup {
-			t.Fatalf("newSandboxID() returned %q twice within %d calls", id, n)
+			t.Fatalf("NewSandboxID() returned %q twice within %d calls", id, n)
 		}
 		seen[id] = struct{}{}
 	}
@@ -36,12 +36,12 @@ func TestNewSandboxIDIsNeverEmpty(t *testing.T) {
 	// A dropped suffix names every sandbox "sbx_", which makes one label filter
 	// match every container this package owns.
 	for range 100 {
-		id := newSandboxID()
+		id := NewSandboxID()
 		if id == "" {
-			t.Fatal("newSandboxID() = \"\", want a non-empty id")
+			t.Fatal("NewSandboxID() = \"\", want a non-empty id")
 		}
 		if suffix := strings.TrimPrefix(id, sandboxIDPrefix); suffix == "" {
-			t.Fatalf("newSandboxID() = %q, want a non-empty suffix after %q", id, sandboxIDPrefix)
+			t.Fatalf("NewSandboxID() = %q, want a non-empty suffix after %q", id, sandboxIDPrefix)
 		}
 	}
 }
@@ -50,7 +50,7 @@ func TestNewSandboxIDPassesItsOwnValidator(t *testing.T) {
 	// A generator and validator that disagree means every Create mints an id its
 	// own Inspect rejects.
 	for range 100 {
-		id := newSandboxID()
+		id := NewSandboxID()
 		if err := validateSandboxID(id); err != nil {
 			t.Fatalf("validateSandboxID(%q) = %v, want nil for a freshly generated id", id, err)
 		}
@@ -97,7 +97,7 @@ func TestValidateSandboxID(t *testing.T) {
 
 func TestValidateSandboxIDAcceptsOnlyTheCanonicalUUIDForm(t *testing.T) {
 	// Every id below passes a bare uuid.Parse and none can be produced by
-	// newSandboxID. The canonical round trip is what rejects them.
+	// NewSandboxID. The canonical round trip is what rejects them.
 	tests := []struct {
 		name string
 		id   string
@@ -114,7 +114,7 @@ func TestValidateSandboxIDAcceptsOnlyTheCanonicalUUIDForm(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := validateSandboxID(tt.id); err == nil {
-				t.Errorf("validateSandboxID(%q) = nil, want an error: %s, so newSandboxID cannot produce it", tt.id, tt.why)
+				t.Errorf("validateSandboxID(%q) = nil, want an error: %s, so NewSandboxID cannot produce it", tt.id, tt.why)
 			}
 		})
 	}

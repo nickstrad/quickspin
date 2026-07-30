@@ -163,7 +163,7 @@ func (d *DockerRuntime) Create(ctx context.Context, spec Spec) (Info, error) {
 
 	// Configs are built before the pull so an invalid spec fails without a
 	// registry round trip.
-	sandboxID := newSandboxID()
+	sandboxID := NewSandboxID()
 	containerConfig, hostConfig, err := newContainerConfigs(spec, sandboxID)
 	if err != nil {
 		return Info{}, Wrap(op, "", err)

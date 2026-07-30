@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Valid ids in the format newSandboxID produces. Tests use these rather than
+// Valid ids in the format NewSandboxID produces. Tests use these rather than
 // inventing one, so tightening validateSandboxID cannot leave a hand-written
 // fixture behind as a false failure.
 const (
@@ -169,7 +169,7 @@ func TestSandboxIDFromLabels(t *testing.T) {
 func TestManagedLabelsRoundTripsThroughSandboxIDFromLabels(t *testing.T) {
 	// Pins the key in both directions: renaming it in the writer only would
 	// leave every container unreadable to its own reader.
-	id := newSandboxID()
+	id := NewSandboxID()
 
 	got, err := sandboxIDFromLabels(managedLabels(id))
 	if err != nil {
@@ -181,7 +181,7 @@ func TestManagedLabelsRoundTripsThroughSandboxIDFromLabels(t *testing.T) {
 }
 
 func TestManagedSandboxID(t *testing.T) {
-	id := newSandboxID()
+	id := NewSandboxID()
 
 	tests := []struct {
 		name   string
@@ -231,7 +231,7 @@ func TestManagedMarkerLabelsMatchesManagedLabels(t *testing.T) {
 	// The filter used by List must agree with what Create writes, or List sees
 	// nothing it created.
 	marker := managedMarkerLabels()
-	written := managedLabels(newSandboxID())
+	written := managedLabels(NewSandboxID())
 
 	for k, v := range marker {
 		if written[k] != v {

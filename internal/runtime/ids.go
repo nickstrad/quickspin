@@ -8,9 +8,9 @@ import (
 
 const sandboxIDPrefix = "sbx_"
 
-func newSandboxID() string { return sandboxIDPrefix + uuid.NewString() }
+func NewSandboxID() string { return sandboxIDPrefix + uuid.NewString() }
 
-// validateSandboxID rejects anything newSandboxID could not have produced, so a
+// validateSandboxID rejects anything NewSandboxID could not have produced, so a
 // malformed id can answer 400 where a missing one answers 404.
 func validateSandboxID(id string) error {
 	uid, ok := strings.CutPrefix(id, sandboxIDPrefix)

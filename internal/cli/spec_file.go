@@ -11,21 +11,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// specFile is the file form of a create request. Every field is a pointer (or a
-// nil-able map) so an absent key and an explicit zero stay distinguishable:
-// `cpus: 0` has to reach Validate and be rejected, exactly as `--cpus 0` is,
-// rather than quietly picking up the default.
-//
-// Keys match the create flag names so there is one spelling to learn.
-type specFile struct {
-	Image        *string           `yaml:"image"`
-	Env          map[string]string `yaml:"env"`
-	CPUs         *float64          `yaml:"cpus"`
-	Memory       *string           `yaml:"memory"`
-	PidsLimit    *int64            `yaml:"pids-limit"`
-	AllowNetwork *bool             `yaml:"allow-network"`
-}
-
 // execFile is the file form of an exec request. Pointers for the same reason as
 // specFile, and Timeout is a string so it can hold a Go duration like "5s"
 // rather than a bare count of some unstated unit.

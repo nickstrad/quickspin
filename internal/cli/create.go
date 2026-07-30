@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
+	"github.com/nickstrad/quickspin/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -33,7 +34,7 @@ type createFlags struct {
 // is allowed only because the spec file can name the image instead.
 func resolveCreateSpec(
 	args []string,
-	file specFile,
+	file store.SpecFile,
 	flags createFlags,
 	flagSet func(name string) bool,
 ) (runtime.Spec, error) {
@@ -105,7 +106,7 @@ EOF
   ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .id)`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			file, err := loadFile[specFile](specPath)
+			file, err := loadFile[store.SpecFile](specPath)
 			if err != nil {
 				return err
 			}
