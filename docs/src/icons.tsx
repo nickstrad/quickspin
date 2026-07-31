@@ -52,15 +52,6 @@ export function ArrowIcon(props: IconProps) {
   );
 }
 
-export function FileIcon(props: IconProps) {
-  return (
-    <Icon {...props}>
-      <path d="M6 3h8l4 4v14H6z" />
-      <path d="M14 3v5h5" />
-    </Icon>
-  );
-}
-
 export function CheckIcon(props: IconProps) {
   return (
     <Icon {...props}>

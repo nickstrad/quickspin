@@ -9,11 +9,10 @@ import {
   useRef,
   useState,
 } from "react";
-import { ArrowIcon, CheckIcon, CloseIcon, FileIcon, MenuIcon, SearchIcon } from "./icons";
+import { ArrowIcon, CheckIcon, CloseIcon, MenuIcon, SearchIcon } from "./icons";
 import {
   documents,
   resolveDocument,
-  sections,
   type ReaderDocument,
   type Roadmap,
 } from "./documents";
@@ -52,7 +51,6 @@ function currentRoute(): string | null {
 }
 
 function hrefFor(document: ReaderDocument): string {
-  if (!document.route) return window.location.pathname;
   return `${window.location.pathname}?doc=${encodeURIComponent(document.route)}`;
 }
 
@@ -111,7 +109,7 @@ const Sidebar = memo(function Sidebar({
           </button>
           <div>
             <p>Quickspin</p>
-            <span>Field notes / 01</span>
+            <span>Learning roadmap</span>
           </div>
           <button className="sidebar__close" onClick={onClose} aria-label="Close navigation">
             <CloseIcon />
@@ -124,46 +122,39 @@ const Sidebar = memo(function Sidebar({
             ref={searchRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search the field notes"
+            placeholder="Search the roadmap"
             aria-label="Search documentation"
           />
           <kbd>/</kbd>
         </label>
 
-        <nav className="document-nav" aria-label="Documentation">
-          {sections.map((section) => {
-            const sectionDocuments = filtered.filter((document) => document.section === section);
-            if (!sectionDocuments.length) return null;
-
-            return (
-              <section key={section} className="nav-section">
-                <div className="nav-section__heading">
-                  <span>{section}</span>
-                  <small>{sectionDocuments.length.toString().padStart(2, "0")}</small>
-                </div>
-                {sectionDocuments.map((document) => (
-                  <button
-                    key={document.path}
-                    className={`nav-item ${
-                      document.path === active.path ? "nav-item--active" : ""
-                    }`}
-                    onClick={() => onNavigate(document)}
-                  >
-                    <span className="nav-item__number">
-                      {document.roadmap?.number ?? <FileIcon />}
+        <nav className="document-nav" aria-label="Roadmap">
+          {filtered.length ? (
+            <section className="nav-section">
+              <div className="nav-section__heading">
+                <span>Roadmap</span>
+                <small>{filtered.length.toString().padStart(2, "0")}</small>
+              </div>
+              {filtered.map((document) => (
+                <button
+                  key={document.path}
+                  className={`nav-item ${
+                    document.path === active.path ? "nav-item--active" : ""
+                  }`}
+                  onClick={() => onNavigate(document)}
+                >
+                  <span className="nav-item__number">{document.roadmap.number}</span>
+                  <span>{document.navTitle}</span>
+                  {document.roadmap.status === "completed" ? (
+                    <span className="nav-item__complete" title="Completed roadmap">
+                      <CheckIcon />
+                      <span className="sr-only">Completed roadmap</span>
                     </span>
-                    <span>{document.navTitle}</span>
-                    {document.roadmap?.status === "completed" ? (
-                      <span className="nav-item__complete" title="Completed roadmap">
-                        <CheckIcon />
-                        <span className="sr-only">Completed roadmap</span>
-                      </span>
-                    ) : null}
-                  </button>
-                ))}
-              </section>
-            );
-          })}
+                  ) : null}
+                </button>
+              ))}
+            </section>
+          ) : null}
           {filtered.length === 0 ? (
             <div className="search-empty">
               <span>Nothing indexed under</span>
@@ -270,7 +261,7 @@ function App() {
 
   const ActiveDocument = active.Component;
   const categoryLabel =
-    active.roadmap?.status === "completed" ? "Completed roadmap" : active.section;
+    active.roadmap.status === "completed" ? "Completed roadmap" : "Roadmap";
 
   return (
     <div className="app-shell">
@@ -290,7 +281,7 @@ function App() {
         <button onClick={() => setMenuOpen(true)} aria-label="Open navigation">
           <MenuIcon />
         </button>
-        <span>Quickspin / field notes</span>
+        <span>Quickspin / roadmap</span>
         <span className="mobile-header__page">{String(activeIndex + 1).padStart(2, "0")}</span>
       </header>
 
@@ -302,7 +293,7 @@ function App() {
             <span>{active.path}</span>
           </div>
 
-          {active.roadmap ? <RoadmapStatus roadmap={active.roadmap} /> : null}
+          <RoadmapStatus roadmap={active.roadmap} />
 
           <div className="document-body" onClick={handleDocumentClick}>
             <MDXProvider components={mdxComponents}>
@@ -310,7 +301,7 @@ function App() {
                 fallback={
                   <div className="document-loading">
                     <span />
-                    Preparing field notes…
+                    Preparing roadmap…
                   </div>
                 }
               >

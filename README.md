@@ -16,7 +16,8 @@ pass, so container and microVM isolation sit behind the same API.
 > files to and from, and destroying sandboxes. Sandboxes have cgroup v2
 > CPU/memory/pids limits and network off by default; file operations enforce
 > absolute-path validation and bounded transfers. The guest agent, SDKs, and the
-> Firecracker/Kata backends are future roadmap work. See [Roadmap](#roadmap) below.
+> Firecracker/Kata backends are future roadmap work. See the
+> [learning roadmaps](docs/plans/) for the intended sequence.
 
 ## Architecture
 
@@ -335,8 +336,8 @@ make clean              # remove bin/
 
 ### Documentation
 
-All project documentation lives in [`docs/`](docs/) as MDX, starting at
-[`docs/index.mdx`](docs/index.mdx). A local reader renders it with search and navigation:
+The human-facing docs are the learning roadmaps in [`docs/plans/`](docs/plans/). A local
+reader renders the open and completed roadmaps with search and navigation:
 
 ```sh
 make docs         # dev server
@@ -344,8 +345,9 @@ make docs-build   # type-check and produce a static build
 ```
 
 `docs/plans/open/` holds open roadmap work; `docs/plans/closed/` is completed roadmap
-history; `docs/reference/` is forward-looking architecture and design notes, not a spec
-for current behavior.
+history. [`docs/index.mdx`](docs/index.mdx), [`docs/reader-guide.mdx`](docs/reader-guide.mdx),
+and `docs/reference/` are agent-oriented authoring and architecture material, so the
+reader does not include them in its navigation or search.
 
 ## Tests
 
@@ -359,8 +361,23 @@ with no Docker installed at all; the live suite reports itself skipped.
 ```sh
 make test                                        # everything
 go test ./internal/runtime/                      # one package
+go test ./internal/runtime/ -v                   # include test and subtest names
 go test ./internal/runtime/ -run TestEnvToArgs -v # one test
+go test ./internal/runtime/ -run 'TestEnvToArgs/sorted' -v # one subtest
 go test ./internal/runtime/ -count=1             # bypass the result cache
+```
+
+`-run` accepts a regular expression, and `/` descends into `t.Run` subtests. For a compact
+list of failures from a large table-driven suite:
+
+```sh
+go test -json ./internal/runtime/ | jq -r 'select(.Action == "fail") | .Test // empty'
+```
+
+For an optional watch loop, install `entr` and run:
+
+```sh
+ls internal/runtime/*.go | entr -c go test ./internal/runtime/
 ```
 
 **Live Docker (`make test-docker`)** — the suite that needs a real daemon. It owns a
@@ -385,21 +402,3 @@ implementation must satisfy. Both `DockerRuntime` and the in-memory `Fake` run a
 it, which is how a future Firecracker or Kata backend proves it behaves the same.
 Background: [`docs/reference/runtime-backend-testing.mdx`](docs/reference/runtime-backend-testing.mdx)
 and [`docs/reference/docker-test-architecture-explained.mdx`](docs/reference/docker-test-architecture-explained.mdx).
-
-## Roadmap
-
-The documents in [`docs/plans/open/`](docs/plans/open/) sequence the platform roadmap.
-Abbreviated:
-
-| Roadmap | Track |
-| --- | --- |
-| 01–05 | Lima lab environment, Docker runtime, exec and filesystem APIs, HTTP control plane *(done)* |
-| 06–08 | reconciler and leases, in-sandbox guest agent, auth/tenancy/quotas |
-| 09–12 | TypeScript and Python SDKs, snapshots, an agent-harness capstone demo |
-| 15–18 | production: Postgres store, live Docker-backed host, control-plane/worker split with heartbeats and a failure-injection suite, fleet provisioning and observability |
-| 13–14 | isolation internals: a minimal container runtime on raw kernel primitives; Firecracker microVMs as a second backend, ending with the prod cutover |
-| 19–21 | compute pools, EC2/DigitalOcean providers, Kubernetes + Kata as a third backend |
-| 22–23 | agent workflows: git-capable sandboxes with secret injection, per-agent storage |
-
-Each roadmap document states its own dependencies; existing in `open/` does not mean it
-is being worked on.

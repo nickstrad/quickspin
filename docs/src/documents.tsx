@@ -1,35 +1,22 @@
 import { lazy, type ComponentType, type LazyExoticComponent } from "react";
-import ReactMarkdown from "react-markdown";
-import rehypeHighlight from "rehype-highlight";
-import rehypeSlug from "rehype-slug";
-import remarkGfm from "remark-gfm";
-import type { Components } from "react-markdown";
-import { mdxComponents, slugify } from "./mdx-components";
+import { slugify } from "./mdx-components";
 
 type MDXModule = {
   default: ComponentType;
 };
 
 const compiledModules = import.meta.glob<MDXModule>(
-  ["../*.mdx", "../plans/open/*.mdx", "../plans/closed/*.mdx", "../reference/*.mdx"],
+  ["../plans/open/*.mdx", "../plans/closed/*.mdx"],
 );
 
 const rawModules = import.meta.glob<string>(
-  ["../*.mdx", "../plans/open/*.mdx", "../plans/closed/*.mdx", "../reference/*.mdx"],
+  ["../plans/open/*.mdx", "../plans/closed/*.mdx"],
   {
     eager: true,
     import: "default",
     query: "?raw",
   },
 );
-
-const instructionSource = import.meta.glob<string>("../plans/AGENTS.md", {
-  eager: true,
-  import: "default",
-  query: "?raw",
-});
-
-export type DocumentSection = "Start here" | "Roadmap" | "Reference";
 
 export type DocumentHeading = {
   depth: number;
@@ -47,9 +34,8 @@ export type ReaderDocument = {
   title: string;
   /** Title with any leading roadmap number ("01 — ") stripped, for compact nav labels. */
   navTitle: string;
-  roadmap?: Roadmap;
+  roadmap: Roadmap;
   description: string;
-  section: DocumentSection;
   order: number;
   readingMinutes: number;
   headings: DocumentHeading[];
@@ -64,22 +50,14 @@ function filePath(modulePath: string): string {
 }
 
 function routeFor(path: string): string {
-  if (path === "index.mdx") {
-    return "";
-  }
-
   return path.replace(/\.(md|mdx)$/, "");
 }
 
-function sectionFor(path: string): DocumentSection {
-  if (path.startsWith("plans/open/") || path.startsWith("plans/closed/")) return "Roadmap";
-  if (path.startsWith("reference/")) return "Reference";
-  return "Start here";
-}
-
-function roadmapFor(path: string, source: string): Roadmap | undefined {
+function roadmapFor(path: string, source: string): Roadmap {
   const number = path.match(/^plans\/(?:open|closed)\/(\d+)-/)?.[1];
-  if (!number) return undefined;
+  if (!number) {
+    throw new Error(`${path} does not follow the numbered roadmap filename convention`);
+  }
 
   if (path.startsWith("plans/open/")) return { number, status: "future" };
 
@@ -160,14 +138,10 @@ function orderFor(path: string): number {
   return Number(fileName.match(/^(\d+)/)?.[1] ?? 999);
 }
 
-// Builds the full ReaderDocument from a file's raw source. The only per-document
-// differences are how the component is produced and, for the agent doc, its fixed
-// placement — everything else is derived uniformly here so new fields cannot drift.
 function buildDocument(
   path: string,
   source: string,
   Component: ReaderDocument["Component"],
-  overrides?: Partial<Pick<ReaderDocument, "section" | "order">>,
 ): ReaderDocument {
   const title = titleFor(path, source);
   const description = descriptionFor(source);
@@ -179,14 +153,12 @@ function buildDocument(
     navTitle: title.replace(/^\d+\s+[—-]\s+/, ""),
     roadmap: roadmapFor(path, source),
     description,
-    section: sectionFor(path),
     order: orderFor(path),
     readingMinutes: readingMinutesFor(source),
     headings: headingsFor(source),
     source,
     searchText: `${title} ${description} ${source}`.toLowerCase(),
     Component,
-    ...overrides,
   };
 }
 
@@ -195,53 +167,12 @@ const mdxDocuments: ReaderDocument[] = Object.entries(compiledModules).map(
     buildDocument(filePath(modulePath), rawModules[modulePath] ?? "", lazy(loadModule)),
 );
 
-const agentEntry = Object.entries(instructionSource)[0];
-const agentDocument: ReaderDocument[] = agentEntry
-  ? (() => {
-      const [modulePath, source] = agentEntry;
-      const MarkdownInstructions = () => (
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeSlug, rehypeHighlight]}
-          components={mdxComponents as Components}
-        >
-          {source}
-        </ReactMarkdown>
-      );
-
-      return [
-        buildDocument(filePath(modulePath), source, MarkdownInstructions, {
-          section: "Start here",
-          order: 2,
-        }),
-      ];
-    })()
-  : [];
-
-const sectionOrder: Record<DocumentSection, number> = {
-  "Start here": 0,
-  Roadmap: 1,
-  Reference: 2,
-};
-
-// The single source of truth for section identity and display order. The sidebar
-// renders sections in this order, so it must not maintain its own copy.
-export const sections = (Object.keys(sectionOrder) as DocumentSection[]).sort(
-  (a, b) => sectionOrder[a] - sectionOrder[b],
-);
-
-export const documents = [...mdxDocuments, ...agentDocument].sort((a, b) => {
-  const sectionDifference = sectionOrder[a.section] - sectionOrder[b.section];
-  if (sectionDifference !== 0) return sectionDifference;
+export const documents = mdxDocuments.sort((a, b) => {
   if (a.order !== b.order) return a.order - b.order;
   return a.title.localeCompare(b.title, undefined, { numeric: true });
 });
 
 export function resolveDocument(route: string | null): ReaderDocument {
   const normalized = (route ?? "").replace(/^\/|\/$/g, "").replace(/\.(md|mdx)$/, "");
-  return (
-    documents.find((document) => document.route === normalized) ??
-    documents.find((document) => document.route === "") ??
-    documents[0]
-  );
+  return documents.find((document) => document.route === normalized) ?? documents[0];
 }

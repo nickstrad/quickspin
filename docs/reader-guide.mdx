@@ -1,9 +1,10 @@
 # Reader and MDX component guide
 
-The documentation reader treats every `.mdx` file in the docs root, `plans/open/`,
-`plans/closed/`, and `reference/` as a navigable document. Ordinary Markdown works
-unchanged. MDX components are available when a concept benefits from more structure or
-progressive disclosure.
+The documentation reader treats the roadmap files in `plans/open/` and `plans/closed/`
+as navigable documents. The docs index, this component guide, roadmap authoring
+instructions, and reference notes support agents working on the roadmap but are not
+shown in the human-facing reader. Ordinary Markdown works unchanged. MDX components are
+available when a concept benefits from more structure or progressive disclosure.
 
 The reader is a TypeScript React application. Its own components and every generated
 shadcn/ui component use `.tsx`, and `make docs-build` runs the TypeScript compiler before
