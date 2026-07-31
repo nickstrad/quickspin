@@ -2,6 +2,8 @@
 
 Depends on: 01.
 
+{/* Completed 2026-07-30. Current code and tests are authoritative where delivery differs from this roadmap. */}
+
 ## Summary
 
 Build the first real Go package: `internal/runtime`, which owns the create → inspect →
@@ -9,8 +11,8 @@ destroy lifecycle of a single sandbox backed by a Docker container. Exercise it 
 a `quickspin sandbox` CLI subcommand, not HTTP. Everything later (exec, files, the
 control plane, other backends) hangs off the interface defined here.
 
-<KeyPoint label="Why this plan matters">
-  This is the spine interface of the whole project. Every later plan either
+<KeyPoint label="Why this roadmap matters">
+  This is the spine interface of the whole project. Every later roadmap either
   calls it (control plane, CLI, SDKs) or re-implements it (Firecracker). Getting
   the contract right here is worth more than getting the Docker code pretty.
 </KeyPoint>
@@ -21,7 +23,7 @@ Every platform has this layer. In E2B it's the code behind `Sandbox.create()`; i
 Daytona, the workspace provisioner; in Kubernetes, the kubelet's container-runtime
 calls. The industry pattern worth copying is the **backend-neutral interface**: the
 caller speaks in sandbox specs and sandbox IDs, never in Docker terms. That is what
-lets plan 14 slide Firecracker underneath without rewriting the control plane — exactly
+lets roadmap 14 slide Firecracker underneath without rewriting the control plane — exactly
 how Daytona supports multiple providers and how Kubernetes swapped Docker for
 containerd behind the CRI.
 
@@ -185,7 +187,7 @@ live in a database row and appear in URLs. The container ID is a _backend detail
 changes if the sandbox is ever recreated on another backend or another host. The label
 `quickspin.id=sbx_...` is the join between the two worlds, written at create time so
 the mapping survives even if your process crashes: any future process can list
-containers by label and rediscover what it owns. That rediscovery is the seed of plan
+containers by label and rediscover what it owns. That rediscovery is the seed of roadmap
 06's reconciler.
 
 <Mermaid
@@ -204,7 +206,7 @@ flowchart LR
 />
 
 <StudyPrompt question="Why not just use the container ID as the sandbox ID?">
-  Ask what happens in plan 14 when the same sandbox is backed by a Firecracker
+  Ask what happens in roadmap 14 when the same sandbox is backed by a Firecracker
   microVM — there is no container ID. Any identity minted by the backend ties
   every caller to that backend. Identity that must outlive a backend has to be
   minted above it, which is why quickspin generates its own IDs and demotes the
@@ -238,7 +240,7 @@ You implement this interface; it is the spine of the whole project:
 ```go
 package runtime
 
-// Spec describes what to create. Fields expand in later plans.
+// Spec describes what to create. Fields expand in later roadmaps.
 type Spec struct {
     Image string
     Env   map[string]string
@@ -279,7 +281,7 @@ type Runtime interface {
   Deleting an absent thing has succeeded.
 </Callout>
 
-Decisions the plan commits to:
+Decisions the roadmap commits to:
 
 - Quickspin generates its own sandbox IDs (e.g. `sbx_` + random suffix) and stores them
   on containers as labels (`quickspin.id=...`, `quickspin.managed=true`). Container IDs
@@ -293,10 +295,10 @@ Decisions the plan commits to:
   they are the first entries in what will become each package's decision layer.
 - `NewDockerRuntime(client, logger)` takes a `*slog.Logger`; no package-level logging.
 - Containers run a long-lived no-op entrypoint (e.g. `sleep infinity`); commands come
-  later (plan 03).
+  later (roadmap 03).
 - CLI surface: `quickspin sandbox create|list|inspect|destroy`.
 
-<Figure caption="The states a sandbox record can be in from this package's point of view. Plan 05 will widen this into the control-plane state machine.">
+<Figure caption="The states a sandbox record can be in from this package's point of view. Roadmap 05 will widen this into the control-plane state machine.">
   <svg
     viewBox="0 0 620 130"
     role="img"
@@ -428,7 +430,7 @@ testable before the daemon is involved at all.
 Validation earns its place for one reason: it separates "you gave me nonsense" from "that
 sandbox does not exist". Without it, `Inspect("")` builds the filter
 `label=quickspin.id=`, matches nothing, and returns `ErrNotFound` — so a typo and a
-deleted sandbox produce the same answer, and plan 05 turns both into a `404` that tells a
+deleted sandbox produce the same answer, and roadmap 05 turns both into a `404` that tells a
 client debugging a malformed ID exactly the wrong thing. With it, the caller gets
 `ErrInvalidSandboxID` before the daemon is ever contacted.
 
@@ -570,7 +572,7 @@ sorting the output differs run to run and there is nothing stable to assert agai
 <StudyPrompt question="Should the label helpers return Docker's filters.Args, or plain Go values?">
   `ContainerList` wants `filters.Args`, so returning it saves a conversion. But
   `filters` is a moby type, and a pure layer that returns one means the
-  daemon-free test binary links the Docker SDK — the coupling this plan's
+  daemon-free test binary links the Docker SDK — the coupling this roadmap's
   opening section argues against. The alternative keeps the helpers in label
   key/value pairs and lets `docker.go` do the one-line translation at the
   boundary, where it is obvious and unreviewed. These helpers are unexported
@@ -621,7 +623,7 @@ developer, you have in vast surplus.
     functions with table-driven tests. They pass before any Docker code exists.
   </Task>
   <Task title="Implement dockerRuntime">
-    Against the Lima Docker socket from plan 01. Labels written at create; cleanup in
+    Against the Lima Docker socket from roadmap 01. Labels written at create; cleanup in
     the create-start gap; sentinel mapping at the SDK boundary.
   </Task>
   <Task title="Wire the CLI subcommands">
@@ -638,7 +640,7 @@ developer, you have in vast surplus.
     Superseded in part by the
     [Docker runtime test one-off](../../docker-runtime-testing-plan.mdx): `make
     test-docker` now targets a dedicated `quickspin-runtime-test` Lima VM rather than
-    the plan 01 socket, and the gate is `QUICKSPIN_TEST_DOCKER=1` rather than a build
+    the roadmap 01 socket, and the gate is `QUICKSPIN_TEST_DOCKER=1` rather than a build
     tag. The requirement below — that `make test` stay fast and Docker-free — is
     unchanged.
 
@@ -664,7 +666,7 @@ developer, you have in vast surplus.
   >
     Construct the client with `client.New(client.FromEnv,
     client.WithAPIVersionNegotiation())` and call `Ping` or `ServerVersion`. If this
-    fails, the problem is plan 01's `DOCKER_HOST`/socket setup, not your code — debug
+    fails, the problem is roadmap 01's `DOCKER_HOST`/socket setup, not your code — debug
     there, not here.
   </Hint>
   <Hint
@@ -751,7 +753,7 @@ Commercial platforms start at containerd or a microVM for isolation and density;
 is a fat dependency with a root daemon. You start with Docker because its API is the
 best-documented on-ramp and the interface above quarantines the choice. Also deferred:
 image distribution (you pull public images by hand), and any notion of pools or reuse —
-one create equals one cold container, measured honestly, until plan 11.
+one create equals one cold container, measured honestly, until roadmap 11.
 
 ## Go deeper
 
@@ -761,7 +763,7 @@ one create equals one cold container, measured honestly, until plan 11.
     title="Docker Engine SDK for Go"
     href="https://docs.docker.com/reference/api/engine/sdk/"
   >
-    The official on-ramp for the client this plan is built on, with examples of
+    The official on-ramp for the client this roadmap is built on, with examples of
     the create/start/inspect calls you are wrapping.
   </Resource>
   <Resource
@@ -779,7 +781,7 @@ one create equals one cold container, measured honestly, until plan 11.
     by="The Go Blog"
   >
     The canonical explanation of wrapping, `errors.Is`, and `Unwrap` — the
-    machinery behind this plan's sentinel-error contract.
+    machinery behind this roadmap's sentinel-error contract.
   </Resource>
   <Resource
     kind="article"
@@ -787,7 +789,7 @@ one create equals one cold container, measured honestly, until plan 11.
     href="https://kubernetes.io/blog/2016/12/container-runtime-interface-cri-in-kubernetes/"
     by="Kubernetes Blog"
   >
-    The industrial-scale version of this plan's core move: a backend-neutral
+    The industrial-scale version of this roadmap's core move: a backend-neutral
     runtime interface that later let Kubernetes swap Docker for containerd.
   </Resource>
   <Resource

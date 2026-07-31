@@ -2,6 +2,8 @@
 
 Depends on: 03.
 
+{/* Completed 2026-07-30. Current code and tests are authoritative where delivery differs from this roadmap. */}
+
 ## Summary
 
 Add file manipulation to the runtime: write a file into a sandbox, read one out, list a
@@ -16,7 +18,7 @@ equivalents. Under the hood most container platforms use tar streams — Docker'
 copy API (`CopyToContainer`/`CopyFromContainer`) speaks tar because it predates any
 nicer transport, and tar preserves permissions and directory structure in one stream.
 You'll wrap that oddity behind a clean interface, which is precisely what the
-commercial SDKs do. In plan 07 these operations move into the guest agent (files served
+commercial SDKs do. In roadmap 07 these operations move into the guest agent (files served
 from inside the sandbox), but this interface — the seam callers depend on — survives
 that move unchanged. That continuity is the lesson.
 
@@ -77,7 +79,7 @@ directions — which is why `TestWriteThenReadRoundTrip` asserts mode, not just 
 ### Concept: paths are hostile input
 
 Every `path` argument in this interface will eventually arrive from an HTTP query
-parameter (plan 05) typed by code you don't control. Treat it that way now:
+parameter (roadmap 05) typed by code you don't control. Treat it that way now:
 `../../etc/passwd`, `a/../../x`, empty strings, and relative paths are all requests to
 operate outside the intended tree or on an ambiguous target. The Go toolkit is small
 and pure: `path.IsAbs` to require absolute paths, `path.Clean` to collapse `.` and
@@ -86,12 +88,12 @@ still escapes after it) is rejected before any I/O happens. Centralizing this in
 validation helper — called by all four methods — is what makes the property testable
 in a table and durable when the implementation moves into the guest agent. Symlinks
 are the deeper version of the same attack (a link inside the sandbox pointing at a
-host path); this plan records them as deliberately untested rather than silently
+host path); this roadmap records them as deliberately untested rather than silently
 ignored, because with Docker's copy API the extraction happens inside the container's
 filesystem, not the host's.
 
 <Mermaid
-  caption="One pure helper, called first by all four methods. Rejection happens before any I/O, and every check below the Clean step is table-testable without Docker — which is what lets the same rules survive unchanged when plan 07 moves the implementation into the guest agent."
+  caption="One pure helper, called first by all four methods. Rejection happens before any I/O, and every check below the Clean step is table-testable without Docker — which is what lets the same rules survive unchanged when roadmap 07 moves the implementation into the guest agent."
   code={`
 flowchart TD
     P["incoming path"] --> E1{"empty?"}
@@ -120,7 +122,7 @@ typed, testable contract: stat the file first (`ContainerStatPath` reports size
 without transferring content), refuse with `ErrFileTooLarge` above the cap, and guard
 the actual read too (a `stat`-then-read race can still oversize). The alternative
 shape — `io.Reader` streaming — is strictly more capable and strictly more expensive:
-every caller must manage lifecycles and partial reads, and both SDKs (plans 09/10)
+every caller must manage lifecycles and partial reads, and both SDKs (roadmaps 09/10)
 would inherit that burden. Committing to bytes-with-cap now, with the error in the
 signature, keeps the option to add a streaming method later without breaking anyone.
 
@@ -154,7 +156,7 @@ var (
 )
 
 type Runtime interface {
-    // ...plans 02–03...
+    // ...roadmaps 02–03...
     WriteFile(ctx context.Context, id, path string, content []byte, mode fs.FileMode) error
     ReadFile(ctx context.Context, id, path string) ([]byte, error)
     ListDir(ctx context.Context, id, path string) ([]FileInfo, error)
@@ -223,7 +225,7 @@ Committed decisions:
     exists (`/`) and carry the rest of the path inside the archive, adding explicit
     directory-type headers (`Typeflag: tar.TypeDir`) for each missing parent so their
     modes are deliberate. The alternative — a `mkdir -p` exec before every copy —
-    works but couples file writes to plan 03's exec path; pick one and be consistent.
+    works but couples file writes to roadmap 03's exec path; pick one and be consistent.
   </Hint>
   <Hint
     title="ReadFile stats first, then unwraps a one-entry tar"
@@ -244,8 +246,8 @@ Committed decisions:
     — iterate `tar.Reader.Next()` and collect the immediate children's headers
     (`FileInfo()` on the header gives size, mode, dir flag) without buffering file
     bodies. Note the cost honestly: content still crosses the wire; that is one reason
-    plan 07 moves this into the guest. Docker has no delete endpoint at all, so
-    `RemovePath` is built on plan 03's `Exec` with `rm -rf` — which is exactly why the
+    roadmap 07 moves this into the guest. Docker has no delete endpoint at all, so
+    `RemovePath` is built on roadmap 03's `Exec` with `rm -rf` — which is exactly why the
     path must already be validated and cleaned before it becomes an argument vector
     (pass it as a single argv element, never through `sh -c` string interpolation).
   </Hint>
@@ -321,7 +323,7 @@ than a silent failure — the habit that matters more than the feature.
     by="Snyk Security Research"
   >
     The archive-extraction traversal attack (`../../` entries) found across dozens of
-    real libraries — the exact failure mode this plan's path validation exists to block.
+    real libraries — the exact failure mode this roadmap's path validation exists to block.
   </Resource>
   <Resource
     kind="docs"

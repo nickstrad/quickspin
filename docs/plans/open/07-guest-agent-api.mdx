@@ -9,7 +9,7 @@ creation, exposing an HTTP API *from inside* the sandbox — exec (now with stre
 output), file read/write/list, and health. The control plane proxies
 `/v1/sandboxes/{id}/...` workload calls to the guest instead of using Docker exec and
 the tar copy API. The `Runtime` interface keeps lifecycle (create/destroy); workload
-operations move to the guest client. This is the architectural move that makes plan 14
+operations move to the guest client. This is the architectural move that makes roadmap 14
 (Firecracker) possible, because a microVM has no `docker exec`.
 
 ## Industry context
@@ -23,9 +23,9 @@ building your first two-binary distributed system: control plane and guest versi
 is a real design constraint from here on.
 
 <KeyPoint label="The ownership shift">
-  After this plan the `Runtime` interface owns only lifecycle — create, inspect, list,
+  After this roadmap the `Runtime` interface owns only lifecycle — create, inspect, list,
   destroy. Everything that happens *inside* a running sandbox goes through the guest.
-  That split is the whole reason plan 14 can swap the backend without touching a
+  That split is the whole reason roadmap 14 can swap the backend without touching a
   workload code path.
 </KeyPoint>
 
@@ -111,7 +111,7 @@ stateDiagram-v2
 ### Concept: errors do not cross process boundaries — DTOs do
 
 Inside one Go process, `errors.Is` walks a chain of wrapped values. Between the guest
-and the plane there is no chain — only bytes on a wire. This plan applies the error
+and the plane there is no chain — only bytes on a wire. This roadmap applies the error
 reference's process-boundary rule for the first time: the guest serializes the shared
 `httpapi.ErrorResponse` DTO, and `guest.Client` reads it, logs what it said, and mints
 a *fresh* error of its own package's type. Wrapping is a lie here — the client never
@@ -145,7 +145,7 @@ GET  /files?path=                read
 GET  /dir?path=                  list
 ```
 
-<Figure caption="The workload request path after this plan: the plane proxies to the guest inside the sandbox; lifecycle calls still go to the runtime.">
+<Figure caption="The workload request path after this roadmap: the plane proxies to the guest inside the sandbox; lifecycle calls still go to the runtime.">
   <svg viewBox="0 0 640 210" role="img" aria-label="Request path from caller through control plane and guest.Client to quickspin-guest and the child process inside the sandbox">
     <defs>
       <marker id="arrow07" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -212,7 +212,7 @@ Committed decisions:
 <TaskList>
   <Task title="Build cmd/quickspin-guest">
     HTTP server with exec (streaming + kill-on-disconnect), the files endpoints
-    reusing plan 04's path-validation helpers, and `/healthz` with the version.
+    reusing roadmap 04's path-validation helpers, and `/healthz` with the version.
   </Task>
   <Task title="Change the runtime to inject the guest">
     Bind-mount the binary read-only, make it the entrypoint, add the port mapping, and
@@ -286,7 +286,7 @@ Committed decisions:
     title="Readiness is a reconciler decision, not a create-time sleep"
     check="A fresh sandbox shows pending until /healthz answers, then running; with a deliberately broken entrypoint it lands in failed within the window and the container is gone."
   >
-    Extend plan 06's decision table: a row whose container is running but whose guest
+    Extend roadmap 06's decision table: a row whose container is running but whose guest
     has not answered stays `pending`; each pass probes `/healthz` with a short
     per-probe timeout. The bounded window falls out of data you already have —
     `now - created_at > readinessWindow` while still unready decides `failed` +
@@ -295,13 +295,13 @@ Committed decisions:
   </Hint>
   <Hint
     title="guest.Client mints fresh errors from the DTO"
-    check="TestEndToEndStillPassesWithGuestBackend passes: plan 05's validate script runs unmodified, and a guest-side failure surfaces to the API caller with the plane's error shape, not a doubly wrapped guest error."
+    check="TestEndToEndStillPassesWithGuestBackend passes: roadmap 05's validate script runs unmodified, and a guest-side failure surfaces to the API caller with the plane's error shape, not a doubly wrapped guest error."
   >
     Define the interface next to its consumer (`internal/guest` or similar) with
     methods mirroring the five endpoints; the HTTP implementation decodes
     `httpapi.ErrorResponse` on non-2xx, logs its fields, and returns its own error
     values that handlers can map to status codes. Swap handlers over one at a time,
-    keeping plan 05's tests green after each swap — the public contract is the
+    keeping roadmap 05's tests green after each swap — the public contract is the
     regression suite for this refactor.
   </Hint>
   <Hint
@@ -338,19 +338,19 @@ Integration (`make test-docker`):
   sandbox lands in `failed` within the readiness window, container cleaned up.
 - `TestStreamedExecThroughControlPlane` — end-to-end: public API `?stream=true`
   delivers events live (assert first event arrives before the command finishes).
-- `TestEndToEndStillPassesWithGuestBackend` — plan 05's validate script (create, exec,
+- `TestEndToEndStillPassesWithGuestBackend` — roadmap 05's validate script (create, exec,
   files, destroy) passes unmodified against the guest-backed plane, proving the public
   contract survived an internal rewrite.
 
 Deliberately untested: guest auto-upgrade, mutual auth between plane and guest (noted
-in plan 08's threat model), stdin/PTY.
+in roadmap 08's threat model), stdin/PTY.
 
 ## Solo-developer tradeoffs
 
 E2B's envd speaks gRPC with generated clients and supports PTYs, port forwarding, and
 file watching; you ship one ndjson-over-HTTP binary because it is debuggable with curl
 and has zero codegen overhead. The plane→guest link is unauthenticated plaintext on a
-local interface — acceptable on a single trusted host, indefensible multi-tenant; plan
+local interface — acceptable on a single trusted host, indefensible multi-tenant; roadmap
 08 records this in the threat model rather than fixing it, which is itself the
 commercial-vs-learning tradeoff made explicit.
 
@@ -380,7 +380,7 @@ commercial-vs-learning tradeoff made explicit.
     by="Phusion Blog"
   >
     The write-up that made container zombie reaping famous: why a container has no
-    init safety net and what a PID 1 must therefore do — this plan's reaping rationale.
+    init safety net and what a PID 1 must therefore do — this roadmap's reaping rationale.
   </Resource>
   <Resource
     kind="docs"
@@ -395,7 +395,7 @@ commercial-vs-learning tradeoff made explicit.
     title="Liveness, Readiness, and Startup Probes"
     href="https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/"
   >
-    How Kubernetes formalizes this plan's "running vs answering" distinction into
+    How Kubernetes formalizes this roadmap's "running vs answering" distinction into
     separate probes with separate consequences — the vocabulary interviews use.
   </Resource>
   <Resource

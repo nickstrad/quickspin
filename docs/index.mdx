@@ -1,10 +1,10 @@
 # Documentation
 
-This directory contains Quickspin's plans and reference material. The codebase describes
+This directory contains Quickspin's roadmaps and reference material. The codebase describes
 what exists today; documents may also discuss work that has not been implemented.
 
 Run `make docs` from the repository root to open the local MDX reader. The reader provides
-search, plan navigation, per-document outlines, code highlighting, and reusable study
+search, roadmap navigation, per-document outlines, code highlighting, and reusable study
 components. See the [`reader guide`](reader-guide.mdx) for the available MDX components.
 
 ## Running the tests
@@ -94,39 +94,42 @@ rules behind both suites live in
 
 `make test-docker` needs `limactl`, `docker`, `go`, and `jq`.
 
-## Plans
+## Roadmaps
 
-Plans describe bounded implementation work. Moving a plan records its lifecycle; it does
-not by itself authorize implementation.
+The roadmap outlines Quickspin's intended future state as a sequence of independently
+verifiable learning milestones. It complements the codebase; it does not describe current
+behavior or authorize implementation by itself.
 
-- [`plans/open/`](plans/open/) contains proposed plans and work that is still in progress.
-- [`plans/closed/`](plans/closed/) contains completed plans preserved for historical
-  context.
-- [`plans/AGENTS.md`](plans/AGENTS.md) defines the required structure for every plan,
+- [`plans/open/`](plans/open/) contains future or in-progress milestones.
+- [`plans/closed/`](plans/closed/) preserves delivered milestones as historical context.
+- [`plans/AGENTS.md`](plans/AGENTS.md) defines the required structure for every roadmap,
   including the verifiable definition-of-done requirement.
 
-### The platform learning path (open)
+### The platform learning roadmap
 
-Plans 01–12 build the platform incrementally; 13 is an isolation deep dive that can
-run in parallel after plan 01; 15–18 are the production track that takes the
+Milestones 01–05 are complete. Roadmaps 06–23 describe intended future states rather
+than current behavior; the codebase remains authoritative.
+
+Roadmaps 01–12 build the platform incrementally; 13 is an isolation deep dive that can
+run in parallel after roadmap 01; 15–18 are the production track that takes the
 Docker-backed platform to live, multi-host, observable cloud operation; 14 is the
 Firecracker deep dive, deliberately sequenced after the production track and ending
 with the prod cutover from Docker to Firecracker; 19–21 are the compute track that makes
 capacity a first-class subsystem — pools and the capacity admin surface, then one
-plan per new compute approach (Firecracker on cloud VMs; Kubernetes + Kata); 22–23
+roadmap per new compute approach (Firecracker on cloud VMs; Kubernetes + Kata); 22–23
 are the agent-workflow track that turns the platform toward its coding-agent
 customers — PR-capable sandboxes with secret injection, then brokered per-agent
 persistent storage.
 
-1. [`01-linux-lab-environment.mdx`](plans/open/01-linux-lab-environment.mdx) — Lima Linux
+1. [`01-linux-lab-environment.mdx`](plans/closed/01-linux-lab-environment.mdx) — Lima Linux
    VM, Docker socket, Go cross-compilation, environment validation script.
-2. [`02-sandbox-runtime-lifecycle.mdx`](plans/open/02-sandbox-runtime-lifecycle.mdx) —
+2. [`02-sandbox-runtime-lifecycle.mdx`](plans/closed/02-sandbox-runtime-lifecycle.mdx) —
    the `Runtime` interface and Docker-backed create/inspect/destroy via a CLI.
-3. [`03-exec-limits-cancellation.mdx`](plans/open/03-exec-limits-cancellation.mdx) —
+3. [`03-exec-limits-cancellation.mdx`](plans/closed/03-exec-limits-cancellation.mdx) —
    exec with real exit codes, cgroup limits, network policy, kill-on-cancel.
-4. [`04-sandbox-filesystem-api.mdx`](plans/open/04-sandbox-filesystem-api.mdx) — file
+4. [`04-sandbox-filesystem-api.mdx`](plans/closed/04-sandbox-filesystem-api.mdx) — file
    read/write/list/remove with path validation.
-5. [`05-control-plane-api.mdx`](plans/open/05-control-plane-api.mdx) — HTTP control
+5. [`05-control-plane-api.mdx`](plans/closed/05-control-plane-api.mdx) — HTTP control
    plane, SQLite state machine, idempotency keys.
 6. [`06-reconciler-leases-events.mdx`](plans/open/06-reconciler-leases-events.mdx) —
    reconcile loop, TTL reaping, event log, async create, crash convergence.
@@ -151,7 +154,7 @@ persistent storage.
     Neon Postgres for prod behind the same store contract, one conformance suite.
 16. [`16-prod-single-host.mdx`](plans/open/16-prod-single-host.mdx) — first live
     deployment: one Hetzner host, Docker-backed, TLS, systemd, deploy script
-    (Firecracker arrives via plan 14's cutover).
+    (Firecracker arrives via roadmap 14's cutover).
 17. [`17-worker-split-heartbeats.mdx`](plans/open/17-worker-split-heartbeats.mdx) —
     control-plane/worker split, host registration, heartbeats, placement.
 18. [`18-host-provisioning-observability.mdx`](plans/open/18-host-provisioning-observability.mdx)
@@ -187,7 +190,7 @@ and 21's runtime-backend half (tasks 1–4) needs only 07, so it can run in para
 with the production track as a second deep dive before its pool integration lands. The
 agent-workflow track: 22 needs only 03 and 04, so it can slot in any time after the
 spine's filesystem work (12 is where it pays off, and 07/09 later expose its git
-layer); 23 needs 05, 08, and 22. Each plan's `Depends on:` header is authoritative
+layer); 23 needs 05, 08, and 22. Each roadmap's `Depends on:` header is authoritative
 where this summary is coarse.
 
 ## Reference
@@ -207,7 +210,7 @@ Current reference documents:
   function, what to test at each layer, and which comments earn their place.
 - [`reference/runtime-backend-testing.mdx`](reference/runtime-backend-testing.mdx)
   defines the reusable test layers, core runtime conformance contract, live harness
-  responsibilities, and the checklist every later runtime plan should extend.
+  responsibilities, and the checklist every later runtime roadmap should extend.
 - [`reference/docker-test-architecture-explained.mdx`](reference/docker-test-architecture-explained.mdx)
   is the concept-first companion to the rulebook above: it explains the implemented
   test lanes — table tests, the fake daemon, `runtimetest.Fake`, conformance, and the
@@ -219,6 +222,6 @@ Current reference documents:
   and how to race-test them.
 
 These references describe conventions to adopt, not current behavior. They are intended
-as a lens for a second pass over the plans.
+as a lens for a second pass over the roadmaps.
 
 Update this index whenever documentation is added, moved, or removed.

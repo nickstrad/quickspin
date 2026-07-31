@@ -9,7 +9,7 @@ Add a third `Runtime` backend, `internal/runtime/kata`: a sandbox becomes a
 Kubernetes **Pod** whose `runtimeClassName` selects Kata Containers, so the pod's
 containers run inside a microVM instead of sharing the node's kernel. The backend
 talks to the cluster's API server via client-go — create pod, poll ready, delete pod
-— and the guest agent from plan 07 runs as the pod's single container, so exec and
+— and the guest agent from roadmap 07 runs as the pod's single container, so exec and
 files arrive over the pod IP exactly as they do for Docker and Firecracker. On the
 network side, the pod always keeps that IP: `AllowNetwork: false` creates an
 egress-isolating `NetworkPolicy`, while `true` leaves workload egress permitted. On the
@@ -18,7 +18,7 @@ heartbeats, no target size — the cluster's own scheduler and whatever node sca
 you configure in the cloud console are the capacity mechanism, and the plane's job
 shrinks to "is the cluster reachable and does it admit kata pods."
 
-<KeyPoint label="Why this plan matters">
+<KeyPoint label="Why this roadmap matters">
   This is the interface's third and hardest test. Docker and Firecracker were both
   "processes on a host I control"; Kubernetes inverts control — you submit intent
   and a scheduler you don't own realizes it. If `Runtime` and the pool model survive
@@ -29,24 +29,24 @@ shrinks to "is the cluster reachable and does it admit kata pods."
 
 Kata is the industry's answer to "I want Kubernetes economics with VM isolation":
 an OCI runtime where each pod gets its own guest kernel under a lightweight VMM
-(QEMU by default, Firecracker as an option — the same VMM you drove by hand in plan
+(QEMU by default, Firecracker as an option — the same VMM you drove by hand in roadmap
 14, one layer down the stack). Kubernetes selects it per-pod through the
 RuntimeClass mechanism — the CRI generalization this project has been echoing since
-plan 02. Commercially this is the "bring your own cluster" deployment shape:
+roadmap 02. Commercially this is the "bring your own cluster" deployment shape:
 platforms run sandbox workloads inside customers' or managed Kubernetes (AKS ships
 Kata-based pod sandboxing as a feature) because someone else then owns node
 lifecycle, upgrades, and autoscaling. The tradeoff is equally standard: you inherit
 a scheduler you cannot reason about locally, admission latency you don't control,
 and a capacity model that is a black box with knobs — which is exactly why this
-plan's pool kind *delegates* instead of pretending to manage.
+roadmap's pool kind *delegates* instead of pretending to manage.
 
 <Compare>
-  <CompareItem eyebrow="Plans 14, 20" title="You are the scheduler">
+  <CompareItem eyebrow="Roadmaps 14, 20" title="You are the scheduler">
     The plane picks a host, reserves a slot transactionally, and supervises a
-    process. Total control, total responsibility — every crash branch in plans
+    process. Total control, total responsibility — every crash branch in roadmaps
     17–18 is yours.
   </CompareItem>
-  <CompareItem eyebrow="This plan" title="You submit intent to a scheduler">
+  <CompareItem eyebrow="This roadmap" title="You submit intent to a scheduler">
     The plane creates a Pod object and watches what the cluster decides. Placement,
     restarts, and node choice belong to Kubernetes; your code's job becomes mapping
     *its* states (Pending, Unschedulable, Ready) onto *your* contract.
@@ -56,7 +56,7 @@ plan's pool kind *delegates* instead of pretending to manage.
 ## What you'll learn
 
 - client-go fundamentals: kubeconfig loading, typed clientsets, creating and
-  deleting Pods, label selectors as the list mechanism — plan 02's label discipline
+  deleting Pods, label selectors as the list mechanism — roadmap 02's label discipline
   landing in a third ecosystem unchanged.
 - The RuntimeClass mechanism end to end: what `runtimeClassName: kata` actually
   dispatches through (kubelet → CRI → containerd → kata-shim → VMM), and
@@ -66,7 +66,7 @@ plan's pool kind *delegates* instead of pretending to manage.
   `ErrImageMissing` — sentinel translation at a boundary you don't control.
 - Packaging the guest agent as an OCI image for the first time: a scratch/distroless
   image around the static binary, pushed to a registry the cluster can pull from.
-- Kubernetes `NetworkPolicy` as the Kata implementation of plan 03's backend-neutral
+- Kubernetes `NetworkPolicy` as the Kata implementation of roadmap 03's backend-neutral
   egress contract: pod IP and plane reachability stay intact while new
   workload-originated connections are denied.
 - Delegated capacity as a design stance: what the plane checks (reachability, a
@@ -89,17 +89,17 @@ two-party split as your pool admin versus sandbox creator.
 
 Kubernetes has its own opinion of readiness, and you should wire it — a
 `readinessProbe` on `/healthz` makes `kubectl get pods` honest — but your backend's
-`Create` must hold to the plan 07 contract: the sandbox is `running` when the guest
+`Create` must hold to the roadmap 07 contract: the sandbox is `running` when the guest
 agent answers over the network. Deriving "running" from pod phase alone recreates
-the bug plan 02 warned about with Docker states: a foreign state machine's
+the bug roadmap 02 warned about with Docker states: a foreign state machine's
 vocabulary silently becoming your public contract. The mapping is a pure function,
 `stateFromPod(pod) State`, with the same table-test treatment as
 `stateFromContainerState` — and the interesting rows are the failures: `Pending`
 with an `Unschedulable` condition is your typed `no_capacity` (the cluster's
-version of plan 17's full host); `ImagePullBackOff` inside container statuses is
+version of roadmap 17's full host); `ImagePullBackOff` inside container statuses is
 `ErrImageMissing`; a pod that vanishes between polls is `ErrNotFound`.
 
-<Figure caption="The kata path: the plane submits a labeled Pod with runtimeClassName kata; the cluster schedules it onto a kata-capable node where the shim boots a microVM; readiness is still the plan 07 guest answering /healthz over the pod IP.">
+<Figure caption="The kata path: the plane submits a labeled Pod with runtimeClassName kata; the cluster schedules it onto a kata-capable node where the shim boots a microVM; readiness is still the roadmap 07 guest answering /healthz over the pod IP.">
   <svg viewBox="0 0 640 240" role="img" aria-label="Control plane creates a pod via the API server; kubelet dispatches through containerd to the kata shim which boots a microVM running quickspin-guest; the plane polls the guest healthz over the pod IP">
     <defs>
       <marker id="arrow21" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -128,11 +128,11 @@ version of plan 17's full host); `ImagePullBackOff` inside container statuses is
     <text x="330" y="172" textAnchor="middle" fontSize="10" fill="#405049">boots VMM + guest kernel</text>
     <rect x="450" y="136" width="160" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
     <text x="530" y="156" textAnchor="middle" fontSize="12" fill="#18231f">quickspin-guest</text>
-    <text x="530" y="172" textAnchor="middle" fontSize="10" fill="#405049">the plan 07 image</text>
+    <text x="530" y="172" textAnchor="middle" fontSize="10" fill="#405049">the roadmap 07 image</text>
     <line x1="540" y1="72" x2="430" y2="118" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow21)" />
     <line x1="410" y1="158" x2="448" y2="158" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow21)" />
     <path d="M 530 196 L 530 222 L 85 222 L 85 76" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow21g)" />
-    <text x="300" y="214" textAnchor="middle" fontSize="10" fill="#7f5d43">GET /healthz on the pod IP — running means the guest answered, same as plans 07/14</text>
+    <text x="300" y="214" textAnchor="middle" fontSize="10" fill="#7f5d43">GET /healthz on the pod IP — running means the guest answered, same as roadmaps 07/14</text>
   </svg>
 </Figure>
 
@@ -149,7 +149,7 @@ IP is the route used for health, exec, and files, so `AllowNetwork: false` canno
 | `true` | retained | allowed | allowed | not restricted by a Quickspin egress-deny policy |
 
 The policy deliberately does not select `Ingress`: reachability from the plane is a
-separate boundary, and the plan's single-node topology already places the plane within
+separate boundary, and the roadmap's single-node topology already places the plane within
 pod-network reach. Kubernetes network policy is connection-aware, so response traffic
 for the plane's allowed connection is implicitly permitted even when the pod is
 isolated for egress. `true` means Quickspin does not deny egress; it cannot promise
@@ -166,7 +166,7 @@ API object creation as enforcement.
 
 ### Concept: a kubernetes pool has no target size, and that is the design
 
-Plan 19's `PoolKind` split exists for this moment. A `kubernetes` pool row carries a
+Roadmap 19's `PoolKind` split exists for this moment. A `kubernetes` pool row carries a
 kubeconfig reference and a namespace instead of a provider and target size; `pool
 scale` on it returns the typed refusal (like `external` pools), because the honest
 scaling story is the one you named at the start: twist the node-pool knobs in the
@@ -180,7 +180,7 @@ is the backpressure signal, translated to `no_capacity` after a bounded pending
 window rather than modeled in advance.
 
 <Mermaid
-  caption="Pool create's admission test is a real kata pod through the backend's own Create/Destroy, and the pool row is written only after the smoke passes — the inverse of plan 18's row-first ordering, because here the remote resource is disposable and the row is the commitment."
+  caption="Pool create's admission test is a real kata pod through the backend's own Create/Destroy, and the pool row is written only after the smoke passes — the inverse of roadmap 18's row-first ordering, because here the remote resource is disposable and the row is the commitment."
   code={`
 sequenceDiagram
     participant O as operator
@@ -202,7 +202,7 @@ sequenceDiagram
 `}
 />
 
-<StudyPrompt question="Why not run workerd as a DaemonSet and keep the plan 17 machinery?">
+<StudyPrompt question="Why not run workerd as a DaemonSet and keep the roadmap 17 machinery?">
   You could — each node's workerd registering as a host — but you would be building
   a scheduler on top of a scheduler: your placement picking a node, then Kubernetes
   placing your pod, with the two disagreeing under pressure. Every system that
@@ -215,9 +215,9 @@ sequenceDiagram
 
 <Callout tone="warning" title="Kata needs virtualization on the nodes">
   Kata's VMM needs `/dev/kvm` on each node, so the cluster's nodes have the same
-  constraint as plan 20's hosts: bare-metal nodes, or VMs with nested
+  constraint as roadmap 20's hosts: bare-metal nodes, or VMs with nested
   virtualization. The committed lab environment is a single-node k3s on a
-  DigitalOcean droplet (nested virt per plan 20's finding) with kata installed via
+  DigitalOcean droplet (nested virt per roadmap 20's finding) with kata installed via
   kata-deploy; a managed cluster with kata support is an alternative if you accept
   its cost. Verify with a kata smoke pod comparing `uname -r` against the node
   kernel before writing any Go — if they match, kata is not actually engaged and
@@ -226,14 +226,14 @@ sequenceDiagram
 
 ## Design and interfaces
 
-No new interface — `internal/runtime/kata` implements plan 02's `Runtime`; that is
+No new interface — `internal/runtime/kata` implements roadmap 02's `Runtime`; that is
 the headline. New surface and commitments:
 
 ```text
 Backend: Spec.Backend gains "kata". Pod template: one container running the
   quickspin-guest image; labels quickspin.id / quickspin.managed as pod labels;
   runtimeClassName from pool config (default "kata"); readinessProbe on /healthz;
-  restartPolicy Never (a dead sandbox is dead — plan 17's no-migration rule; the
+  restartPolicy Never (a dead sandbox is dead — roadmap 17's no-migration rule; the
   reconciler observes the failure, nothing silently restarts it).
 Lifecycle mapping (pure, table-tested):
   stateFromPod: PodRunning+guest-healthy → running; Succeeded/Failed → stopped;
@@ -244,10 +244,10 @@ Lifecycle mapping (pure, table-tested):
 Egress policy (pure builder + live enforcement test):
   AllowNetwork false → an Egress-only NetworkPolicy selecting quickspin.id with an
   empty egress list; create policy before Pod.
-  AllowNetwork true → no Quickspin egress-deny policy; the plan-owned namespace's
+  AllowNetwork true → no Quickspin egress-deny policy; the roadmap-owned namespace's
   ordinary cluster networking applies.
 Guest image: build/quickspin-guest.Dockerfile — FROM scratch + the static binary
-  (plan 07's static build paying off a third time); pushed to a registry the
+  (roadmap 07's static build paying off a third time); pushed to a registry the
   cluster pulls from; tag pinned in pool config, never :latest.
 Pool integration (needs 19):
   pools of kind "kubernetes": kubeconfig_ref + namespace + runtime_class instead of
@@ -307,7 +307,7 @@ traffic is not sufficient.
     the boundary, and the pending-window timeout on create.
   </Task>
   <Task title="Add the kubernetes pool kind">
-    Plan 19 schema variant, scale refusal, reachability probe, and the smoke pod on
+    Roadmap 19 schema variant, scale refusal, reachability probe, and the smoke pod on
     pool create; the smoke must reach its guest while its outbound probe is denied.
   </Task>
   <Task title="Route backend kata through the stack and validate">
@@ -354,7 +354,7 @@ traffic is not sufficient.
     phase alone is not enough; Unschedulable lives in `PodScheduled` condition
     reasons, ImagePullBackOff in `ContainerStatuses[].State.Waiting.Reason`. Every
     one of those paths is a table row, and this table is where the foreign state
-    machine gets pinned — the kata equivalent of plan 02's seven-states-to-two
+    machine gets pinned — the kata equivalent of roadmap 02's seven-states-to-two
     decision. Keep policy construction pure too: derive a deterministic Kubernetes
     object name and selector from the backend-owned sandbox identity, set only
     `policyTypes: [Egress]`, and distinguish an empty egress list from an omitted
@@ -378,7 +378,7 @@ traffic is not sufficient.
     `clientcmd.BuildConfigFromFlags("", kubeconfigPath)` →
     `kubernetes.NewForConfig` → `client.CoreV1().Pods(ns)`. List and inspect use
     `ListOptions.LabelSelector` with `quickspin.id=<id>` — never get-by-name from
-    user input, the same prefix-match trap as plan 02's ContainerInspect warning.
+    user input, the same prefix-match trap as roadmap 02's ContainerInspect warning.
     Create polls your `stateFromPod` until running or the pending window lapses;
     on lapse, delete the pod, wait for absence, delete its policy, then return
     `no_capacity` — the create-gap cleanup discipline, third incarnation. Destroy
@@ -394,7 +394,7 @@ traffic is not sufficient.
     ordinary orphan sweep. Use `AllowNetwork: false`, reach `/healthz`, then execute
     an outbound probe through the guest and require that it fail; this proves guest
     reachability and egress isolation coexist. Order matters for crash-safety: smoke
-    resources first, pool row only on success — the inverse of plan 18's row-first
+    resources first, pool row only on success — the inverse of roadmap 18's row-first
     ordering, because here the external resources are disposable and the row is the
     commitment.
   </Hint>
@@ -407,7 +407,7 @@ traffic is not sufficient.
     reports it as a hang instead of `no_capacity`, the pending-window branch isn't
     firing — log the parsed conditions each poll. If the pod schedules but never
     turns ready, split the failure with pod logs: no log output means the image or
-    entrypoint (wrong arch is the classic — the droplet is amd64, plan 01's
+    entrypoint (wrong arch is the classic — the droplet is amd64, roadmap 01's
     cross-compile habit finally flips direction); guest logs but probe failing
     means the readinessProbe port disagrees with the guest's listen address. If
     `/healthz` fails only under `AllowNetwork: false`, inspect the policy: it probably
@@ -443,14 +443,14 @@ Gated live tests + `hack/validate-21.sh` against the lab cluster:
 - Negative: impossible resource request → typed `no_capacity` within the window,
   pod cleaned up; deleting the RuntimeClass makes `pool create` fail its smoke pod.
 - Crash check: `kubectl delete pod` behind the plane's back → the reconciler marks
-  the sandbox failed with an event (the plan 06 loop observing a third backend).
+  the sandbox failed with an event (the roadmap 06 loop observing a third backend).
 - Create-to-ready latency recorded in `docs/reference/demo-latency.mdx` beside
   Docker's and Firecracker's numbers — the three-way table is the artifact.
 
 Deliberately untested: multi-node clusters, informer-based watching, pod networking
 beyond the single-node reach commitment, egress allowlists, DNS filtering,
 protocol-aware policy, kata's Firecracker VMM variant (`kata-fc` — noted as the
-bridge between this plan and plan 14, left as an experiment), operators/CRDs.
+bridge between this roadmap and roadmap 14, left as an experiment), operators/CRDs.
 
 ## Solo-developer tradeoffs
 
@@ -459,9 +459,9 @@ admission webhooks, tenant-wide default-deny policy, destination allowlists, and
 audited DNS — the full cloud-native toolchain. You implement only the per-sandbox
 binary egress policy because it is part of the shared `Runtime` contract; richer
 tenant policy remains capstone work. The genuinely load-bearing shortcut is network
-reachability: real platforms put a routing layer between plane and sandbox (plan 07's
+reachability: real platforms put a routing layer between plane and sandbox (roadmap 07's
 address abstraction is where it would slot in), and single-node reach is the recorded
-debt that makes this plan honest rather than production-shaped.
+debt that makes this roadmap honest rather than production-shaped.
 
 ## Go deeper
 
@@ -471,7 +471,7 @@ debt that makes this plan honest rather than production-shaped.
     title="Kata Containers: architecture"
     href="https://github.com/kata-containers/kata-containers/blob/main/docs/design/architecture/README.md"
   >
-    The shim-to-VMM path under runtimeClassName — where plan 14's VMM concepts
+    The shim-to-VMM path under runtimeClassName — where roadmap 14's VMM concepts
     reappear one layer down, including the Firecracker option.
   </Resource>
   <Resource
@@ -513,7 +513,7 @@ debt that makes this plan honest rather than production-shaped.
     href="https://learn.microsoft.com/en-us/azure/aks/use-pod-sandboxing"
     by="Microsoft Azure docs"
   >
-    A managed cloud shipping exactly this plan's shape as a product feature —
+    A managed cloud shipping exactly this roadmap's shape as a product feature —
     useful for comparing their stated isolation claims against what you built.
   </Resource>
   <Resource
@@ -522,6 +522,6 @@ debt that makes this plan honest rather than production-shaped.
     by="Hausenblas &amp; Schimanski, ch. 1–3 (API basics, client-go)"
   >
     The deeper treatment of the API machinery — and of the operator pattern this
-    plan deliberately declines, so the decision is informed.
+    roadmap deliberately declines, so the decision is informed.
   </Resource>
 </Resources>

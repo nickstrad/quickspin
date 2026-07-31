@@ -24,7 +24,7 @@ This is the layer where platform companies actually differentiate and hire: runc
 question "which of these boundaries is too weak?" — a question you can only evaluate
 after building the weak version. The exercise is a rite of passage with public
 ancestry (Liz Rice's "containers from scratch"); the twist here is tying each syscall
-back to behavior you already observed through Docker in plans 02–03 (e.g. the
+back to behavior you already observed through Docker in roadmaps 02–03 (e.g. the
 `PidsLimit` fork-bomb test becomes *your* `pids.max` write).
 
 ## What you'll learn
@@ -203,7 +203,7 @@ quickspin-mini run \
 ```
 
 Committed decisions: cgroup v2 only (what the Lima Ubuntu runs); no network setup —
-new netns left empty, which *is* the `AllowNetwork: false` behavior from plan 03; no
+new netns left empty, which *is* the `AllowNetwork: false` behavior from roadmap 03; no
 image pulling — a `hack/make-rootfs.sh` produces the rootfs via `docker export`; runs
 as root inside the VM (rootless/userns is stretch, noted below).
 
@@ -227,11 +227,11 @@ as root inside the VM (rootless/userns is stretch, noted below).
     Reduce what root inside the sandbox can still do before execing the command.
   </Task>
   <Task title="Write hack/validate-13.sh">
-    This plan is validated by script, not `go test` — the behaviors are cross-process
+    This roadmap is validated by script, not `go test` — the behaviors are cross-process
     and root-only. One printed check per claim in Definition of done.
   </Task>
   <Task title="Write docs/reference/what-docker-does.mdx">
-    A table mapping each plan 02–03 Docker behavior to the syscall(s) you now invoke
+    A table mapping each roadmap 02–03 Docker behavior to the syscall(s) you now invoke
     yourself.
   </Task>
 </TaskList>
@@ -357,7 +357,7 @@ of Docker-flag fluency.
     href="https://man7.org/linux/man-pages/man7/namespaces.7.html"
   >
     The authoritative index of every namespace type and its clone flag — the exact
-    mapping this plan's "one flag, one isolation claim" framing is built on.
+    mapping this roadmap's "one flag, one isolation claim" framing is built on.
   </Resource>
   <Resource
     kind="docs"
@@ -365,7 +365,7 @@ of Docker-flag fluency.
     href="https://man7.org/linux/man-pages/man2/pivot_root.2.html"
   >
     Documents the exact preconditions (new root must be a mount point, not shared)
-    whose violation produces the cryptic `EINVAL` this plan's hint steps warn about.
+    whose violation produces the cryptic `EINVAL` this roadmap's hint steps warn about.
   </Resource>
   <Resource
     kind="docs"
@@ -373,7 +373,7 @@ of Docker-flag fluency.
     href="https://man7.org/linux/man-pages/man7/cgroups.7.html"
   >
     Covers the v1-to-v2 unified-hierarchy story and the controller files
-    (`memory.max`, `pids.max`, `cpu.max`) beyond the three this plan writes by hand.
+    (`memory.max`, `pids.max`, `cpu.max`) beyond the three this roadmap writes by hand.
   </Resource>
   <Resource
     kind="article"
@@ -382,14 +382,14 @@ of Docker-flag fluency.
     by="Michael Kerrisk, LWN"
   >
     Start of a seven-part series that builds a container from C and shell one
-    namespace at a time — the long-form version of this plan, with kernel history.
+    namespace at a time — the long-form version of this roadmap, with kernel history.
   </Resource>
   <Resource
     kind="video"
     title="Containers From Scratch"
     by="Liz Rice, GOTO 2018"
   >
-    Live-codes essentially this plan's runtime in ~60 lines of Go on stage — watch it
+    Live-codes essentially this roadmap's runtime in ~60 lines of Go on stage — watch it
     after your version works to compare re-exec and mount ordering choices.
   </Resource>
   <Resource

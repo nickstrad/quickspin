@@ -9,14 +9,14 @@ runs on each host, exposes the `Runtime` operations over an authenticated intern
 HTTP API, registers itself with the control plane, and heartbeats. The plane —
 which can now run anywhere, since it no longer needs `/dev/kvm` — keeps a `hosts`
 table, places new sandboxes on a healthy host with capacity, and (via the reconciler)
-declares hosts dead when heartbeats stop, failing their sandboxes. This is the plan
+declares hosts dead when heartbeats stop, failing their sandboxes. This is the roadmap
 that makes "monitor live cloud hosts" a property of the system rather than of your
 SSH habits.
 
 It also delivers `hack/failure-suite.sh`: a named failure-injection suite that
 deliberately kills a worker mid-create, silences heartbeats without killing anything,
 replays API requests, exhausts capacity, and abandons runtime resources — turning
-every distributed-systems claim this plan makes into a scenario you have personally
+every distributed-systems claim this roadmap makes into a scenario you have personally
 run, not a textbook answer.
 
 ## Industry context
@@ -28,7 +28,7 @@ heartbeats with a dead-host threshold, and capacity-aware placement — plus the
 that makes distributed state survivable: the database's desired state is authoritative,
 workers hold no durable truth, and a dead worker's sandboxes are *failed, not
 migrated* (sandboxes are stateful; honest platforms kill them and let clients recreate
-from snapshots — exactly why plan 11 exists).
+from snapshots — exactly why roadmap 11 exists).
 
 ## What you'll learn
 
@@ -42,7 +42,7 @@ from snapshots — exactly why plan 11 exists).
   the pure function only *chooses*; the *reservation* is a check-then-act hazard — two
   concurrent creates can both pick a host's last slot. Committing the placement re-checks
   capacity inside the insert's transaction (`FOR UPDATE` on the host row), the same
-  fold-the-check-into-the-reserve rule as plan 08's quota, one layer down.
+  fold-the-check-into-the-reserve rule as roadmap 08's quota, one layer down.
 - Both process boundaries follow the error reference: workerd serves the shared
   `httpapi.ErrorResponse`; the plane's worker client logs the DTO and mints a
   `ControlPlaneError` (never a fake wrap), and `internal/worker` gets its own
@@ -116,7 +116,7 @@ stateDiagram-v2
     <text x="312" y="142" textAnchor="middle" fontSize="10" fill="#8f3423">sandboxes → failed</text>
     <rect x="20" y="200" width="580" height="52" fill="none" stroke="#405049" strokeWidth="1" strokeDasharray="6 4" />
     <text x="310" y="220" textAnchor="middle" fontSize="10" fill="#405049">DB desired state is the only durable truth — workers can be lost and rebuilt from it</text>
-    <text x="310" y="238" textAnchor="middle" fontSize="10" fill="#405049">workload ops (exec, files) still flow plane → guest agent directly, unchanged from plan 07</text>
+    <text x="310" y="238" textAnchor="middle" fontSize="10" fill="#405049">workload ops (exec, files) still flow plane → guest agent directly, unchanged from roadmap 07</text>
   </svg>
 </Figure>
 
@@ -128,7 +128,7 @@ least-loaded. Every placement policy question becomes a table test. But the func
 runs on a snapshot of the hosts table, and between "I read that host A has one slot
 left" and "I inserted a sandbox on host A", another request can do the same read.
 Both pass the pure check; the host ends up over capacity. This is the classic
-check-then-act race, and the fix is the same one plan 08 used for quotas: fold the
+check-then-act race, and the fix is the same one roadmap 08 used for quotas: fold the
 check into the reservation by re-verifying capacity *inside* the transaction that
 inserts the sandbox row, with the host row locked (`SELECT ... FOR UPDATE`). The pure
 function remains the policy; the transaction is the arbiter.
@@ -166,12 +166,12 @@ sequenceDiagram
 The split only works because of a state-ownership rule: the database's desired state
 is authoritative, and workerd is a stateless executor over its local runtime. Workerd
 persists nothing it cannot rebuild — on boot it re-registers, reports what is actually
-running (discovered from labels, plan 02's rediscovery mechanism paying off across a
+running (discovered from labels, roadmap 02's rediscovery mechanism paying off across a
 process boundary), and takes orders. That is why `kill -9` on workerd is a legitimate
 test rather than a catastrophe, and why a dead host's sandboxes are *failed, not
 migrated*: the sandbox's memory and disk lived only on that host, so pretending to
 move it would be lying to the client. Failing fast with an event, and letting the
-client recreate from a plan 11 snapshot, is what honest platforms do. The same rule
+client recreate from a roadmap 11 snapshot, is what honest platforms do. The same rule
 explains `no_capacity` as a fast typed error rather than a queue: queueing is durable
 plane-side state with its own fairness and expiry semantics — real future work, not a
 default to back into.
@@ -191,8 +191,8 @@ default to back into.
 ```text
 quickspin-workerd (per host):
   POST /register     at boot: host name, arch, backend(s), capacity (max sandboxes)
-  Serves the Runtime surface over HTTP: create/inspect/list/destroy per plan 02/14
-  (workload ops still go plane -> guest directly, unchanged from plan 07)
+  Serves the Runtime surface over HTTP: create/inspect/list/destroy per roadmap 02/14
+  (workload ops still go plane -> guest directly, unchanged from roadmap 07)
   POST /heartbeat    every 10s to the plane: running count, disk/mem headroom
 
 Control plane:
@@ -210,7 +210,7 @@ Control plane:
 Committed decisions: the plane never SSHes to workers — everything flows through the
 two HTTP surfaces; worker tokens are minted per host and revocable; `drain` stops
 placement but leaves running sandboxes to finish or expire (the graceful-maintenance
-primitive plan 18 automates); local dev runs plane + one workerd in Lima so the split
+primitive roadmap 18 automates); local dev runs plane + one workerd in Lima so the split
 is exercised daily, not only in prod.
 
 <Callout tone="warning" title="Thresholds are compared against the DB clock you wrote, not wall time you remember">
@@ -244,7 +244,7 @@ is exercised daily, not only in prod.
     `quickspin admin host list|drain|token`, and a host summary in `GET /v1/status`.
   </Task>
   <Task title="Cut prod over to the split">
-    Run workerd on the Hetzner host beside the plane (still one machine — plan 18
+    Run workerd on the Hetzner host beside the plane (still one machine — roadmap 18
     adds more); update cloud-init and the deploy script for two units.
   </Task>
   <Task title="Write hack/failure-suite.sh — the failure-injection suite">
@@ -305,7 +305,7 @@ is exercised daily, not only in prod.
     recount that host's active sandboxes, and abort with `no_capacity` if the slot
     vanished between the pure choice and now. The concurrency test is N goroutines
     calling create against one host of capacity M through the real store (this is
-    what plan 15's Postgres is for), asserting exactly M successes and N−M typed
+    what roadmap 15's Postgres is for), asserting exactly M successes and N−M typed
     failures. Run it with `go test -race -count=10` — a race that shows up one run
     in five is still a race. Then do the deletion experiment in the check: a
     concurrency test that cannot fail proves nothing.
@@ -329,7 +329,7 @@ is exercised daily, not only in prod.
   >
     When a host crosses the dead threshold: update its sandboxes to `failed`, emit
     events, done. Do not try to destroy through the dead worker — it is unreachable
-    by definition, and the runtime-level orphan sweep (plan 06, now running inside
+    by definition, and the runtime-level orphan sweep (roadmap 06, now running inside
     workerd) collects the corpses if the host ever returns. `drain` is the gentler
     sibling: a state that placement filters out while everything running continues —
     `TestDrainStopsPlacementKeepsRunning` pins both halves.
@@ -339,12 +339,12 @@ is exercised daily, not only in prod.
     check="hack/validate-17.sh boots plane + workerd in Lima, a sandbox lands via registration and placement, and on the Hetzner host systemctl shows both units green."
   >
     Local first: a make target or script that starts both binaries with a dev token
-    so the split is exercised daily. For prod, plan 16's cloud-init gains a second
+    so the split is exercised daily. For prod, roadmap 16's cloud-init gains a second
     systemd unit (`quickspin-workerd.service`, `After=quickspin.service` if it
     registers at boot) and the deploy script restarts both with the health gate
     still keyed on `/v1/status` — which now also asserts one ready host. Mint the
     worker token with `quickspin admin host token` and put it in the worker's env
-    file, mode 600, same discipline as plan 16.
+    file, mode 600, same discipline as roadmap 16.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: the kill -9 scenario misbehaves"
@@ -377,7 +377,7 @@ Unit tests (`make test`, fake clock, fake worker client):
   again, nothing was killed.
 - `TestDrainStopsPlacementKeepsRunning`.
 - `TestConcurrentPlacementNeverOverfillsHost` — N concurrent creates against one
-  host with capacity M admit exactly M (the placement twin of plan 08's quota-race
+  host with capacity M admit exactly M (the placement twin of roadmap 08's quota-race
   test; must fail if the transactional re-check is removed).
 
 Integration `hack/validate-17.sh` (Lima, real plane + real workerd):
@@ -386,7 +386,7 @@ Integration `hack/validate-17.sh` (Lima, real plane + real workerd):
 - `kill -9` workerd: within the thresholds the host goes dead, its sandbox is
   `failed` with an event, and creates now fail fast with `no_capacity`.
 - Restart workerd: re-registers, placement resumes; the killed sandbox's container
-  is garbage-collected (the runtime-level orphan sweep from plan 06 still works
+  is garbage-collected (the runtime-level orphan sweep from roadmap 06 still works
   through the worker).
 
 Failure-injection suite `hack/failure-suite.sh` (Lima, real plane + workerd) runs
@@ -452,7 +452,7 @@ the recovery story.
     title="Kubernetes: Nodes"
     href="https://kubernetes.io/docs/concepts/architecture/nodes/"
   >
-    The industrial-scale version of this plan's trio — node registration, dual
+    The industrial-scale version of this roadmap's trio — node registration, dual
     heartbeats via NodeStatus and Lease objects, and condition-based eviction —
     worth comparing threshold by threshold.
   </Resource>

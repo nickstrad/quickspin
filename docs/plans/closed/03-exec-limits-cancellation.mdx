@@ -2,6 +2,8 @@
 
 Depends on: 02.
 
+{/* Completed 2026-07-30. Current code and tests are authoritative where delivery differs from this roadmap. */}
+
 ## Summary
 
 Make sandboxes useful: run commands inside them with separated stdout/stderr and a real
@@ -39,9 +41,9 @@ If you copy the raw connection into one buffer, you get both streams shredded to
 *with header bytes embedded in the output* — the corruption is subtle because short
 ASCII output can look almost right. The Docker SDK's `stdcopy.StdCopy(stdout, stderr,
 reader)` decodes the framing into two writers; your job is to hand it two capped
-buffers and to know why it exists, because plan 07 rebuilds this split natively in the
+buffers and to know why it exists, because roadmap 07 rebuilds this split natively in the
 guest agent. With `Tty: true` there is no framing and no separation — which is exactly
-why this plan's exec is TTY-less.
+why this roadmap's exec is TTY-less.
 
 ### Concept: Docker's limit flags are cgroup writes
 
@@ -84,7 +86,7 @@ guest-side concern the VMM API cannot set). A Kata pod expresses memory and frac
 CPU as Kubernetes resource limits, but has no standard pod-level field for a process
 count — `podPidsLimit` is a kubelet node setting. So validation is not one shared pure
 function: `validateSpec` checks that values are *sane*, and each backend additionally
-rejects the fields it cannot honor. Plans 14 and 21 inherit that obligation.
+rejects the fields it cannot honor. Roadmaps 14 and 21 inherit that obligation.
 
 ### Concept: cancellation must cross the wire
 
@@ -102,12 +104,12 @@ timeout path is the same machinery with `context.WithTimeout` upstream, translat
 
 That machinery has a Docker-shaped lifetime; the behavior it produces does not. The
 kill-by-second-exec dance exists because Docker's API offers no handle on the exec'd
-process — plan 07's guest agent supervises its own children in their own pid namespace
-and kills them directly, and plans 14 and 21 inherit that path rather than rebuilding
+process — roadmap 07's guest agent supervises its own children in their own pid namespace
+and kills them directly, and roadmaps 14 and 21 inherit that path rather than rebuilding
 this one. What is permanent is the contract: cancellation kills the process, the call
 does not return before the reap, and a deadline is distinguishable from a plain cancel
 via `errors.Is`. Build the Docker version knowing it is scaffolding for the contract,
-the same way this plan's `stdcopy` demux is scaffolding for the guest agent's native
+the same way this roadmap's `stdcopy` demux is scaffolding for the guest agent's native
 stream split.
 
 <Figure caption="The exec request path. Cancellation closes the attach connection for free, but killing the remote process is a separate, deliberate step.">
@@ -189,14 +191,14 @@ type Spec struct {
 
 type ExecResult struct {
     ExitCode int
-    Stdout   []byte // buffered in this plan; streaming is a later, explicit change
+    Stdout   []byte // buffered in this roadmap; streaming is a later, explicit change
     Stderr   []byte
 }
 
 var ErrExecTimeout = errors.New("exec deadline exceeded")
 
 type Runtime interface {
-    // ...plan 02 methods...
+    // ...roadmap 02 methods...
     // Exec runs cmd in the sandbox. When ctx is cancelled or its deadline passes,
     // the process inside the container is killed and ErrExecTimeout (or ctx.Err())
     // is returned.
@@ -212,12 +214,12 @@ type ExecOpts struct {
 
 Committed decision: output is **buffered** with a size cap (e.g. 1 MiB per stream,
 truncation flagged in the result). Streaming is deliberately deferred to the guest-API
-plan (07) so it is built once, in the right place.
+roadmap (07) so it is built once, in the right place.
 
 Committed decision: `AllowNetwork: false` means **no egress**, not "no network
-interface" — even though this plan implements it with Docker's `none` network, which
-happens to deliver both. The distinction matters one plan later. Plan 07 moves exec and
-files onto a guest agent the plane reaches over the network, and plan 21's Kata pods
+interface" — even though this roadmap implements it with Docker's `none` network, which
+happens to deliver both. The distinction matters one roadmap later. Roadmap 07 moves exec and
+files onto a guest agent the plane reaches over the network, and roadmap 21's Kata pods
 always receive a pod IP; an interface-less sandbox and a reachable guest agent are
 mutually exclusive there. Fixing the *meaning* now keeps three backends from
 implementing three different flags: later backends satisfy it with a filter — firewall
@@ -358,7 +360,7 @@ Required tests under `make test-docker`:
 - `TestNetworkDenied` — with `AllowNetwork: false`, an HTTP request from inside fails.
 - `TestOutputTruncation` — output beyond the cap is truncated and flagged.
 
-Plus one manual verification recorded in the plan when closing it: read the cgroup
+Plus one manual verification recorded in the roadmap when closing it: read the cgroup
 files for a limited sandbox inside the VM and confirm the values match the Spec.
 
 Deliberately untested: interactive/TTY sessions, stdin, disk I/O limits, streaming.
@@ -380,7 +382,7 @@ bandwidth — that nuance is deferred to the isolation capstones.
     href="https://man7.org/linux/man-pages/man7/cgroups.7.html"
   >
     The authoritative overview of both cgroup versions and the controller model —
-    context for why the files this plan reads live where they do.
+    context for why the files this roadmap reads live where they do.
   </Resource>
   <Resource
     kind="docs"
@@ -388,14 +390,14 @@ bandwidth — that nuance is deferred to the isolation capstones.
     href="https://docs.kernel.org/admin-guide/cgroup-v2.html"
   >
     The exact semantics of `memory.max`, `cpu.max`, and `pids.max` — including the
-    OOM and `EAGAIN` behaviors this plan's negative tests provoke.
+    OOM and `EAGAIN` behaviors this roadmap's negative tests provoke.
   </Resource>
   <Resource
     kind="docs"
     title="Resource constraints"
     href="https://docs.docker.com/engine/containers/resource_constraints/"
   >
-    Docker's own account of the flags `Spec` maps onto, plus limits this plan skips
+    Docker's own account of the flags `Spec` maps onto, plus limits this roadmap skips
     (swap, block I/O) and their interaction gotchas.
   </Resource>
   <Resource
@@ -405,14 +407,14 @@ bandwidth — that nuance is deferred to the isolation capstones.
     by="The Go Blog"
   >
     The original design rationale for `context.Context` — deadlines, cancellation
-    propagation, and why every blocking call in this plan takes one.
+    propagation, and why every blocking call in this roadmap takes one.
   </Resource>
   <Resource
     kind="docs"
     title="package stdcopy — github.com/moby/moby/api/pkg/stdcopy"
     href="https://pkg.go.dev/github.com/moby/moby/api/pkg/stdcopy"
   >
-    The demultiplexer this plan leans on, with the frame-header format documented —
-    the spec you will reimplement natively in plan 07.
+    The demultiplexer this roadmap leans on, with the frame-header format documented —
+    the spec you will reimplement natively in roadmap 07.
   </Resource>
 </Resources>

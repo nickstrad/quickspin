@@ -8,11 +8,11 @@ Make the control plane survive reality: a background reconciler compares desired
 (SQLite) with actual state (the runtime) and repairs drift; every sandbox gets a TTL so
 abandoned sandboxes are reaped; every lifecycle transition is appended to an event log.
 Create becomes asynchronous — `POST /v1/sandboxes` returns `pending` immediately and
-the reconciler drives it to `running`. This is the plan where Quickspin stops being a
+the reconciler drives it to `running`. This is the roadmap where Quickspin stops being a
 CRUD app and starts being infrastructure.
 
-<KeyPoint label="Why this plan matters">
-  Everything before this plan assumed the process never dies mid-operation. This plan
+<KeyPoint label="Why this roadmap matters">
+  Everything before this roadmap assumed the process never dies mid-operation. This roadmap
   removes that assumption: after any crash, at any point, the system converges — and a
   script proves it.
 </KeyPoint>
@@ -102,7 +102,7 @@ the one safe action? That table *is* `decideReconcileAction`, and making it a pu
 function is the highest-leverage extraction in the project: the branching is where a
 reordered condition destroys live sandboxes, and a pure function lets you test every
 row without Docker, a clock, or sleeps. The orphan row of the table (labeled container,
-no DB record) is only safe because plan 02 wrote `quickspin.managed` labels — without
+no DB record) is only safe because roadmap 02 wrote `quickspin.managed` labels — without
 them, "destroy unknown containers" would eat the user's unrelated workloads.
 
 <Mermaid
@@ -204,7 +204,7 @@ Committed decisions:
   actions and performs I/O. This is the single highest-leverage extraction in the
   project: a reordered branch here destroys live sandboxes.
 - Orphan policy: containers labeled `quickspin.managed` with no DB row are destroyed
-  and logged (the DB is authoritative). The label from plan 02 is what makes this safe.
+  and logged (the DB is authoritative). The label from roadmap 02 is what makes this safe.
 - The clock is injected (`func() time.Time`) so TTL tests don't sleep.
 
 <Callout tone="system" title="Ownership of the observed-state column is exclusive">
@@ -310,7 +310,7 @@ sequenceDiagram
     container_id=? WHERE id=? AND state='pending'`. Check
     `sql.Result.RowsAffected()` — zero means the world changed underneath you, and the
     correct reaction is to undo your side effect (destroy the container you just made,
-    which is safe because plan 02 made destroy idempotent). Write the resurrection test
+    which is safe because roadmap 02 made destroy idempotent). Write the resurrection test
     with a fake runtime whose `Create` blocks on a channel so the test controls the
     interleaving deterministically.
   </Hint>
@@ -379,7 +379,7 @@ and vice versa, with zero leaks — within one reconcile interval. Also creates 
 container with the quickspin label by hand and confirms the reconciler removes it.
 
 Deliberately untested: two control-plane instances racing (single-instance is a stated
-assumption until plan-set two), clock skew, event-log compaction.
+assumption until roadmap-set two), clock skew, event-log compaction.
 
 ## Solo-developer tradeoffs
 
@@ -398,7 +398,7 @@ convergence, provable by script.
     title="Controllers"
     href="https://kubernetes.io/docs/concepts/architecture/controller/"
   >
-    The canonical statement of the pattern this plan implements: a control loop that
+    The canonical statement of the pattern this roadmap implements: a control loop that
     watches desired state and moves current state toward it, at planetary scale.
   </Resource>
   <Resource
@@ -408,7 +408,7 @@ convergence, provable by script.
     by="James Bowes"
   >
     Walks the edge-vs-level distinction through concrete missed-event failure
-    scenarios — the argument for this plan's dumb-ticker design, drawn out slowly.
+    scenarios — the argument for this roadmap's dumb-ticker design, drawn out slowly.
   </Resource>
   <Resource
     kind="article"
@@ -417,7 +417,7 @@ convergence, provable by script.
     by="Martin Fowler"
   >
     Where the append-only event table leads if you promote it from audit trail to
-    source of truth — useful for seeing precisely which half of the idea this plan uses.
+    source of truth — useful for seeing precisely which half of the idea this roadmap uses.
   </Resource>
   <Resource
     kind="article"
@@ -432,7 +432,7 @@ convergence, provable by script.
     title="Designing Data-Intensive Applications"
     by="Martin Kleppmann, ch. 7 (Transactions)"
   >
-    The general theory behind this plan's lost-update fix: read-modify-write races,
+    The general theory behind this roadmap's lost-update fix: read-modify-write races,
     compare-and-set, and why re-checking state in the WHERE clause closes the window.
   </Resource>
 </Resources>

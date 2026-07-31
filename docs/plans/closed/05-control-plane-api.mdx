@@ -2,12 +2,14 @@
 
 Depends on: 04.
 
+{/* Completed 2026-07-30. Current code and tests are authoritative where delivery differs from this roadmap. */}
+
 ## Summary
 
 Wrap the runtime in a long-running Go HTTP service — the control plane. It owns sandbox
 records in SQLite, exposes a versioned JSON API (`/v1/sandboxes`...), assigns lifecycle
 states, and supports idempotent creation via client-supplied idempotency keys. The CLI
-becomes a client of the API instead of calling the runtime directly. From this plan on,
+becomes a client of the API instead of calling the runtime directly. From this roadmap on,
 Quickspin is a service, not a tool.
 
 ## Industry context
@@ -16,7 +18,7 @@ This is the piece users literally point their SDKs at: E2B's and Daytona's publi
 APIs look strikingly like the surface below (create with a spec, poll state, exec,
 files, delete). Two industry patterns are load-bearing here. First, **desired state
 lives in a database, actual state lives in the runtime**, and they are allowed to
-disagree — reconciling them is plan 06's job; this plan makes the disagreement
+disagree — reconciling them is roadmap 06's job; this roadmap makes the disagreement
 representable. Second, **idempotency keys** (as popularized by Stripe's API) are how
 every serious platform makes "the client retried a create after a network blip" not
 produce two billed sandboxes.
@@ -35,13 +37,13 @@ produce two billed sandboxes.
 
 ### Concept: the database records intent, the runtime records reality
 
-Until now, "does the sandbox exist" had one answer: ask Docker. This plan introduces a
+Until now, "does the sandbox exist" had one answer: ask Docker. This roadmap introduces a
 second answer — the SQLite row — and the design hinges on which one is written first.
 The create handler inserts a `pending` record *before* touching the runtime, then
 transitions it to `running` or `failed` based on what actually happened. That ordering
 is what makes crashes representable instead of catastrophic: if the process dies
 between the insert and the Docker call, restart finds a `pending` row with no
-container — a fact a future reconciler (plan 06) can see and act on. Written the other
+container — a fact a future reconciler (roadmap 06) can see and act on. Written the other
 way around (Docker first, row second), a crash produces a container no database knows
 about: an invisible, unbilled, undeletable leak. The database row is not a cache of
 Docker's state; it is the authoritative statement of what *should* exist, and the two
@@ -77,7 +79,7 @@ are allowed to disagree until something reconciles them.
     <text x="465" y="146" textAnchor="middle" fontSize="10" fill="#8f3423">3</text>
     <path d="M 320 64 L 320 76 L 470 92" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow05b)" />
     <text x="420" y="72" textAnchor="middle" fontSize="10" fill="#7f5d43">crash between 1 and 3 leaves a</text>
-    <text x="420" y="85" textAnchor="middle" fontSize="10" fill="#7f5d43">pending row plan 06 can reconcile</text>
+    <text x="420" y="85" textAnchor="middle" fontSize="10" fill="#7f5d43">pending row roadmap 06 can reconcile</text>
   </svg>
 </Figure>
 
@@ -138,7 +140,7 @@ table: on create, look the key up; a hit returns the existing sandbox's current 
 (making the retry a read), a miss creates and records the mapping. The subtle cases
 worth deciding consciously: a request with no key is a plain create every time, and
 the lookup-or-insert should share the create's transaction — though truly concurrent
-retries racing one key are explicitly out of scope until plan 08's quota work makes
+retries racing one key are explicitly out of scope until roadmap 08's quota work makes
 transactions load-bearing anyway.
 
 <Mermaid
@@ -171,7 +173,7 @@ sequenceDiagram
 
 ### Concept: the handler is where errors stop being Go values
 
-Below this plan, failures travel as wrapped sentinels (`errors.Is(err,
+Below this roadmap, failures travel as wrapped sentinels (`errors.Is(err,
 runtime.ErrNotFound)`). Above it, they travel as JSON with a machine-readable `code` —
 because SDK code will branch on `"sandbox_not_found"`, and prose messages must be free
 to improve without breaking anyone. The handler is the propagation stop: it is the one
@@ -179,7 +181,7 @@ place that inspects the chain with `errors.Is`, chooses a status (404, 422, 409)
 writes the envelope through `WriteError`, and logs the full diagnostic once. Nothing
 below it logs-and-returns (double logging), and nothing above it exists. Keeping the
 `ErrorResponse` DTO and the `WriteJSON`/`WriteError` helpers in `internal/httpapi` —
-owned by neither server nor client — is what lets plans 09, 10, and 17 consume the
+owned by neither server nor client — is what lets roadmaps 09, 10, and 17 consume the
 same wire format instead of re-deriving it.
 
 ## Design and interfaces
@@ -212,20 +214,20 @@ Committed decisions:
 
 - Routing uses `github.com/go-chi/chi/v5` — the project's first HTTP dependency.
   chi routers and middleware are plain `net/http` handlers, so nothing else in the
-  plan (middleware shape, `httptest` suites, graceful shutdown) changes with it.
-- Create is **synchronous** in this plan (request returns when the sandbox is running
-  or failed). Plan 06 revisits this honestly; note it now as a known simplification.
+  roadmap (middleware shape, `httptest` suites, graceful shutdown) changes with it.
+- Create is **synchronous** in this roadmap (request returns when the sandbox is running
+  or failed). Roadmap 06 revisits this honestly; note it now as a known simplification.
 - The store is behind a small Go interface so tests can use `:memory:` SQLite. Per the
   concurrency reference's store rules: typed reads, records by value in and out,
   `ErrNotFound` + zero value for missing keys, and **no locking or transaction policy
   of its own** — invariants that span calls (state transition + event append, quota
-  check + insert in plan 08) are the caller's transaction.
-- Now that plan 15 commits prod to Postgres, two of its costs move here where they are
+  check + insert in roadmap 08) are the caller's transaction.
+- Now that roadmap 15 commits prod to Postgres, two of its costs move here where they are
   nearly free: the schema ships as **versioned migration files** (`migrations/NNNN_*.sql`,
   embedded, applied at startup) rather than create-if-missing, and it avoids
   SQLite-isms Postgres will reject (app-generated string IDs, no serial PKs, ISO-8601
   UTC text timestamps mapping cleanly to `timestamptz`). The store test suite is
-  written as `storetest.Run(t, factory)` from day one so plan 15 adds a second caller
+  written as `storetest.Run(t, factory)` from day one so roadmap 15 adds a second caller
   instead of an extraction refactor.
 - State transitions happen in one place (a `transition(id, from, to)` helper inside a
   transaction) — never as scattered UPDATEs. The legality check itself is a pure
@@ -239,8 +241,8 @@ Committed decisions:
 
 <Callout tone="system" title="The one ordering that is not negotiable">
   Never let an HTTP handler touch Docker without recording intent in the database
-  first. Every other decision in this plan can be revisited; this ordering is the
-  foundation plan 06's reconciler stands on.
+  first. Every other decision in this roadmap can be revisited; this ordering is the
+  foundation roadmap 06's reconciler stands on.
 </Callout>
 
 ## Tasks
@@ -389,7 +391,7 @@ asserts on JSON with `jq`, kills the server mid-run and confirms a restart still
 the surviving sandbox record. Exits 0 only if all checks pass and no labeled containers
 leak.
 
-Deliberately untested: concurrent creates racing one idempotency key, auth (plan 08),
+Deliberately untested: concurrent creates racing one idempotency key, auth (roadmap 08),
 TLS, request body size limits.
 
 ## Solo-developer tradeoffs
@@ -400,7 +402,7 @@ keeps this a single deployable binary with zero infra — the right call for one
 developer — and the store interface plus the state machine mean the Postgres/async
 migration later is mechanical, not architectural. The one habit not to defer: never let
 an HTTP handler touch Docker without recording intent in the database first. That
-ordering is what plan 06 builds on.
+ordering is what roadmap 06 builds on.
 
 ## Go deeper
 
@@ -411,7 +413,7 @@ ordering is what plan 06 builds on.
     href="https://go-chi.io/"
     by="go-chi"
   >
-    The router this plan builds on — lightweight, `net/http`-compatible, with the
+    The router this roadmap builds on — lightweight, `net/http`-compatible, with the
     `Use`/`Route`/`URLParam` patterns and stock middleware the server skeleton uses.
   </Resource>
   <Resource
@@ -421,7 +423,7 @@ ordering is what plan 06 builds on.
     by="The Go Blog"
   >
     The design behind `log/slog` — handlers, attrs, and child loggers — which is the
-    machinery under this plan's per-component logger convention.
+    machinery under this roadmap's per-component logger convention.
   </Resource>
   <Resource
     kind="docs"
@@ -445,7 +447,7 @@ ordering is what plan 06 builds on.
     href="https://stripe.com/blog/idempotency"
     by="Brandur Leach, Stripe"
   >
-    The industry-standard idempotency-key design this plan's create endpoint copies,
+    The industry-standard idempotency-key design this roadmap's create endpoint copies,
     including the retry-and-network-failure reasoning that motivates it.
   </Resource>
   <Resource

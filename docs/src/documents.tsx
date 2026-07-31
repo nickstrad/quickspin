@@ -29,7 +29,7 @@ const instructionSource = import.meta.glob<string>("../plans/AGENTS.md", {
   query: "?raw",
 });
 
-export type DocumentSection = "Start here" | "Open plans" | "Closed plans" | "Reference";
+export type DocumentSection = "Start here" | "Roadmap" | "Reference";
 
 export type DocumentHeading = {
   depth: number;
@@ -37,14 +37,17 @@ export type DocumentHeading = {
   id: string;
 };
 
+export type Roadmap =
+  | { number: string; status: "future" }
+  | { completedOn: string; number: string; status: "completed" };
+
 export type ReaderDocument = {
   path: string;
   route: string;
   title: string;
-  /** Title with any leading plan number ("01 — ") stripped, for compact nav labels. */
+  /** Title with any leading roadmap number ("01 — ") stripped, for compact nav labels. */
   navTitle: string;
-  /** The leading plan number from the file name, if any (e.g. "03"). */
-  planNumber?: string;
+  roadmap?: Roadmap;
   description: string;
   section: DocumentSection;
   order: number;
@@ -69,10 +72,23 @@ function routeFor(path: string): string {
 }
 
 function sectionFor(path: string): DocumentSection {
-  if (path.startsWith("plans/open/")) return "Open plans";
-  if (path.startsWith("plans/closed/")) return "Closed plans";
+  if (path.startsWith("plans/open/") || path.startsWith("plans/closed/")) return "Roadmap";
   if (path.startsWith("reference/")) return "Reference";
   return "Start here";
+}
+
+function roadmapFor(path: string, source: string): Roadmap | undefined {
+  const number = path.match(/^plans\/(?:open|closed)\/(\d+)-/)?.[1];
+  if (!number) return undefined;
+
+  if (path.startsWith("plans/open/")) return { number, status: "future" };
+
+  const completedOn = source.match(/\{\/\* Completed (\d{4}-\d{2}-\d{2})\./)?.[1];
+  if (!completedOn) {
+    throw new Error(`${path} is closed but has no completion date`);
+  }
+
+  return { completedOn, number, status: "completed" };
 }
 
 function titleFor(path: string, source: string): string {
@@ -161,7 +177,7 @@ function buildDocument(
     route: routeFor(path),
     title,
     navTitle: title.replace(/^\d+\s+[—-]\s+/, ""),
-    planNumber: path.match(/\/(\d+)-/)?.[1],
+    roadmap: roadmapFor(path, source),
     description,
     section: sectionFor(path),
     order: orderFor(path),
@@ -204,9 +220,8 @@ const agentDocument: ReaderDocument[] = agentEntry
 
 const sectionOrder: Record<DocumentSection, number> = {
   "Start here": 0,
-  "Open plans": 1,
-  "Closed plans": 2,
-  Reference: 3,
+  Roadmap: 1,
+  Reference: 2,
 };
 
 // The single source of truth for section identity and display order. The sidebar

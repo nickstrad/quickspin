@@ -19,9 +19,9 @@ Each package owns its error type, named after the package, in that package's `er
 
 | Package                  | Type                | Exists?         |
 | ------------------------ | ------------------- | --------------- |
-| `internal/runtime`       | `RuntimeError`      | plan 02         |
-| `internal/controlplane`  | `ControlPlaneError` | future (plan 05) |
-| `internal/worker`        | `WorkerError`       | future (plan 17) |
+| `internal/runtime`       | `RuntimeError`      | roadmap 02         |
+| `internal/controlplane`  | `ControlPlaneError` | future (roadmap 05) |
+| `internal/worker`        | `WorkerError`       | future (roadmap 17) |
 
 They are deliberately near-identical — about 30 lines each, differing only in the name.
 A shared `errkit` package would exist for one line (`debug.Stack()`), and the duplication
@@ -41,7 +41,7 @@ work through the whole chain.
 
 ### Composing with the sentinel errors
 
-Plan 02 commits `internal/runtime` to sentinel errors (`ErrNotFound`, `ErrImageMissing`)
+Roadmap 02 commits `internal/runtime` to sentinel errors (`ErrNotFound`, `ErrImageMissing`)
 that callers test with `errors.Is`. The struct type does not replace those — it carries
 them. Put the sentinel in `Err` at the origin, and because `Unwrap()` walks the chain,
 `errors.Is(err, runtime.ErrNotFound)` still succeeds through any number of `Wrap`s above:
@@ -85,12 +85,12 @@ Put the cause in `Err`, never formatted into `Message` — `Error()` appends it 
   log the underlying error once, then continue or mint a fresh error of your own
   package's type.
 
-The HTTP case arrives earlier than the worker split: the guest agent (plan 07) is the
-first separate process, and the worker daemon (plan 17) is the second. Either way, a Go
+The HTTP case arrives earlier than the worker split: the guest agent (roadmap 07) is the
+first separate process, and the worker daemon (roadmap 17) is the second. Either way, a Go
 error never crosses the wire — the remote side serializes the shared error DTO, and the
 client (`guest.Client`, the plane's worker client) logs what the DTO said and mints a
 fresh error of its own package's type rather than pretending to wrap an error it does not
-have. The reconciler loop (plan 06) is the other case — a top-of-goroutine loop that logs
+have. The reconciler loop (roadmap 06) is the other case — a top-of-goroutine loop that logs
 and continues rather than returning to a caller that isn't there.
 
 ## Logging
@@ -137,11 +137,11 @@ across components.
 
 ## HTTP responses (once there is an HTTP surface)
 
-When the control plane grows an HTTP API (plan 05) and later clients (the guest client
-in plan 07, the worker client in plan 17), a shared `internal/httpapi` helper should own
+When the control plane grows an HTTP API (roadmap 05) and later clients (the guest client
+in roadmap 07, the worker client in roadmap 17), a shared `internal/httpapi` helper should own
 the status-plus-JSON dance rather than each handler hand-rolling it. An `ErrorResponse`
 DTO is a wire format shared by the server and the client, so it belongs to neither —
-plan 05 creates the package for exactly this reason.
+roadmap 05 creates the package for exactly this reason.
 
 ```go
 httpapi.WriteError(w, http.StatusNotFound, "sandbox not found")  // body Code == 404, always
@@ -159,8 +159,8 @@ nothing else.
   costs a `debug.Stack()` per error for no payoff until something reads it.
 - `Wrap` may be unused in a package that is always at one end of the chain. Keeping it so
   every package presents the same API is a reasonable call, but it is a call.
-- Sentinel vs struct is resolved in the plans (see plan 02): the sentinels are the public
+- Sentinel vs struct is resolved in the roadmaps (see roadmap 02): the sentinels are the public
   contract callers switch on; the struct is the diagnostic envelope carrying them in
-  `Err`. Plan 02 pins the composition with a test
+  `Err`. Roadmap 02 pins the composition with a test
   (`TestRuntimeErrorPreservesSentinel`) so the error type can never silently swallow a
   sentinel it was handed.

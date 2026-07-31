@@ -4,7 +4,7 @@ This document explains the runtime test architecture that exists in the code tod
 each layer is, the concepts behind it, why it is worth this much machinery, and how the
 same shape extends to Firecracker, Kata, or any future backend. It is the companion to
 [`runtime-backend-testing.mdx`](runtime-backend-testing.mdx), which is the rulebook: the
-durable requirements every runtime plan must satisfy. Read this one to understand; read
+durable requirements every runtime roadmap must satisfy. Read this one to understand; read
 that one to comply.
 
 The goal is that "the suite is green" stops being a fact you trust and becomes a fact you
@@ -242,7 +242,7 @@ non-test files, so any package can import the double, but it never leaks into
 This is the piece designed for the project's future more than its present. A
 *conformance suite* (also called a contract test) is one reusable set of assertions
 encoding what an interface *promises*, run against every implementation of it. Today
-there is one real backend; plans 14 and 21 add Firecracker and Kata/Kubernetes. Without a
+there is one real backend; roadmaps 14 and 21 add Firecracker and Kata/Kubernetes. Without a
 shared suite, each backend would accumulate its own slightly different idea of what
 `Destroy` means, and consumers written against one would subtly break on another. With
 it, "is this a valid Runtime?" is a single function call:

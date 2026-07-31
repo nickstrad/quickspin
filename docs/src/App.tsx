@@ -9,22 +9,43 @@ import {
   useRef,
   useState,
 } from "react";
-import { ArrowIcon, CloseIcon, FileIcon, MenuIcon, SearchIcon } from "./icons";
+import { ArrowIcon, CheckIcon, CloseIcon, FileIcon, MenuIcon, SearchIcon } from "./icons";
 import {
   documents,
   resolveDocument,
   sections,
-  type DocumentSection,
   type ReaderDocument,
+  type Roadmap,
 } from "./documents";
 import { mdxComponents } from "./mdx-components";
 
-// Display label shown above each document. Sections without an entry fall back to
-// their own name.
-const categoryLabels: Partial<Record<DocumentSection, string>> = {
-  "Open plans": "Implementation plan",
-  "Closed plans": "Completed plan",
-};
+const completionDateFormatter = new Intl.DateTimeFormat("en-US", {
+  dateStyle: "long",
+  timeZone: "UTC",
+});
+
+function RoadmapStatus({ roadmap }: { roadmap: Roadmap }) {
+  const completed = roadmap.status === "completed";
+  const completedOn = completed
+    ? completionDateFormatter.format(new Date(`${roadmap.completedOn}T00:00:00Z`))
+    : undefined;
+
+  return (
+    <div className={`roadmap-status roadmap-status--${roadmap.status}`}>
+      <span className="roadmap-status__mark">
+        {completed ? <CheckIcon /> : roadmap.number}
+      </span>
+      <div>
+        <strong>{completed ? "Delivered" : "Future state"}</strong>
+        <p>
+          {completed
+            ? `Marked complete ${completedOn}. This roadmap is retained as historical context; current code and tests are authoritative where delivery differs.`
+            : "This roadmap outlines Quickspin’s intended direction, not its current behavior. Use the codebase as the authority for what exists today."}
+        </p>
+      </div>
+    </div>
+  );
+}
 
 function currentRoute(): string | null {
   return new URLSearchParams(window.location.search).get("doc");
@@ -129,9 +150,15 @@ const Sidebar = memo(function Sidebar({
                     onClick={() => onNavigate(document)}
                   >
                     <span className="nav-item__number">
-                      {document.planNumber ?? <FileIcon />}
+                      {document.roadmap?.number ?? <FileIcon />}
                     </span>
                     <span>{document.navTitle}</span>
+                    {document.roadmap?.status === "completed" ? (
+                      <span className="nav-item__complete" title="Completed roadmap">
+                        <CheckIcon />
+                        <span className="sr-only">Completed roadmap</span>
+                      </span>
+                    ) : null}
                   </button>
                 ))}
               </section>
@@ -242,7 +269,8 @@ function App() {
   };
 
   const ActiveDocument = active.Component;
-  const categoryLabel = categoryLabels[active.section] ?? active.section;
+  const categoryLabel =
+    active.roadmap?.status === "completed" ? "Completed roadmap" : active.section;
 
   return (
     <div className="app-shell">
@@ -273,6 +301,8 @@ function App() {
             <span>{active.readingMinutes} min read</span>
             <span>{active.path}</span>
           </div>
+
+          {active.roadmap ? <RoadmapStatus roadmap={active.roadmap} /> : null}
 
           <div className="document-body" onClick={handleDocumentClick}>
             <MDXProvider components={mdxComponents}>

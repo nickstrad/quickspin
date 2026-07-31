@@ -12,37 +12,37 @@ microVMs inside the Lima VM (nested virtualization), get the `quickspin-guest` b
 running inside them, and implement enough of a second `Runtime` backend
 (`firecracker`) that a sandbox created with `--backend firecracker` supports create /
 exec-via-guest / files / destroy through the same control plane and SDKs. The backend
-also carries plan 03's binary egress contract across the VM boundary: every guest keeps
+also carries roadmap 03's binary egress contract across the VM boundary: every guest keeps
 its network device so the plane can reach it, while host firewall policy decides
 whether workload-initiated traffic may leave. Snapshots, warm pools, and production
-hardening are explicitly out of scope — this plan buys the mental model and the resume
+hardening are explicitly out of scope — this roadmap buys the mental model and the resume
 line, not parity with Docker.
 
-The plan ends with the **prod cutover**: the plan 16 host (chosen for its `/dev/kvm`
+The roadmap ends with the **prod cutover**: the roadmap 16 host (chosen for its `/dev/kvm`
 precisely for this moment) gains the Firecracker backend beside Docker, and new prod
 sandboxes default to it. Because the production track ran Docker-backed first, this
-is the proof that the plan 07 architecture holds — the backend swaps underneath a
+is the proof that the roadmap 07 architecture holds — the backend swaps underneath a
 live, distributed platform without touching a workload code path.
 
 ## Industry context
 
 Firecracker is the reference answer to "containers share the host kernel" — AWS built
 it for Lambda; E2B, and Vercel Sandbox run on it; Fly runs microVMs for the same
-reason. The architectural payoff of plan 07 lands here: because workload operations go
+reason. The architectural payoff of roadmap 07 lands here: because workload operations go
 through the guest agent over the network rather than through `docker exec`, a VM that
 merely (a) boots and (b) has a reachable guest is already a full Quickspin sandbox.
-What changes underneath is everything plan 13 made visible: instead of namespaces
+What changes underneath is everything roadmap 13 made visible: instead of namespaces
 sharing your kernel, each sandbox gets its own kernel behind KVM, and the isolation
 boundary moves from "syscall filtering" to "virtual hardware."
 
 <Compare>
-  <CompareItem eyebrow="Plans 02–13" title="Container: shared kernel">
+  <CompareItem eyebrow="Roadmaps 02–13" title="Container: shared kernel">
     Every sandbox syscall lands in the host kernel; isolation is namespaces, cgroups,
     and capability/seccomp filtering of that one shared attack surface. Fast and
-    dense, but one kernel bug is a full escape — the exact worry plan 13 made
+    dense, but one kernel bug is a full escape — the exact worry roadmap 13 made
     concrete.
   </CompareItem>
-  <CompareItem eyebrow="This plan" title="MicroVM: separate kernel">
+  <CompareItem eyebrow="This roadmap" title="MicroVM: separate kernel">
     Each sandbox runs its own kernel on virtual hardware behind KVM. The host exposes
     only a handful of virtio devices; escaping means breaking the hardware
     virtualization boundary, not finding a syscall bug. The cost is a real boot and a
@@ -57,12 +57,12 @@ boundary moves from "syscall filtering" to "virtual hardware."
 - The Firecracker control model: an API socket per VM; configure boot source, drives,
   network; `InstanceStart` — driven from Go via its API (the SDK or plain HTTP).
 - Building a guest world: an uncompressed kernel image, a rootfs ext4 built from the
-  same alpine export as plan 13, and a tiny init that brings up networking and execs
+  same alpine export as roadmap 13, and a tiny init that brings up networking and execs
   `quickspin-guest` — closing the loop on why the guest is a static binary.
 - MicroVM networking: one tap device per VM, addresses, and why platforms obsess over
   this part; stateful host filtering that separates plane-to-guest management traffic
   from guest-initiated egress.
-- An honest boot-time measurement to place next to plan 11's numbers.
+- An honest boot-time measurement to place next to roadmap 11's numbers.
 
 ### Concept: Firecracker is a process, and the VM dies with it
 
@@ -98,7 +98,7 @@ rootfs is a shell script you wrote. Every stage that can fail reports on the ser
 console, which is why capturing the firecracker process's stdout to a per-VM log file
 is not optional plumbing but your only debugger.
 
-<Figure caption="Create walks the whole path: spawn the VMM, configure over its API socket, InstanceStart, kernel boot, your init, and finally the guest agent answering /healthz — the same readiness signal plan 07 defined.">
+<Figure caption="Create walks the whole path: spawn the VMM, configure over its API socket, InstanceStart, kernel boot, your init, and finally the guest agent answering /healthz — the same readiness signal roadmap 07 defined.">
   <svg viewBox="0 0 640 300" role="img" aria-label="Firecracker boot path from spawning the process through API configuration, kernel boot, init, to the guest agent serving healthz">
     <defs>
       <marker id="arrow14" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -147,7 +147,7 @@ artifacts and each teaches something. The **kernel** is a plain uncompressed ima
 (the Firecracker CI kernels work) — there is no distro, no initramfs, no modules; if
 virtio-net is not compiled in, networking silently does not exist. The **rootfs** is
 an ext4 *file*, not a directory: `dd` an empty file, `mkfs.ext4`, loop-mount, untar
-the same alpine export plan 13 used, drop in `quickspin-guest`. This is why the guest
+the same alpine export roadmap 13 used, drop in `quickspin-guest`. This is why the guest
 agent had to be a static binary all along — there is no glibc contract with a distro
 you control, and alpine is musl anyway. The **init** is the part most people have
 never written: the kernel execs exactly one program as PID 1, and until your shell
@@ -169,7 +169,7 @@ directly. NAT is conditional: it is installed only when `AllowNetwork` permits t
 to forward guest traffic to its uplink. The engineering lesson is in the allocator:
 taps and subnets are host-global resources created outside any transaction, and
 concurrent creates racing for the same /30 is the textbook check-then-take bug — which
-is why the plan pins the allocator to the concurrency reference's category-3 shape
+is why the roadmap pins the allocator to the concurrency reference's category-3 shape
 (allocate and mark in one locked helper) with its own race test. It is also the seed of
 why real platforms obsess here: per-VM egress policy, MAC/IP spoofing prevention, and
 thousands of taps per host all live in this layer; your version is the minimal honest
@@ -202,9 +202,9 @@ flowchart LR
 
 ### Concept: keep the interface; filter who may start a connection
 
-Plan 03's `AllowNetwork` flag is a traffic-policy promise, not a virtual-hardware
+Roadmap 03's `AllowNetwork` flag is a traffic-policy promise, not a virtual-hardware
 switch. Both values therefore boot the same virtio-net device, TAP, and /30. Removing
-them for `false` would also remove the path plan 07 uses for health, exec, and files.
+them for `false` would also remove the path roadmap 07 uses for health, exec, and files.
 The host instead distinguishes connections by direction and state:
 
 | `AllowNetwork` | Plane starts a connection to the guest | Guest replies to that connection | Guest starts a new connection |
@@ -229,10 +229,10 @@ filtering remain deferred—the only choices here are deny new workload egress o
 ordinary egress.
 
 <Callout tone="warning" title="Nested virtualization is a precondition, not a given">
-  Everything in this plan needs `/dev/kvm` *inside* the Lima VM, which requires Lima's
+  Everything in this roadmap needs `/dev/kvm` *inside* the Lima VM, which requires Lima's
   `vz` VM type with nested virtualization enabled — available on Apple Silicon (M3 or
   later) via Virtualization.framework. Check `ls /dev/kvm` in the VM before writing
-  any Go; if it is absent, the fix is Lima configuration (plan 01's territory), and no
+  any Go; if it is absent, the fix is Lima configuration (roadmap 01's territory), and no
   amount of backend code will route around it.
 </Callout>
 
@@ -240,18 +240,18 @@ ordinary egress.
 
 `Spec` gains `Backend string` (`"docker"` default, `"firecracker"`); the control plane
 routes create/destroy to the chosen backend and the guest client needs only an address
-— unchanged from plan 07.
+— unchanged from roadmap 07.
 
 ```go
 // internal/runtime/firecracker — implements the same Runtime interface for
 // lifecycle; workload ops arrive via the guest as with Docker.
 // Per-VM artifacts: api socket, tap device, egress-policy handle, rootfs copy,
 // firecracker process. Destroy kills the process and removes all five;
-// idempotent like plan 02.
+// idempotent like roadmap 02.
 ```
 
-Committed decisions: the control plane runs **inside** the Lima VM for this plan
-(Firecracker needs /dev/kvm and tap devices; `make build-linux` from plan 01 pays off);
+Committed decisions: the control plane runs **inside** the Lima VM for this roadmap
+(Firecracker needs /dev/kvm and tap devices; `make build-linux` from roadmap 01 pays off);
 rootfs is copied per-VM (no CoW — slow and honest); a fixed /30 per VM from a small
 allocator — the allocator is the concurrency reference's category-3 shape (allocate and
 mark in one locked helper, never check-then-take) with its own race test, since
@@ -274,8 +274,8 @@ rolls back, and cleanup treats already-absent rules as success. Host forwarding 
 enabled once during environment setup, but per-VM forwarding and NAT remain explicit
 policy so two sandboxes with opposite flag values can coexist.
 
-<KeyPoint label="The boundary that makes this plan small">
-  The `Runtime` interface from plan 02 plus the guest agent from plan 07 mean this
+<KeyPoint label="The boundary that makes this roadmap small">
+  The `Runtime` interface from roadmap 02 plus the guest agent from roadmap 07 mean this
   backend only has to answer lifecycle questions: create, inspect, list, destroy, and
   "what is the guest's address". Exec, files, and limits arrive over the network
   exactly as they do for Docker — no second implementation of the workload API.
@@ -284,7 +284,7 @@ policy so two sandboxes with opposite flag values can coexist.
 The shape of the two lifecycle operations follows from the five-artifact footprint:
 
 <Mermaid
-  caption="Create is a supervised sequence where any failure unwinds everything acquired so far — the plan 02 create-gap discipline — and Destroy is the same removal list run unconditionally, with each step tolerating already-gone so a second destroy still exits 0."
+  caption="Create is a supervised sequence where any failure unwinds everything acquired so far — the roadmap 02 create-gap discipline — and Destroy is the same removal list run unconditionally, with each step tolerating already-gone so a second destroy still exits 0."
   code={`
 flowchart TD
     A["allocate a /30<br/>(allocate and mark in one locked call)"] --> B["per-VM dir + rootfs copy"]
@@ -306,7 +306,7 @@ flowchart TD
   <Task title="Write hack/setup-firecracker.sh">
     Verify `/dev/kvm` in Lima, fetch the firecracker binary and a CI kernel image,
     verify `nft`, enable host forwarding, and build the rootfs (with guest + init) via
-    script. All artifact scripts take `ARCH` (per plan 01's convention) even though
+    script. All artifact scripts take `ARCH` (per roadmap 01's convention) even though
     Lima only exercises arm64 — the prod cutover task reruns them for amd64 unchanged.
   </Task>
   <Task title="Boot one VM by hand to a shell">
@@ -332,18 +332,18 @@ flowchart TD
   </Task>
   <Task title="Validate and measure">
     `hack/validate-14.sh`, plus the boot-time measurement recorded in
-    `docs/reference/demo-latency.mdx` under plan 11's benchmark rules (p50/p95,
+    `docs/reference/demo-latency.mdx` under roadmap 11's benchmark rules (p50/p95,
     per-phase timestamps, stated method) — that document is the single durable
     benchmark table: cold docker create, snapshot create, and Firecracker
     boot-to-guest-healthy, side by side.
   </Task>
   <Task title="Cut prod over to Firecracker">
-    Rerun the artifact scripts with ARCH=amd64, extend plan 16's cloud-init to
+    Rerun the artifact scripts with ARCH=amd64, extend roadmap 16's cloud-init to
     install firecracker, deploy, and register the backend beside docker on the
     Hetzner host; flip the prod default backend. Validate via the public API: full
     lifecycle with `backend: firecracker`; `save` on a Firecracker sandbox returns a
     typed `snapshot_unsupported` error, not a 500 (docker stays registered so
-    save/restore remains validated in prod); the plan 12 harness gains its backend
+    save/restore remains validated in prod); the roadmap 12 harness gains its backend
     config switch — snapshot-restore on docker, plain-image create on firecracker,
     stated in the latency table.
   </Task>
@@ -381,7 +381,7 @@ flowchart TD
   >
     `dd if=/dev/zero of=rootfs.ext4 bs=1M count=300`, `mkfs.ext4`, `sudo mount -o
     loop`, untar the alpine export, copy the statically linked `quickspin-guest`
-    (this is why plan 07 built it static — alpine is musl, and there is no distro
+    (this is why roadmap 07 built it static — alpine is musl, and there is no distro
     contract inside a microVM), and write `/sbin/init` as a small executable shell
     script: mount `/proc`, `ip link set lo up`, `ip addr add` the guest /30 address
     on `eth0`, `ip route add default`, `exec /usr/local/bin/quickspin-guest`. The
@@ -424,7 +424,7 @@ flowchart TD
     firecracker with its stdout/stderr to a log file, wait for the socket file to
     appear (poll with a deadline — it is created asynchronously), issue the PUTs,
     `InstanceStart`, then poll guest `/healthz` with a context deadline. Any failure
-    unwinds everything so far — same create-gap discipline as plan 02. `Destroy`
+    unwinds everything so far — same create-gap discipline as roadmap 02. `Destroy`
     first SIGKILLs and reaps the process, then deletes the tap, policy rules, and
     directory and frees the /30; each step tolerates "already gone" so destroy stays
     idempotent. The process-first order is a security property: policy never
@@ -435,7 +435,7 @@ flowchart TD
     check="go test -race on the allocator test passes, and a create with an unknown backend string is rejected at spec validation, not deep in the runtime."
   >
     The control plane holds both runtimes and switches on `Spec.Backend` at
-    create/destroy; validation rejects unknown values with the plan 05 error shape.
+    create/destroy; validation rejects unknown values with the roadmap 05 error shape.
     The allocator race test launches N goroutines allocating concurrently and asserts
     all returned subnets are distinct — this is the concurrency reference's
     category-3 pattern, and it is the test most likely to catch a check-then-take
@@ -450,7 +450,7 @@ flowchart TD
     the rootfs drive or `root=/dev/vda`; boot completes but no init output means
     `/sbin/init` is not executable or has a bad interpreter line; init runs but curl
     fails means the tap/IP layer — `tcpdump -i tap-<id>` shows whether ARP is even
-    answered. For the crash check: the reconciler's liveness probe from plan 06 must
+    answered. For the crash check: the reconciler's liveness probe from roadmap 06 must
     treat "firecracker PID no longer exists" as the observed-state signal, and the
     cleanup path is exactly `Destroy`'s removal list — if leftovers survive, some
     removal step is not tolerant of the process already being gone.
@@ -485,18 +485,18 @@ Unit tests (`make test`, no Firecracker process):
 - Crash check: `kill -9` the firecracker process; the reconciler marks the sandbox
   `failed` and cleans up the leftovers.
 - Boot-to-guest-healthy time is measured and recorded in
-  `docs/reference/demo-latency.mdx` alongside plan 11's cold-vs-snapshot numbers,
+  `docs/reference/demo-latency.mdx` alongside roadmap 11's cold-vs-snapshot numbers,
   with the method stated (target: observe the order of magnitude, not hit a number).
-- The plan 12 demo harness completes one task with `backend: firecracker` — the full
+- The roadmap 12 demo harness completes one task with `backend: firecracker` — the full
   stack, SDK to microVM.
 - Prod cutover: `hack/validate-16.sh` reruns green against the public API with
   `backend: firecracker` as the default — full lifecycle works, `save` on a
   Firecracker sandbox returns typed `snapshot_unsupported` (docker-backed
   save/restore still passes), and the deploy that shipped the cutover rolled through
-  the plan 16 health gate.
+  the roadmap 16 health gate.
 
 Deliberately untested/out of scope: VM snapshots/resume (E2B's crown jewel — future
-plan set), jailer hardening, memory ballooning, CoW rootfs (overlay/reflink), running
+roadmap set), jailer hardening, memory ballooning, CoW rootfs (overlay/reflink), running
 many VMs, egress allowlists, DNS filtering, protocol-aware policy, and bandwidth
 metering.
 
@@ -505,13 +505,13 @@ metering.
 Production Firecracker stacks run the jailer, device-model hardening, snapshot trees,
 and CoW storage — multi-engineer territory. The jailer is worth understanding even
 unused: it wraps each firecracker process in a chroot, its own namespaces, cgroups,
-and a dropped-privilege uid — plan 13's exact toolkit, applied to the VMM itself,
+and a dropped-privilege uid — roadmap 13's exact toolkit, applied to the VMM itself,
 because a compromised device emulator is the remaining attack surface once guests
 have their own kernels. One unjailed VM with a copied rootfs is weekend territory and
 still crosses the line that matters: your platform demonstrably runs the same
 workload API on shared-kernel *and* separate-kernel isolation, chosen per sandbox by
 a field in the spec. That sentence — with the latency table to back it — is the
-strongest artifact this whole plan set produces for platform-infrastructure
+strongest artifact this whole roadmap set produces for platform-infrastructure
 interviews.
 
 ## Go deeper
@@ -523,7 +523,7 @@ interviews.
     href="https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md"
   >
     The upstream walkthrough of the exact socket-and-three-PUTs boot conversation
-    this plan's `Create` state machine automates, runnable by hand with curl first.
+    this roadmap's `Create` state machine automates, runnable by hand with curl first.
   </Resource>
   <Resource
     kind="docs"
@@ -539,7 +539,7 @@ interviews.
     href="https://github.com/firecracker-microvm/firecracker/blob/main/docs/network-setup.md"
   >
     The canonical tap-device recipe, including the forwarding and NAT boundary this
-    plan makes conditional on `AllowNetwork`.
+    roadmap makes conditional on `AllowNetwork`.
   </Resource>
   <Resource
     kind="docs"
@@ -572,7 +572,7 @@ interviews.
     title="firecracker-go-sdk"
     href="https://github.com/firecracker-microvm/firecracker-go-sdk"
   >
-    The official Go SDK this plan lets you choose instead of raw HTTP; its machine
+    The official Go SDK this roadmap lets you choose instead of raw HTTP; its machine
     configuration types double as documentation of every API field you might set.
   </Resource>
 </Resources>

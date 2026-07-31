@@ -2,9 +2,11 @@
 
 Depends on: nothing.
 
+{/* Completed 2026-07-30. Current code and tests are authoritative where delivery differs from this roadmap. */}
+
 ## Summary
 
-Set up the Linux environment every later plan runs against: a Lima VM on macOS running
+Set up the Linux environment every later roadmap runs against: a Lima VM on macOS running
 Docker, reachable from the Mac both over the Docker API socket and over SSH. Add a
 validation script that proves the environment works, and a Makefile target that
 cross-compiles Quickspin's Go binaries for `linux/arm64` so they can run inside the VM.
@@ -20,7 +22,7 @@ runs workloads on Linux hosts, because containers and microVMs are Linux kernel
 features (namespaces, cgroups, KVM). Their engineers develop on laptops but target
 fleet hosts; the Docker-socket-over-VM arrangement you build here is a one-machine
 miniature of that split. Docker Desktop hides this VM from you; Lima gives you the same
-thing with the hood open, which matters from plan 13 onward when you need to touch the
+thing with the hood open, which matters from roadmap 13 onward when you need to touch the
 kernel directly.
 
 ## What you'll learn
@@ -38,7 +40,7 @@ partition what a process can see, cgroups to limit what it can use). macOS's ker
 neither, so every "Docker on a Mac" setup is really Docker inside a hidden Linux VM.
 The `docker` CLI on your Mac is only a REST client: it serializes each command into an
 HTTP request and sends it to `dockerd`, wherever `DOCKER_HOST` points. That indirection
-is the seam this whole project builds on — plan 02's Go code will speak to the exact
+is the seam this whole project builds on — roadmap 02's Go code will speak to the exact
 same socket through the Docker SDK, and nothing in it will care that the daemon lives
 in a VM. When something fails later, the first diagnostic question is always *which
 side of the seam broke*: the client's environment (wrong `DOCKER_HOST`, socket not
@@ -83,7 +85,7 @@ path. Two properties matter. First, the forwarding is owned by the running `lima
 instance — stop the VM and the host socket goes stale, which is exactly the failure
 your validation script must report clearly. Second, the socket carries the API but not
 the filesystem: `docker run -v` bind mounts resolve paths *inside the VM*, not on your
-Mac, which is a classic trap when a later plan mounts directories.
+Mac, which is a classic trap when a later roadmap mounts directories.
 
 <Callout tone="note" title="Reproducibility lives in the template">
   The checked-in `lima/quickspin.yaml` is the contract, not your shell history. Anything
@@ -99,16 +101,16 @@ build` on your Mac emits an ELF binary the VM can run directly — no toolchain 
 the VM, no CI round-trip. The catch is dynamic linking: with cgo enabled, the binary
 expects the *build* machine's libc, which Linux doesn't have. `CGO_ENABLED=0` forces a
 static binary that depends on nothing but the kernel's syscall ABI. That property is
-why the plan bothers: from plan 07 onward you will drop a guest-agent binary into
+why the roadmap bothers: from roadmap 07 onward you will drop a guest-agent binary into
 minimal containers and (later) Firecracker rootfs images that contain no libraries at
 all. A binary that runs when copied to an empty Alpine container is the standard to
 hold `make build-linux` to.
 
 <StudyPrompt question="Why parameterize ARCH now, when the only target is arm64?">
-  Plan 16's production host is x86_64. Every artifact-producing script written between
+  Roadmap 16's production host is x86_64. Every artifact-producing script written between
   now and then (guest binary, rootfs, Firecracker kernel) will copy this Makefile's
-  pattern. If the arch is a variable from birth, plan 16 is `ARCH=amd64 make
-  build-linux`; if it is hardcoded, plan 16 starts with an archaeology dig through
+  pattern. If the arch is a variable from birth, roadmap 16 is `ARCH=amd64 make
+  build-linux`; if it is hardcoded, roadmap 16 starts with an archaeology dig through
   every script under deadline pressure.
 </StudyPrompt>
 
@@ -122,7 +124,7 @@ No Go interfaces. The contracts are environmental:
 - New Makefile targets:
   - `make build-linux` — cross-compiles `cmd/...` to `bin/linux-$(ARCH)/`, with
     `ARCH ?= arm64`. Parameterizing the arch now is deliberate: the production host in
-    plan 16 is x86_64, and every artifact script written later (guest binary, rootfs,
+    roadmap 16 is x86_64, and every artifact script written later (guest binary, rootfs,
     Firecracker kernel) should take the arch as a variable from birth rather than being
     un-hardcoded under deadline pressure.
   - `make validate-env` — runs `hack/validate-01.sh`.
@@ -209,7 +211,7 @@ No Go interfaces. The contracts are environmental:
     title="Diagnosing the negative test: fail clearly when the VM is stopped"
     check="With the VM stopped (limactl stop quickspin), the script exits non-zero with a message naming the VM and the fix — not a hung docker command or a raw connection-refused trace."
   >
-    Run the script against a stopped VM before calling the plan done. The two common
+    Run the script against a stopped VM before calling the roadmap done. The two common
     bad behaviors: `docker` hangs against a stale socket (guard the docker checks with
     a `limactl list --format` status check *first*, so the script can say "VM
     quickspin is not running; run limactl start quickspin" and exit), and `set -e`
@@ -255,7 +257,7 @@ A commercial platform provisions hosts with Terraform/cloud-init across a fleet 
 never depends on one laptop VM. One Lima VM costs nothing, keeps the edit-test loop
 local, and still gives you a real kernel. The cost: nothing here teaches multi-host
 networking, and arm64 (Apple Silicon) means your images differ from the x86_64 most
-clouds run — acceptable until plan 14, where Firecracker on arm64 works fine anyway.
+clouds run — acceptable until roadmap 14, where Firecracker on arm64 works fine anyway.
 
 ## Go deeper
 
@@ -266,7 +268,7 @@ clouds run — acceptable until plan 14, where Firecracker on arm64 works fine a
     href="https://lima-vm.io/docs/"
   >
     The full reference behind `limactl` — templates, port forwarding rules, and mount
-    modes this plan's single VM config only samples.
+    modes this roadmap's single VM config only samples.
   </Resource>
   <Resource
     kind="docs"
@@ -274,7 +276,7 @@ clouds run — acceptable until plan 14, where Firecracker on arm64 works fine a
     href="https://docs.docker.com/engine/manage-resources/contexts/"
   >
     The maintained alternative to a raw `DOCKER_HOST` export: named endpoints you can
-    switch between, useful once a second daemon (plan 16's real host) exists.
+    switch between, useful once a second daemon (roadmap 16's real host) exists.
   </Resource>
   <Resource
     kind="article"
@@ -283,6 +285,6 @@ clouds run — acceptable until plan 14, where Firecracker on arm64 works fine a
     by="Dave Cheney"
   >
     Why `GOOS`/`GOARCH` builds are a one-liner in Go and what actually changes in the
-    toolchain — background for the static-binary check this plan scripts.
+    toolchain — background for the static-binary check this roadmap scripts.
   </Resource>
 </Resources>

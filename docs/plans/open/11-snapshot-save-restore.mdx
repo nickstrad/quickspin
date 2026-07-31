@@ -11,7 +11,7 @@ snapshots owned by tenants, new lifecycle verbs (`save`, restore-by-create), and
 first honest latency benchmark (cold create vs snapshot create).
 
 <KeyPoint label="Name the promise precisely">
-  This plan preserves the <em>filesystem</em>, not memory or running processes. The
+  This roadmap preserves the <em>filesystem</em>, not memory or running processes. The
   API says `save`, not `pause`, and the docs must say so too — blurring that line is
   how platforms end up with users who think their running Python process survives.
 </KeyPoint>
@@ -23,15 +23,15 @@ pauses sandboxes and resumes them with **memory state intact** (Firecracker VM
 snapshots); Daytona persists workspaces; Modal builds images from snapshotted layers.
 Your Docker-commit version preserves **filesystem only, not memory or running
 processes** — a real and useful capability (an agent's installed deps and written code
-survive), but a different promise than E2B's, and the plan requires naming that
+survive), but a different promise than E2B's, and the roadmap requires naming that
 difference in your API docs rather than blurring it. Filesystem-vs-memory snapshotting
-is precisely the boundary where microVMs earn their keep, which sets up plan 14.
+is precisely the boundary where microVMs earn their keep, which sets up roadmap 14.
 
 ## What you'll learn
 
 - Docker image mechanics for real: layers, commit, what balloons image size, why
   writable-layer growth matters.
-- Lifecycle design when states multiply: what is `saved`? (This plan: a snapshot is an
+- Lifecycle design when states multiply: what is `saved`? (This roadmap: a snapshot is an
   artifact, and the sandbox that produced it is destroyed on save — no paused state.)
 - Benchmarking honestly: percentiles over means, measuring from API call to guest
   `/healthz`, separating pull/create/start/ready phases.
@@ -49,7 +49,7 @@ registry tag. Two consequences matter for your implementation. Size is cumulativ
 every commit adds a layer, and a snapshot of a snapshot carries both writable layers,
 so the byte quota is measured against real `docker image inspect` sizes, not
 guesses. And the commit captures *configuration* as well as files — entrypoint,
-env, and any bind-mount expectations from the source container — which is why the plan
+env, and any bind-mount expectations from the source container — which is why the roadmap
 strips those at commit time (`docker commit` accepts config overrides) so the image
 stays a portable filesystem, restorable by any backend.
 
@@ -71,7 +71,7 @@ snapshot row (store), destroy the source sandbox (Docker). The plane can crash b
 any two, so the order is chosen to make every partial state recoverable. Record the
 snapshot *before* destroying the source: a crash after commit-and-record but before
 destroy leaves a sandbox that should be gone — which the reconciler already knows how
-to converge (plan 06's desired-vs-observed loop, now with `saving` as a desired state
+to converge (roadmap 06's desired-vs-observed loop, now with `saving` as a desired state
 that resolves to destroyed). The reverse order would leave a committed image with no
 row — an orphan the reconciler cannot distinguish from garbage. That same
 reconciler-driven GC is the delete path: `DELETE /v1/snapshots/{id}` removes the row,
@@ -142,7 +142,7 @@ flowchart LR
 <Callout tone="warning" title="Snapshots copy secrets as faithfully as code">
   Everything the agent wrote is in the image: tokens saved to `~/.netrc`, keys in
   `/tmp`, shell history. A snapshot shared across trust boundaries would leak them.
-  Tenant scoping contains this for now, but the threat-model addendum in this plan
+  Tenant scoping contains this for now, but the threat-model addendum in this roadmap
   exists to record the exposure — write it, don't skip it.
 </Callout>
 
@@ -175,10 +175,10 @@ quota; guest binary is re-injected on restore so snapshots never bake in a stale
   </Task>
   <Task title="Add schema, endpoints, scoping, and quota">
     The `snapshots` table, the three endpoints, tenant scoping, and the admission-time
-    byte quota in the style of plan 08.
+    byte quota in the style of roadmap 08.
   </Task>
   <Task title="Teach the reconciler snapshot GC">
-    Unreferenced or over-quota snapshot images get garbage-collected by the plan 06
+    Unreferenced or over-quota snapshot images get garbage-collected by the roadmap 06
     loop.
   </Task>
   <Task title="Extend both SDKs">
@@ -190,7 +190,7 @@ quota; guest binary is re-injected on restore so snapshots never bake in a stale
     step, e.g. `pip install` of a few packages), reporting p50/p95 per phase to a CSV
     checked into the closing notes. The p50/p95 table and the method behind it also
     land in `docs/reference/demo-latency.mdx` — the single durable benchmark doc that
-    plan 12 extends with per-step agent timing and plan 14 with Firecracker boot
+    roadmap 12 extends with per-step agent timing and roadmap 14 with Firecracker boot
     numbers, so every latency claim the project makes lives on one page.
   </Task>
 </TaskList>
@@ -215,7 +215,7 @@ quota; guest binary is re-injected on restore so snapshots never bake in a stale
     check="A Go integration test can call Snapshot on a running sandbox and create a new sandbox whose Spec.Snapshot names the returned imageRef, and the file written before the save is visible in the new sandbox."
   >
     `Snapshot(ctx, id)` resolves the quickspin ID to a container via the label filter
-    (plan 02's helper), calls `ContainerCommit` with a repo/tag you control (e.g.
+    (roadmap 02's helper), calls `ContainerCommit` with a repo/tag you control (e.g.
     `quickspin-snapshot:<id>` plus a `quickspin.managed` image label for GC), and
     returns the image ref. On the create path, `Spec.Snapshot` short-circuits image
     resolution — and skips the registry pull, since the image is local by
@@ -239,7 +239,7 @@ quota; guest binary is re-injected on restore so snapshots never bake in a stale
     Each pass: list images carrying your snapshot label (`ImageList` with a filter),
     list `image_ref` values from the store, remove images in the first set but not
     the second (`ImageRemove`). Same shape for over-quota enforcement if you choose
-    to GC rather than only reject at admission. Watch the plan 06 trap: the diff must
+    to GC rather than only reject at admission. Watch the roadmap 06 trap: the diff must
     be store-driven, so a Docker-side listing failure must abort the pass, never be
     treated as "no images exist".
   </Hint>
@@ -247,7 +247,7 @@ quota; guest binary is re-injected on restore so snapshots never bake in a stale
     title="Re-inject the guest on restore rather than trusting the snapshot"
     check="TestRestoredSandboxHasFreshGuest passes: after bumping the guest version and restoring an old snapshot, the guest health endpoint reports the new version."
   >
-    Whatever mechanism plan 07 used to place the guest binary into a fresh sandbox
+    Whatever mechanism roadmap 07 used to place the guest binary into a fresh sandbox
     must run on the snapshot-create path too — restore is just create, so if guest
     injection lives in the create flow (not baked into base images) you may already
     be done; the test is what proves it. The failure mode being prevented: a
@@ -257,7 +257,7 @@ quota; guest binary is re-injected on restore so snapshots never bake in a stale
     title="Instrument phases in the benchmark, then aggregate percentiles"
     check="hack/bench-11.sh produces a CSV with one row per iteration and columns per phase, and snapshot-create rows lack the setup-phase cost that cold rows carry."
   >
-    Timestamp with `date +%s%N` (or do the whole loop in Go — plan 03 already fought
+    Timestamp with `date +%s%N` (or do the whole loop in Go — roadmap 03 already fought
     shell timing precision) around each phase: create request returns, state reaches
     running, guest `/healthz` first succeeds, and for the cold arm, the `pip install`
     exec completes. 20 iterations each arm; sort each column and take index 10 and 19
@@ -268,7 +268,7 @@ quota; guest binary is re-injected on restore so snapshots never bake in a stale
     title="Diagnosing the likely failure: the crash test loses the snapshot or leaks the sandbox"
     check="TestSaveIsRecordedBeforeDestroy passes: killing the plane between commit and destroy, then restarting it, leaves exactly one snapshot row, a restorable image, and no source sandbox."
   >
-    Reuse the plan 06 crash-point technique (an env-var hook such as
+    Reuse the roadmap 06 crash-point technique (an env-var hook such as
     `QUICKSPIN_CRASH_AFTER=snapshot-record` that exits the process) rather than
     timing kills. If after restart the snapshot is missing, your handler recorded it
     after initiating destroy — reorder. If the source sandbox survives forever, the
@@ -337,7 +337,7 @@ consumes disk forever; commercial platforms meter and bill it, you cap it.
     href="https://microservices.io/patterns/data/transactional-outbox.html"
     by="Chris Richardson, microservices.io"
   >
-    The general form of this plan's commit-record-destroy ordering problem: making a
+    The general form of this roadmap's commit-record-destroy ordering problem: making a
     multi-system write recoverable by recording intent durably before acting on it.
   </Resource>
   <Resource
@@ -347,8 +347,8 @@ consumes disk forever; commercial platforms meter and bill it, you cap it.
     by="Agache et al., NSDI 2020"
   >
     The technology behind the memory-inclusive snapshots E2B offers — reading it makes
-    the filesystem-vs-memory promise in this plan's API docs concrete, and sets up
-    plan 14.
+    the filesystem-vs-memory promise in this roadmap's API docs concrete, and sets up
+    roadmap 14.
   </Resource>
   <Resource
     kind="video"
@@ -356,7 +356,7 @@ consumes disk forever; commercial platforms meter and bill it, you cap it.
     by="Gil Tene, Strange Loop 2015"
   >
     The classic talk on why means lie, what percentiles actually claim, and
-    coordinated omission — the reasoning behind this plan's p50/p95-over-mean
+    coordinated omission — the reasoning behind this roadmap's p50/p95-over-mean
     benchmark rules.
   </Resource>
 </Resources>

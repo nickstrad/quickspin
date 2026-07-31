@@ -8,13 +8,13 @@ Create `sdk/typescript/` (`@quickspin/sdk`): a typed client for the control-plan
 with the E2B-style ergonomic surface agents expect — `Sandbox.create()`, `sbx.exec()`,
 `sbx.files.*`, `sbx.kill()`. Per your direction, **Claude generates this SDK; your job
 is review and contract-testing, not hand-writing TypeScript**. Your Go time in this
-plan goes into the other deliverable: `GET /v1/openapi.json` served by the control
+roadmap goes into the other deliverable: `GET /v1/openapi.json` served by the control
 plane, making the API formally described.
 
 <KeyPoint label="Division of labor">
   The agent writes the client; you write the spec and the tests that hold the client
   accountable. Reviewing generated code against a contract you authored is a different
-  skill from writing the code — and it is the one this plan teaches.
+  skill from writing the code — and it is the one this roadmap teaches.
 </KeyPoint>
 
 ## Industry context
@@ -26,7 +26,7 @@ resource-handle objects rather than bare functions, typed error subclasses
 (`QuotaExceededError`, `SandboxNotFoundError`) so harnesses can branch on failure type,
 and async iteration for streamed exec output. Serving an OpenAPI document is how
 commercial platforms keep N SDKs honest against one API; yours will do the same work
-in plan 10.
+in roadmap 10.
 
 <Compare>
   <CompareItem eyebrow="What you build" title="Spec-anchored, contract-tested">
@@ -51,14 +51,14 @@ against a spec you did.
 ### Concept: the spec is a contract only if something enforces it
 
 An OpenAPI document that nobody checks is documentation, and documentation rots. This
-plan wires two enforcement points around the spec. On the Go side, a test enumerates
+roadmap wires two enforcement points around the spec. On the Go side, a test enumerates
 the mux's registered routes and diffs them against the paths in `openapi.yaml` — add an
 endpoint without documenting it (or vice versa) and `make test` fails. On the SDK side,
 the contract suite runs every generated method against a **real** control plane, so the
 spec's request and response shapes are exercised end to end, not assumed. Writing the
 spec is also where you discover your API's irregularities: the endpoint that returns a
 bare array where every other returns an envelope, the one field that is camelCase amid
-snake_case. Finding those now is the point — plan 10 ports the same contract to Python,
+snake_case. Finding those now is the point — roadmap 10 ports the same contract to Python,
 and every irregularity you keep costs twice.
 
 <Figure caption="One spec, three enforcement points: the route-sync test pins the server to the spec; the contract suite pins the generated SDK to the live server.">
@@ -124,7 +124,7 @@ sequenceDiagram
 
 ### Concept: typed errors as the machine-readable half of the API
 
-Plan 05 committed to an error envelope with a stable `error.code`. The SDK converts
+Roadmap 05 committed to an error envelope with a stable `error.code`. The SDK converts
 those codes into subclasses of a common `QuickspinError` so a harness can write
 `catch (e) { if (e instanceof QuotaExceededError) ... }` instead of matching message
 strings. Two rules make this durable. The mapping is 1:1 and closed over the API's
@@ -132,7 +132,7 @@ published codes — an unknown code maps to the base class rather than crashing,
 new server code degrades gracefully in an old SDK. And messages are for humans only:
 the moment a caller parses `e.message`, the message text becomes API surface and can
 never be reworded. This is the TypeScript twin of the Go sentinel-error convention
-from plan 02 — same contract idea, different language mechanism.
+from roadmap 02 — same contract idea, different language mechanism.
 
 <Callout tone="note" title="instanceof and Error subclasses">
   When reviewing the generated errors, check that each subclass either targets ES2015+
@@ -195,7 +195,7 @@ flowchart TD
     M["make test-sdk-ts"] --> T["mktemp -d<br/>throwaway SQLite file"]
     T --> S["start control plane<br/>in the background"]
     S --> H["poll health endpoint<br/>until ready"]
-    H --> K["mint a key via the<br/>plan 08 admin CLI"]
+    H --> K["mint a key via the<br/>roadmap 08 admin CLI"]
     K --> V["export env vars,<br/>run npx vitest run"]
     V --> E["trap ... EXIT kills the<br/>server on every outcome"]
 `}
@@ -208,7 +208,7 @@ flowchart TD
     title="Start with the spec, and let it audit your API"
     check="openapi.yaml validates (npx @redocly/cli lint openapi.yaml or the Swagger editor) and lists every /v1 route with its error envelope schema."
   >
-    Before any TypeScript exists, write `openapi.yaml` by walking the plan 05/07
+    Before any TypeScript exists, write `openapi.yaml` by walking the roadmap 05/07
     handlers. Define the error envelope once under `components.schemas` and reference
     it from every non-2xx response — if you find yourself unable to, that endpoint's
     errors are irregular and should be fixed in Go now. Keep a running list of every
@@ -253,7 +253,7 @@ flowchart TD
   >
     Shell script shape: `mktemp -d` for the SQLite file, start the control plane in
     the background, poll its health endpoint until ready (curl in a loop with a
-    timeout), mint a key with the plan 08 admin CLI, export `QUICKSPIN_API_KEY` and
+    timeout), mint a key with the roadmap 08 admin CLI, export `QUICKSPIN_API_KEY` and
     the base URL, run `npx vitest run`, and kill the server in a `trap ... EXIT` so
     cleanup survives test failure. Vitest picks up the env vars without help.
   </Hint>
@@ -264,7 +264,7 @@ flowchart TD
     For liveness, stream a command that prints then sleeps (`sh -c 'echo hi; sleep
     2'`) and assert the first event arrives well before total elapsed time — a
     buffering SDK collapses the two. For errors, drive each failure for real: a
-    garbage key for `AuthenticationError`, a tenant quota of zero (plan 08 admin CLI)
+    garbage key for `AuthenticationError`, a tenant quota of zero (roadmap 08 admin CLI)
     for `QuotaExceededError`, exec after `kill()` for `SandboxNotFoundError`. Use
     Vitest's `rejects.toBeInstanceOf` so message wording stays out of the contract.
   </Hint>
@@ -274,7 +274,7 @@ flowchart TD
   >
     Three suspects, in order. The SDK buffers (see the parser hint) — verify with a
     raw `curl -N` against the endpoint: if curl shows lines arriving live, the server
-    is fine and the SDK is the problem. The server doesn't flush — plan 07's handler
+    is fine and the SDK is the problem. The server doesn't flush — roadmap 07's handler
     must call `http.Flusher.Flush()` after each event; without it Go buffers small
     writes. Or the test itself is wrong — asserting on wall-clock gaps that are too
     tight for CI. Fix by asserting ordering (first event before process exit) rather
@@ -333,7 +333,7 @@ server, so the SDK can never silently drift from the plane.
     href="https://martinfowler.com/articles/consumerDrivenContracts.html"
     by="Ian Robinson, martinfowler.com"
   >
-    The theory behind this plan's enforcement points: why contracts only constrain an
+    The theory behind this roadmap's enforcement points: why contracts only constrain an
     API when a consumer's expectations are executable, not documented.
   </Resource>
   <Resource

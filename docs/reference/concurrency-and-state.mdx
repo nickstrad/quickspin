@@ -1,18 +1,18 @@
 # Concurrency & State Conventions
 
 Forward-looking reference material, not a description of current code. `internal/runtime`
-as first built (plan 02) is single-goroutine and needs none of this. It becomes load-
-bearing at plans 05–06 (a control plane with a reconcile loop and an HTTP API touching
-shared records) and plan 17 (workers). Read it before writing either. Adapted from a
+as first built (roadmap 02) is single-goroutine and needs none of this. It becomes load-
+bearing at roadmaps 05–06 (a control plane with a reconcile loop and an HTTP API touching
+shared records) and roadmap 17 (workers). Read it before writing either. Adapted from a
 sibling learning project that guarded exactly this shape of state — "read a record, do
 slow Docker I/O, write the result" — in real code.
 
-One framing correction against the plans: the sibling project held its records in
-mutex-guarded maps, while Quickspin's plans make the **database authoritative from plan
+One framing correction against the roadmaps: the sibling project held its records in
+mutex-guarded maps, while Quickspin's roadmaps make the **database authoritative from roadmap
 05** (SQLite, later Postgres). That moves where each rule lands — the transaction plays
 the mutex's role for record state, and the map-and-mutex guidance below applies to the
-in-process mutable state that genuinely remains in memory: plan 14's tap/IP allocator,
-workerd's local bookkeeping (plan 17), and any future cache. The *failure modes* (rule 1,
+in-process mutable state that genuinely remains in memory: roadmap 14's tap/IP allocator,
+workerd's local bookkeeping (roadmap 17), and any future cache. The *failure modes* (rule 1,
 check-then-act, the category-4 lost update) are identical in both worlds and are the
 reason to read on; each section below notes its SQL translation where it differs.
 
@@ -29,13 +29,13 @@ whole duration.
 
 ## What gets guarded
 
-In the plans, the fleet's records (sandboxes, events, hosts, capacity) live in the
+In the roadmaps, the fleet's records (sandboxes, events, hosts, capacity) live in the
 database, guarded by transactions. What remains genuinely in-memory and mutex-guarded:
 
 | Component | Mutex | Guarded state (illustrative) | Concurrent goroutines |
 | --- | --- | --- | --- |
-| firecracker backend (plan 14) | allocator `mu` | tap/IP allocations | reconciler-driven creates and destroys |
-| worker (plan 17) | `Worker.mu` | local stats, in-flight operation table if one exists | run loop, heartbeat loop, HTTP API |
+| firecracker backend (roadmap 14) | allocator `mu` | tap/IP allocations | reconciler-driven creates and destroys |
+| worker (roadmap 17) | `Worker.mu` | local stats, in-flight operation table if one exists | run loop, heartbeat loop, HTTP API |
 
 Fields set once at construction and never written again — the Docker client, the logger,
 the reconcile interval, the backend `Runtime` — are **not** guarded. A value only ever
@@ -78,14 +78,14 @@ individually still lets two goroutines interleave between the get and the set, w
 check-then-act bugs survive a mutex.
 
 In-memory, this is one helper under one lock; in the database it is one transaction —
-never a SELECT in one transaction and an UPDATE in another. The plans hit this shape
-twice by name: plan 08's quota admission (count and insert in the same transaction) and
-plan 17's placement reservation (`FOR UPDATE` on the host row before recording the
+never a SELECT in one transaction and an UPDATE in another. The roadmaps hit this shape
+twice by name: roadmap 08's quota admission (count and insert in the same transaction) and
+roadmap 17's placement reservation (`FOR UPDATE` on the host row before recording the
 sandbox on it).
 
 > Do not check `hasCapacity()` and then reserve. Two goroutines can both pass the check and
 > both reserve the last slot. Fold the check into the reserving helper's return value —
-> or into the reserving transaction. Plans 08 and 17 each carry a concurrency test
+> or into the reserving transaction. Roadmaps 08 and 17 each carry a concurrency test
 > (`TestQuotaRaceOnlyAdmitsCap`, `TestConcurrentPlacementNeverOverfillsHost`) that fails
 > if the fold is undone.
 
@@ -139,8 +139,8 @@ Two constraints on the callback:
   acting on it (the `StateDestroyed` guard above).
 - **No I/O, and no calls back into the package.** The lock is held; either deadlocks.
 
-**SQL translation — the form the plans actually use.** With the database authoritative
-(plan 05 onward), the same guard becomes a conditional write that re-checks state in the
+**SQL translation — the form the roadmaps actually use.** With the database authoritative
+(roadmap 05 onward), the same guard becomes a conditional write that re-checks state in the
 WHERE clause and touches only the columns the writer owns:
 
 ```sql
@@ -149,7 +149,7 @@ WHERE id = ? AND state = 'pending';   -- 0 rows affected => someone else moved i
 ```
 
 The zero-rows-affected result is the SQL spelling of the callback's early `return`, and
-the reconciler must treat it as "leave it alone," not as an error. Plan 06 mandates this
+the reconciler must treat it as "leave it alone," not as an error. Roadmap 06 mandates this
 shape and pins the interleaving with `TestReconcilerDoesNotResurrectDestroyedSandbox` —
 the same test this section prescribes, renamed to its home.
 
@@ -178,7 +178,7 @@ other for no benefit. Write paths are unaffected.
 
 ## Push the lock down to the state that needs it
 
-If scheduling or scoring does network I/O (fetching live stats from workers, plan 4), the
+If scheduling or scoring does network I/O (fetching live stats from workers, roadmap 4), the
 control plane's lock must **not** span it. Give that component its own small mutex over its
 own cursor/state, and let the placement call run lock-free from the control plane's point
 of view. A cursor that is only safe under its caller's lock forces that caller to hold the
@@ -200,8 +200,8 @@ candidate order, so ties break the same way on every run rather than by completi
 
 ## Reading through a store
 
-The records live behind the store interface plan 05 defines (SQLite locally, Postgres in
-prod per plan 15 — the plans skip the in-memory-store stage). Keep these properties:
+The records live behind the store interface roadmap 05 defines (SQLite locally, Postgres in
+prod per roadmap 15 — the roadmaps skip the in-memory-store stage). Keep these properties:
 
 - **Typed reads.** A generic store returns a `SandboxRecord`, not an `any` to assert — the
   compiler rejects a mismatched write at the call site instead of panicking at read time.
@@ -212,8 +212,8 @@ prod per plan 15 — the plans skip the in-memory-store stage). Keep these prope
   error anyway — it is the only thing distinguishing "absent" from "present and zero".
 
 The store should impose **no concurrency policy of its own**. The control plane has
-invariants spanning more than one statement (state transition + event append in plan 06,
-quota check + insert in plan 08, capacity check + placement in plan 17), so the caller
+invariants spanning more than one statement (state transition + event append in roadmap 06,
+quota check + insert in roadmap 08, capacity check + placement in roadmap 17), so the caller
 owns the transaction that makes them atomic; a store that serialized or locked internally
 would make it pay twice and still not make a read-modify-write atomic.
 
@@ -235,7 +235,7 @@ have one that drives every helper from goroutines standing in for the real loops
 Three failure modes are invisible to `-race` and need tests of their own:
 
 - **Lost updates.** `-race` cannot see the resurrect-a-destroyed-sandbox sequence above.
-  Pin it by driving the exact interleaving — in the plans this is plan 06's
+  Pin it by driving the exact interleaving — in the roadmaps this is roadmap 06's
   `TestReconcilerDoesNotResurrectDestroyedSandbox`.
 - **Deadlock** shows up as the test binary's timeout, not a failure. A fan-out over many
   failing candidates with an under-sized error channel hangs instead of passing — write the

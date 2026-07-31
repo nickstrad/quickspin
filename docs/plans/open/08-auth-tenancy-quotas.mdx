@@ -73,7 +73,7 @@ created: 404, same body, same shape. The implementation discipline that makes th
 automatic rather than per-handler heroics: the tenant predicate lives in the store
 layer, so every lookup is `WHERE id = ? AND tenant_id = ?` and "not yours" and "not
 there" collapse into the same zero-row result before any handler can tell them apart.
-The one deliberate exception in this plan: 403 is reserved for a *revoked key*, where
+The one deliberate exception in this roadmap: 403 is reserved for a *revoked key*, where
 the caller's own credential — not someone else's resource — is the thing being
 described.
 
@@ -93,7 +93,7 @@ written as two steps (`SELECT COUNT(*)`, then `INSERT`) has a race: two concurre
 creates both count N−1 sandboxes under a cap of N, both pass, and the tenant lands at
 N+1. The count and the insert must be one atomic unit — a single transaction that
 holds its claim from read to write, or a guarded `INSERT ... SELECT` whose WHERE
-clause re-checks the count. This is plan 06's lost-update lesson wearing a different
+clause re-checks the count. This is roadmap 06's lost-update lesson wearing a different
 hat: any read-then-write across a gap needs its assumption restated at write time.
 `TestQuotaRaceOnlyAdmitsCap` fires N goroutines at the cap to prove the window is
 closed.
@@ -120,13 +120,13 @@ sequenceDiagram
 
 The deliverable is one page that names the assets (host, other tenants' sandboxes and
 data, API keys), the trust boundaries (untrusted workload code, semi-trusted SDK
-callers, trusted host and operator), and — the honest part — the attacks plans 02–08
-explicitly do *not* defend: the unauthenticated plane→guest link from plan 07, host
+callers, trusted host and operator), and — the honest part — the attacks roadmaps 02–08
+explicitly do *not* defend: the unauthenticated plane→guest link from roadmap 07, host
 escape from a container, unrestricted egress. Writing "not defended" next to a real
 gap converts it from an accident into a decision with a recorded rationale, gives
-later plans a checklist of debts, and is the difference between a security posture and
+later roadmaps a checklist of debts, and is the difference between a security posture and
 a security vibe. The discipline to practice: every claim in the document must be
-either enforced by a test in this plan or explicitly listed as undefended — no third
+either enforced by a test in this roadmap or explicitly listed as undefended — no third
 category of "probably fine."
 
 ## Design and interfaces
@@ -206,7 +206,7 @@ handlers below it never see the raw key. Requested TTLs clamp to the tenant cap.
     working directly against the DB; keys print once.
   </Task>
   <Task title="Write the threat model">
-    `docs/reference/threat-model.mdx`, one page: assets, trust boundaries, what plans
+    `docs/reference/threat-model.mdx`, one page: assets, trust boundaries, what roadmaps
     02–08 defend, what they explicitly do not (plane→guest link, host escape, egress).
   </Task>
   <Task title="Write the tests and validation script">
@@ -278,7 +278,7 @@ handlers below it never see the raw key. Requested TTLs clamp to the tenant cap.
   >
     Structure it as three lists: assets, trust boundaries, and two columns of
     defenses — enforced (each line citing its test: cross-tenant 404s, hashed keys,
-    quota admission) and explicitly not defended (plane→guest auth from plan 07's
+    quota admission) and explicitly not defended (plane→guest auth from roadmap 07's
     tradeoffs, container escape, egress, per-key rate limiting). If a claim has no
     test and is not in the undefended list, either write the test or move the claim.
   </Hint>
@@ -345,7 +345,7 @@ sandbox *not* defend against?" and a written honest answer is rarer than the cod
     href="https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html"
     by="OWASP Cheat Sheet Series"
   >
-    The checklist surrounding this plan's key scheme — error messages, logging,
+    The checklist surrounding this roadmap's key scheme — error messages, logging,
     lockout — and the password-storage rules that high-entropy keys get to relax.
   </Resource>
   <Resource
@@ -378,7 +378,7 @@ sandbox *not* defend against?" and a written honest answer is rarer than the cod
     title="Threat Modeling: Designing for Security"
     by="Adam Shostack"
   >
-    The full discipline behind this plan's one-page deliverable: STRIDE, trust
+    The full discipline behind this roadmap's one-page deliverable: STRIDE, trust
     boundaries, and how to keep a threat model honest instead of aspirational.
   </Resource>
 </Resources>

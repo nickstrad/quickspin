@@ -1,7 +1,7 @@
 # Runtime Backend Testing
 
 This reference defines how Quickspin tests implementations of `runtime.Runtime`. Future
-plans that add or widen a runtime backend should link here, state what they add to each
+roadmaps that add or widen a runtime backend should link here, state what they add to each
 layer, and name any clause they cannot yet satisfy. The code remains authoritative; when
 the interface contract changes, update the conformance suite and this document together.
 
@@ -134,13 +134,13 @@ RunSnapshotConformance     save, restore, and identity semantics
 ```
 
 Do not build one configuration struct with a growing list of `SupportsX` booleans. A
-backend either implements a capability interface and runs its suite, or its plan records
+backend either implements a capability interface and runs its suite, or its roadmap records
 that the capability is unsupported. Separate suites keep failures named after the
 contract they violate.
 
-Only `RunConformance` exists until the plans that add each capability (exec in 03, files
+Only `RunConformance` exists until the roadmaps that add each capability (exec in 03, files
 in 04, snapshots in 11) are implemented. Do not scaffold empty capability suites ahead
-of the interface they test — each suite is created by the plan that creates its
+of the interface they test — each suite is created by the roadmap that creates its
 capability.
 
 When adding a method to `runtime.Runtime`:
@@ -154,12 +154,12 @@ When adding a method to `runtime.Runtime`:
 6. Update this reference with timing, error, and cleanup semantics that code alone does
    not express.
 
-## What every backend plan must specify
+## What every backend roadmap must specify
 
-A plan that introduces a runtime backend should include this table, filled with concrete
+A roadmap that introduces a runtime backend should include this table, filled with concrete
 answers:
 
-| Requirement | The plan must name |
+| Requirement | The roadmap must name |
 | --- | --- |
 | Valid fixture | The smallest deterministic spec that reaches running. |
 | Pure decisions | State mapping, config/template construction, identity, resource allocation, and validation helpers. |
@@ -172,7 +172,7 @@ answers:
 | Special negative proof | A characteristic failure such as start rollback, no capacity, dead VMM, or missing RuntimeClass. |
 | Deliberate gap | What remains untested and why. |
 
-Link to this document instead of re-explaining the five layers in every plan. The plan
+Link to this document instead of re-explaining the five layers in every roadmap. The roadmap
 should spend its detail on the backend-specific rows.
 
 ## Adapter test seams by backend
@@ -252,7 +252,7 @@ context for rollback guarantees a leak.
 cancelled create still removes what it allocated. The alternative — stop with the
 caller's context and report the leaked native identity for a reconciler to recover — is
 principled but requires the reconciler to exist; revisit it as a deliberate change once
-plan 06 is live, never as an accident of which context was in scope.
+roadmap 06 is live, never as an accident of which context was in scope.
 
 ## Gating and commands
 
@@ -356,7 +356,7 @@ runtime.
 
 The CLI smoke **is** the full-stack lane while a backend only has lifecycle: one script
 per backend environment, not a smoke script plus a separate `validate` script proving
-the same flow. When a plan adds capabilities (exec, files, isolation, crash recovery),
+the same flow. When a roadmap adds capabilities (exec, files, isolation, crash recovery),
 its `hack/validate-*.sh` extends that same script's flow rather than starting a second
 one. Backend-specific full-stack validation adds only what lower layers cannot prove:
 
@@ -381,7 +381,7 @@ one. Backend-specific full-stack validation adds only what lower layers cannot p
 - [ ] The CLI smoke is reused or minimally extended for backend routing.
 - [ ] Host, cluster, and cloud setup is reproducible from checked-in scripts.
 - [ ] Cost, privilege, architecture, and KVM requirements are printed before the run.
-- [ ] Deliberately untested behavior is named in the plan's definition of done.
+- [ ] Deliberately untested behavior is named in the roadmap's definition of done.
 
 ## Further reading
 
@@ -426,4 +426,3 @@ one. Backend-specific full-stack validation adds only what lower layers cannot p
     Pod client.
   </Resource>
 </Resources>
-

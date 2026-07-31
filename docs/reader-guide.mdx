@@ -18,7 +18,7 @@ make docs
 The Make target installs the locked npm dependencies automatically when they are missing.
 Use `make docs-install` to force a clean dependency install.
 
-Press `/` to focus full-text search. Use the left rail to move between plans and the
+Press `/` to focus full-text search. Use the left rail to move between roadmaps and the
 right outline to jump within the current document.
 
 <Callout tone="idea" title="A useful constraint">
@@ -47,7 +47,7 @@ The supported tones are `note`, `idea`, `warning`, and `system`.
 ## Progressive hints and self-checks
 
 `StudyPrompt` keeps help collapsed until the reader chooses to reveal it. It is the
-preferred component for the required Hint steps in a plan.
+preferred component for the required Hint steps in a roadmap.
 
 ```mdx
 <StudyPrompt question="Where should sandbox identity be allocated?">
@@ -123,8 +123,8 @@ Use `Compare` and `CompareItem` for two or more approaches whose differences mat
 
 ## Task lists
 
-Use `TaskList` and `Task` for a plan's `## Tasks` section. The list renders as a
-numbered, read-only breakdown of the plan's implementation steps.
+Use `TaskList` and `Task` for a roadmap's `## Tasks` section. The list renders as a
+numbered, read-only breakdown of the roadmap's implementation steps.
 
 ```mdx
 <TaskList>
@@ -187,14 +187,14 @@ result that confirms the reader is back on track.
 
 ## External resources
 
-Use `Resources` and `Resource` for a plan's `## Go deeper` section. The `kind` prop
+Use `Resources` and `Resource` for a roadmap's `## Go deeper` section. The `kind` prop
 (`docs`, `article`, `book`, `video`, `paper`) renders a type badge; `href` is optional
 so unlinkable resources (books, conference talks) can be cited by title and author.
 
 ```mdx
 <Resources>
   <Resource kind="docs" title="Docker Engine SDK for Go" href="https://docs.docker.com/reference/api/engine/sdk/">
-    The canonical reference for the client used throughout this plan.
+    The canonical reference for the client used throughout this roadmap.
   </Resource>
   <Resource kind="video" title="Containers from Scratch" by="Liz Rice, GOTO 2018">
     Builds a container in ~60 lines of Go, live.
@@ -204,7 +204,7 @@ so unlinkable resources (books, conference talks) can be cited by title and auth
 
 <Resources>
   <Resource kind="docs" title="Docker Engine SDK for Go" href="https://docs.docker.com/reference/api/engine/sdk/">
-    The canonical reference for the client used throughout this plan.
+    The canonical reference for the client used throughout this roadmap.
   </Resource>
   <Resource kind="video" title="Containers from Scratch" by="Liz Rice, GOTO 2018">
     Builds a container in ~60 lines of Go, live.
@@ -278,14 +278,14 @@ arrangement carries the meaning, such as layered stacks or ownership boundaries.
 
 ## Authoring rules
 
-- Keep plan filenames in the `NN-short-slug.mdx` form.
+- Keep roadmap filenames in the `NN-short-slug.mdx` form.
 - Link between documents with relative `.mdx` links; the reader handles navigation.
 - Code fences are syntax highlighted automatically.
 - Headings at levels two and three appear in the current-document outline.
-- Avoid imports from the reader internals in plan documents. Shared study components are
-  injected globally so plans remain portable and easy for another agent to edit.
+- Avoid imports from the reader internals in roadmap documents. Shared study components are
+  injected globally so roadmaps remain portable and easy for another agent to edit.
 - The complete shadcn/ui component set is available under `src/components/ui/` for new
-  reader features and richer shared study components. Plans should still consume shared
+  reader features and richer shared study components. Roadmaps should still consume shared
   MDX components rather than importing application internals directly.
 - `plans/AGENTS.md` intentionally remains Markdown because its filename activates scoped
   agent instructions. The reader includes it alongside the MDX documents.

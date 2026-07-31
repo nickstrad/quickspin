@@ -5,7 +5,7 @@ Depends on: 09.
 ## Summary
 
 Create `sdk/python/` (`quickspin` package): the same client surface as the TypeScript
-SDK, in idiomatic Python (sync-first, context managers, `httpx`). As with plan 09,
+SDK, in idiomatic Python (sync-first, context managers, `httpx`). As with roadmap 09,
 **Claude generates it; you review and gate on contract tests**. The learning payload
 for you is smaller and different: watching whether your API survives a second language
 untouched — every place the Python SDK needs a workaround is an API bug to fix in Go.
@@ -18,7 +18,7 @@ market — E2B and Daytona both lead with Python. The industry pattern exercised
 **API-first symmetry**: both SDKs derive from the same OpenAPI contract and pass
 equivalent contract suites, which is the only scalable answer to N languages. Where
 TypeScript is async-native, Python platforms typically ship sync-first with an async
-variant later; this plan follows that.
+variant later; this roadmap follows that.
 
 ## What you'll learn
 
@@ -36,9 +36,9 @@ the Python client needs special handling — a field that must be renamed at the
 boundary, an endpoint whose error shape differs, a response the TypeScript SDK quietly
 tolerated — is a defect that was always there and only became visible under a second
 set of conventions. The wire format stays exactly what the OpenAPI document says
-(`ttlSeconds` on the JSON, because plan 09 froze it); each SDK owns the translation to
+(`ttlSeconds` on the JSON, because roadmap 09 froze it); each SDK owns the translation to
 its language's idiom (`ttl_seconds=` as a Python keyword argument, mapped in one place
-at the request boundary). The discipline this plan asks for is to *log* every friction
+at the request boundary). The discipline this roadmap asks for is to *log* every friction
 point instead of silently absorbing it into the client — that list, sorted into
 "Python fix" versus "Go API fix", is a deliverable, and the Go fixes are the ones that
 pay off forever.
@@ -80,7 +80,7 @@ sandbox. But the same syntax must not always mean "kill on exit" — `connect` a
 to a sandbox someone else created, and attachment is not ownership. The clean design
 gives the object an ownership flag set by its constructor path: `create` returns an
 owning handle whose exit kills; `connect` returns a non-owning handle whose exit only
-closes the HTTP client. Because `kill()` is idempotent (the API promised that in plan
+closes the HTTP client. Because `kill()` is idempotent (the API promised that in roadmap
 05), the owning path can kill unconditionally in `__exit__` without special-casing
 "already dead". This create-owns / connect-borrows split is the documented behavior
 the contract tests pin.
@@ -105,18 +105,18 @@ flowchart TD
 Where the TypeScript SDK exposed an async iterator, the Python SDK exposes a plain
 generator: `for ev in sbx.exec_stream(...)`. `httpx` does the transport work — 
 `client.stream("POST", url) as response` keeps the body open, and
-`response.iter_lines()` handles the chunk-boundary buffering that plan 09 had to do by
+`response.iter_lines()` handles the chunk-boundary buffering that roadmap 09 had to do by
 hand. The subtlety that remains is lifetime: a generator body only runs while the
 caller iterates, and the `with client.stream(...)` block inside it must stay open for
 the whole loop — so the generator wraps the stream context and yields from inside it.
 If the caller abandons the loop early, generator finalization closes the response and
-frees the connection. Buffering bugs look identical to plan 09's: everything passes
+frees the connection. Buffering bugs look identical to roadmap 09's: everything passes
 except the liveness test, which is why the pytest suite repeats that assertion.
 
 <StudyPrompt question="Why sync-first when the TypeScript SDK is async?">
   Ask who calls each SDK. TypeScript on Node is async by construction — blocking the
   event loop is not an option. Python agent harnesses are overwhelmingly plain
-  scripts and sync frameworks; a sync client keeps the plan 12 demo readable, and an
+  scripts and sync frameworks; a sync client keeps the roadmap 12 demo readable, and an
   async variant can wrap the same wire logic later. Shipping async-first would force
   every consumer into an event loop to run one command — ergonomics backwards.
 </StudyPrompt>
@@ -137,7 +137,7 @@ Sandbox.connect(sandbox_id)   # reattach without killing on exit unless asked
 ```
 
 Committed decisions: `httpx` as the only runtime dependency; typed exceptions mirror
-plan 09's names (`QuotaExceededError`, `SandboxNotFoundError`, `AuthenticationError`);
+roadmap 09's names (`QuotaExceededError`, `SandboxNotFoundError`, `AuthenticationError`);
 key from `QUICKSPIN_API_KEY`; the context manager kills on exit for `create` but not
 for `connect` (attachment ≠ ownership — document this).
 
@@ -153,7 +153,7 @@ for `connect` (attachment ≠ ownership — document this).
     or a Go API fix — keep that list, it goes in the closing notes.
   </Task>
   <Task title="Port the contract suite to pytest (both)">
-    Assert the same behaviors as plan 09's Vitest suite, plus the context-manager
+    Assert the same behaviors as roadmap 09's Vitest suite, plus the context-manager
     semantics that only exist in Python.
   </Task>
   <Task title="Add make test-sdk-py">
@@ -181,7 +181,7 @@ flowchart TD
     title="Extract the shared boot script before writing any Python"
     check="Both make test-sdk-ts and a bare hack/testplane.sh run work: the script boots the plane on a throwaway SQLite file, prints the base URL and a freshly minted key, and its cleanup kills the server."
   >
-    Refactor plan 09's harness first so both suites share one boot path. The script
+    Refactor roadmap 09's harness first so both suites share one boot path. The script
     owns: temp dir, plane start, health-poll loop, key minting, and a `trap ... EXIT`
     cleanup. Decide its output convention now (print `QUICKSPIN_BASE_URL` and
     `QUICKSPIN_API_KEY` as shell-eval'able lines, or write an env file) — pytest and
@@ -255,7 +255,7 @@ flowchart TD
 
 ## Definition of done
 
-`make test-sdk-py` passes with the pytest equivalents of every plan 09 contract test,
+`make test-sdk-py` passes with the pytest equivalents of every roadmap 09 contract test,
 plus:
 
 - `test_context_manager_kills_on_exit` — sandbox is gone after the `with` block, even
@@ -263,7 +263,7 @@ plus:
 - `test_connect_does_not_kill_on_exit`.
 - `test_stream_yields_before_completion`.
 
-Cross-SDK parity check: a short doc table (in the plan's closing notes) mapping each TS
+Cross-SDK parity check: a short doc table (in the roadmap's closing notes) mapping each TS
 contract test to its pytest twin, with gaps explained — parity is asserted by review,
 not tooling, and saying so is part of done.
 
@@ -273,7 +273,7 @@ Deliberately untested: asyncio variant, Python versions below 3.11, Windows.
 
 Commercial platforms generate both SDKs from the spec in CI and publish to npm/PyPI on
 tags with semver guarantees. You keep the packages in-repo and unpublished until the
-plan 12 demo needs to import them (a git or path dependency is fine for a learning
+roadmap 12 demo needs to import them (a git or path dependency is fine for a learning
 platform and avoids premature registry ceremony). Skipping asyncio-first is deliberate:
 sync code keeps the demo harness readable, and the API's streaming already proves the
 hard part works.

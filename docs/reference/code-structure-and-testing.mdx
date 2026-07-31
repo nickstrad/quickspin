@@ -26,7 +26,7 @@ untested.
 | **Framework plumbing** | HTTP handlers, Docker SDK calls, `time.Tick` reconcile loops, `slog` lines.                     | `api.go`, `docker.go`, the loop bodies                  | Sparingly — `httptest` at the boundary, one integration test against real Docker, or not at all. |
 
 The point of the split is that most of what can actually be _wrong_ lives in the first two
-rows, and neither needs a Docker daemon or a live worker to exercise. Plan 02's
+rows, and neither needs a Docker daemon or a live worker to exercise. Roadmap 02's
 `make test` / `make test-docker` split is the same idea at the Makefile level: keep the
 daemon-free tests fast and separate.
 
@@ -144,7 +144,7 @@ Not worth writing:
   a slice, that `errors.Is` walks `Unwrap`.
 - Section banners inside a file (`// --- labels ---`). If a file needs them it wants to be
   two files.
-- Re-deriving a plan or reference doc in a code comment. Link to it in one line instead:
+- Re-deriving a roadmap or reference doc in a code comment. Link to it in one line instead:
   the doc is where the long form belongs, and two copies drift apart.
 - Design rationale. Why a helper lives in this file, which layer owns a rule, what
   contract it serves, what every backend will do — that story belongs in the review
@@ -212,11 +212,11 @@ Two habits worth keeping:
 
 Methods that compose pure functions and own state are testable without a network or a
 daemon: build the struct, seed its state, call the method, assert on the state. In the
-plans the control plane's state sits behind the store interface (plan 05), so "seed its
+roadmaps the control plane's state sits behind the store interface (roadmap 05), so "seed its
 maps" becomes "seed a `:memory:` SQLite store" — same shape, same speed:
 
 ```go
-st := storetest.NewMemoryStore(t)                       // :memory: SQLite from plan 05
+st := storetest.NewMemoryStore(t)                       // :memory: SQLite from roadmap 05
 st.Put(persisted)
 cp := &Service{store: st, logger: discardLogger()}
 cp.applyObservation(id, observed)
@@ -230,11 +230,11 @@ just dispatches.
 ### Framework plumbing
 
 Test at the boundary or not at all. Use `httptest` for handlers. The reconcile ticker and
-the Docker SDK calls are left to the real-daemon integration tests plan 02 already
+the Docker SDK calls are left to the real-daemon integration tests roadmap 02 already
 mandates (`make test-docker`) and to `hack/validate-NN.sh` scripts. Do not build elaborate
 Docker fakes — if a bug needs one to reproduce, the logic it lives in probably wants
 extracting instead. One honest integration test against the real daemon is worth more than
-a mock that encodes your assumptions back at you; plan 02 says the same.
+a mock that encodes your assumptions back at you; roadmap 02 says the same.
 
 ## Running tests
 

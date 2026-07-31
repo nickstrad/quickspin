@@ -14,7 +14,7 @@ small dashboard and two alerts — plus OpenTelemetry traces on the create path,
 one trace shows a request crossing API → placement → worker → guest-ready. A
 cost-safety reconciler guarantees no forgotten server ever bills you silently.
 
-The plan closes with operations as writing, not just wiring: a runbook, a game day
+The roadmap closes with operations as writing, not just wiring: a runbook, a game day
 whose deliberately induced outage produces a written postmortem, and a one-page
 capacity note. These artifacts are cheap once the dashboard exists, and they are what
 turns "I instrumented a service" into "I operated a platform."
@@ -28,7 +28,7 @@ metal self-joining, and reconciliation between the provider's server list and yo
 The metrics stack is the industry-standard shape at minimum size: instrument with
 `prometheus/client_golang`, let a managed Grafana scrape and alert, and treat the
 provider's server list as one more "actual state" to reconcile — orphan cloud servers
-are the fleet-scale version of plan 02's orphan containers, except these cost money.
+are the fleet-scale version of roadmap 02's orphan containers, except these cost money.
 
 ## What you'll learn
 
@@ -52,7 +52,7 @@ are the fleet-scale version of plan 02's orphan containers, except these cost mo
 
 ### Concept: the provider is just another runtime, one level up
 
-`Provider` is the same shape as plan 02's `Runtime`, with servers instead of
+`Provider` is the same shape as roadmap 02's `Runtime`, with servers instead of
 containers: create realizes intent, list discovers actuals by an ownership label,
 delete is idempotent. The parallel is not cosmetic — it dictates the same design
 moves. Labels (`quickspin.fleet`) answer "which servers are mine?" exactly as
@@ -67,7 +67,7 @@ unable to touch servers Quickspin doesn't own.
 
 ### Concept: user-data is how a server joins the fleet without you
 
-Plan 16's cloud-init made one host reproducible; this plan makes it *parameterized*.
+Roadmap 16's cloud-init made one host reproducible; this roadmap makes it *parameterized*.
 When the provider creates a server it attaches user-data — a cloud-init document the
 machine executes on first boot. Template into it the three things a worker cannot
 invent: its per-host token, the plane URL, and the arch-appropriate artifacts. The
@@ -80,7 +80,7 @@ the "zero SSH interventions" assertion: a template bug (wrong token, unexpanded
 variable) produces a server that bills but never joins — which is precisely the
 orphan class the fleet reconciler exists to catch.
 
-<Figure caption="Host provisioning lifecycle: the admin verb drives the provider API; cloud-init user-data carries the token so the new server self-joins via plan 17's registration path.">
+<Figure caption="Host provisioning lifecycle: the admin verb drives the provider API; cloud-init user-data carries the token so the new server self-joins via roadmap 17's registration path.">
   <svg viewBox="0 0 620 240" role="img" aria-label="Provisioning lifecycle from admin host create through cloud-init boot to a ready registered host">
     <defs>
       <marker id="arrow18" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -104,7 +104,7 @@ orphan class the fleet reconciler exists to catch.
     <text x="535" y="166" textAnchor="middle" fontSize="10" fill="#405049">token + plane URL from env</text>
     <rect x="230" y="130" width="150" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
     <text x="305" y="150" textAnchor="middle" fontSize="12" fill="#18231f">POST /register</text>
-    <text x="305" y="166" textAnchor="middle" fontSize="10" fill="#405049">then heartbeats (plan 17)</text>
+    <text x="305" y="166" textAnchor="middle" fontSize="10" fill="#405049">then heartbeats (roadmap 17)</text>
     <rect x="10" y="130" width="140" height="48" rx="24" fill="none" stroke="#18231f" strokeWidth="1.5" />
     <text x="80" y="150" textAnchor="middle" fontSize="12" fill="#18231f">host ready</text>
     <text x="80" y="166" textAnchor="middle" fontSize="10" fill="#405049">placement may use it</text>
@@ -137,7 +137,7 @@ Hetzner lost it; the host can never heartbeat again, so mark it dead *immediatel
 and skip the 2-minute wait, failing its sandboxes now rather than later. Both
 branches live in one pure function, `decideFleetAction(hostRow, server, now)`,
 because a wrong branch here either deletes a paying customer's capacity or leaks a
-billed server — the two most expensive bugs in the plan, and both table-testable for
+billed server — the two most expensive bugs in the roadmap, and both table-testable for
 free.
 
 <Mermaid
@@ -185,7 +185,7 @@ type Provider interface {
 
 ```text
 Admin flow: host create → provider server w/ user-data(token, plane URL, arch)
-  → boots workerd → self-registers (plan 17) → ready. hosts row carries
+  → boots workerd → self-registers (roadmap 17) → ready. hosts row carries
   provider_server_id from birth; deletion refuses unless drained+empty (--force
   overrides, destroying remaining sandboxes first).
 Fleet reconciler: provider server with our label but no hosts row, older than a
@@ -233,7 +233,7 @@ revoked on delete.
     idempotent delete, and a fake provider for every unit test.
   </Task>
   <Task title="Parameterize cloud-init into user-data templating">
-    A workerd-only variant of plan 16's cloud-init with the token, plane URL, and
+    A workerd-only variant of roadmap 16's cloud-init with the token, plane URL, and
     arch templated in at create time.
   </Task>
   <Task title="Add the admin verbs">
@@ -295,7 +295,7 @@ revoked on delete.
     title="Template user-data and test it without a cloud"
     check="TestUserDataContainsTokenAndPlaneURL renders the template and finds the token, plane URL, and arch in the output — and finds no unexpanded {{ markers."
   >
-    Use `text/template` over a workerd-only derivative of plan 16's
+    Use `text/template` over a workerd-only derivative of roadmap 16's
     `hack/cloud-init.yaml` (no Caddy, no plane — just workerd, its env file, ufw).
     The variables are exactly what a host cannot invent: token, plane URL, arch.
     Keep the template as a repo file rather than a Go string so it stays reviewable
@@ -307,7 +307,7 @@ revoked on delete.
     title="host create is: mint token, insert row, then call the provider"
     check="quickspin admin host create against the fake provider leaves a hosts row carrying provider_server_id, and the fake shows one labeled server whose user-data contains the row's token."
   >
-    Order matters for crash-safety: mint the per-host token (plan 17's machinery),
+    Order matters for crash-safety: mint the per-host token (roadmap 17's machinery),
     insert the hosts row in a provisioning state, then `CreateServer`, then write
     `provider_server_id` back to the row. A crash after the provider call but
     before the write-back leaves a labeled server with no linked row — which is
@@ -324,7 +324,7 @@ revoked on delete.
     server-only = orphan, compare `now.Sub(server.CreatedAt)` against the grace
     window, delete + loud event only after it; row-only = vanished, mark dead
     immediately (skip the heartbeat thresholds — the server cannot come back) and
-    fail its sandboxes via plan 17's existing path. Return a typed action from the
+    fail its sandboxes via roadmap 17's existing path. Return a typed action from the
     pure function and let the reconciler loop execute it; side effects in the
     decision function would drag the provider into every table row. Pick the grace
     window against your measured boot time — generous (10+ minutes) is fine; the
@@ -389,7 +389,7 @@ Live validation `hack/validate-18.sh` (spends real money — cents — and says 
 
 - `admin host create` → within a bounded window the hosts table shows a new ready
   host that came up with **zero SSH interventions**.
-- A sandbox (on whatever backend prod runs — docker until plan 14's cutover) is
+- A sandbox (on whatever backend prod runs — docker until roadmap 14's cutover) is
   placed on the new host and passes exec/files.
 - Drain → placement avoids it; delete → Hetzner API confirms the server is gone and
   the token is revoked. Final assertion: provider server list contains exactly the
@@ -417,7 +417,7 @@ tail-sampled tracing at volume).
 You stop at admin-triggered elasticity plus managed Grafana because the *primitives* —
 provider reconciliation, self-joining hosts, drain-based rolls, symptom alerts — are
 the transferable knowledge, and each omitted layer is policy atop them. The one place
-this plan is deliberately stricter than a first pass needs: the orphan-server reaper.
+this roadmap is deliberately stricter than a first pass needs: the orphan-server reaper.
 Platforms have engineers who notice a stray $400 instance; you have a reconciler or a
 surprise invoice.
 
@@ -454,7 +454,7 @@ surprise invoice.
     href="https://sre.google/sre-book/monitoring-distributed-systems/"
     by="Google SRE Book"
   >
-    The four golden signals and the symptoms-versus-causes framing this plan's alert
+    The four golden signals and the symptoms-versus-causes framing this roadmap's alert
     design borrows, plus the alert-fatigue argument in its original form.
   </Resource>
   <Resource
