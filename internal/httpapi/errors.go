@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"errors"
-	"net/http"
 	"runtime/debug"
 	"strings"
 )
@@ -61,19 +60,4 @@ func OpOf(err error) string {
 		return ae.Op
 	}
 	return ""
-}
-
-// StatusOf maps this package's own sentinels to a status. Sentinels from below
-// (store.ErrNotFound, runtime.ErrImageMissing) stay unknown here on purpose:
-// httpapi is imported by the SDK clients, and importing store or runtime to
-// classify them would drag the server's dependencies into every client.
-func StatusOf(err error) (int, bool) {
-	switch {
-	case errors.Is(err, ErrNotFound):
-		return http.StatusNotFound, true
-	case errors.Is(err, ErrInvalidRequest):
-		return http.StatusBadRequest, true
-	default:
-		return http.StatusInternalServerError, false
-	}
 }

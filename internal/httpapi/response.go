@@ -24,6 +24,8 @@ const (
 	CodeNotFound       = "not_found"
 	CodeConflict       = "conflict"
 	CodeUnprocessable  = "unprocessable"
+	CodeTooLarge       = "too_large"
+	CodeTimeout        = "timeout"
 	CodeInternal       = "internal"
 )
 
@@ -64,6 +66,10 @@ func CodeForStatus(status int) string {
 		return CodeConflict
 	case http.StatusUnprocessableEntity:
 		return CodeUnprocessable
+	case http.StatusRequestEntityTooLarge:
+		return CodeTooLarge
+	case http.StatusGatewayTimeout:
+		return CodeTimeout
 	default:
 		return CodeInternal
 	}
