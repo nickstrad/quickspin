@@ -57,7 +57,7 @@ func newTestAPIWithRuntime(t *testing.T, st store.Store, rt runtime.Runtime) *AP
 	t.Helper()
 
 	api := NewAPI("127.0.0.1", 0, slog.New(slog.NewTextHandler(io.Discard, nil)), st, rt)
-	api.initRouter()
+	api.Handler()
 	return &api
 }
 
@@ -661,15 +661,61 @@ func TestRuntimeSentinelsMapToClientStatuses(t *testing.T) {
 func TestFileRoutesRequirePathQueryParam(t *testing.T) {
 	api := newTestAPIWithStore(t, &fakeStore{})
 
-	for _, path := range []string{"/v1/sandboxes/sbx_x/files", "/v1/sandboxes/sbx_x/dir"} {
-		rec := do(t, api, http.MethodGet, path, "", nil)
+	// DELETE on files carries the path the same way, so it is gated the same way.
+	for _, tt := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/sandboxes/sbx_x/files"},
+		{http.MethodGet, "/v1/sandboxes/sbx_x/dir"},
+		{http.MethodDelete, "/v1/sandboxes/sbx_x/files"},
+	} {
+		rec := do(t, api, tt.method, tt.path, "", nil)
 
 		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("GET %s = %d, want %d (body %s)", path, rec.Code, http.StatusBadRequest, rec.Body.String())
+			t.Fatalf("%s %s = %d, want %d (body %s)", tt.method, tt.path, rec.Code, http.StatusBadRequest, rec.Body.String())
 		}
 		if got := decodeError(t, rec); got.Error.Code != CodeInvalidRequest {
-			t.Errorf("GET %s error code = %q, want %q", path, got.Error.Code, CodeInvalidRequest)
+			t.Errorf("%s %s error code = %q, want %q", tt.method, tt.path, got.Error.Code, CodeInvalidRequest)
 		}
+	}
+}
+
+// Unlike DELETE on a sandbox, removing a path is not idempotent: the caller
+// named one specific file, and the runtime is the thing that knows it is gone.
+func TestRemovePathReportsAMissingPath(t *testing.T) {
+	api := newTestAPIWithRuntime(t, runningStore(), runtimetest.Fake{
+		RemovePathFn: func(context.Context, string, string) error {
+			return runtime.ErrPathNotFound
+		},
+	})
+
+	rec := do(t, api, http.MethodDelete, "/v1/sandboxes/sbx_x/files?path=/nope", "", nil)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	if got := decodeError(t, rec); got.Error.Code != CodeNotFound {
+		t.Errorf("error code = %q, want %q", got.Error.Code, CodeNotFound)
+	}
+}
+
+func TestRemovePathAnswers204(t *testing.T) {
+	var gotPath string
+	api := newTestAPIWithRuntime(t, runningStore(), runtimetest.Fake{
+		RemovePathFn: func(_ context.Context, _, path string) error {
+			gotPath = path
+			return nil
+		},
+	})
+
+	rec := do(t, api, http.MethodDelete, "/v1/sandboxes/sbx_x/files?path=/work/build", "", nil)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+	if gotPath != "/work/build" {
+		t.Errorf("removed path = %q, want /work/build", gotPath)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want no body on a 204", rec.Body.String())
 	}
 }
 

@@ -172,6 +172,37 @@ func (a *API) queryPath(w http.ResponseWriter, r *http.Request, op string) (stri
 	return path, true
 }
 
+// SandboxResponse is the wire form of store.Sandbox. Spec stays store.SpecFile
+// unconverted: the spec document is already the deliberate user-facing format
+// that CreateSandbox accepts. The store's integer row id never travels.
+type SandboxResponse struct {
+	SandboxID string         `json:"sandbox_id"`
+	State     string         `json:"state"`
+	Spec      store.SpecFile `json:"spec"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+func NewSandboxResponse(sbx *store.Sandbox) SandboxResponse {
+	return SandboxResponse{
+		SandboxID: sbx.SandboxID,
+		State:     string(sbx.State),
+		Spec:      sbx.Spec,
+		CreatedAt: sbx.CreatedAt,
+		UpdatedAt: sbx.UpdatedAt,
+	}
+}
+
+func (s SandboxResponse) Sandbox() *store.Sandbox {
+	return &store.Sandbox{
+		SandboxID: s.SandboxID,
+		State:     store.TaskState(s.State),
+		Spec:      s.Spec,
+		CreatedAt: s.CreatedAt,
+		UpdatedAt: s.UpdatedAt,
+	}
+}
+
 func (a *API) CreateSandbox(w http.ResponseWriter, r *http.Request) {
 	const op = "httpapi.API.CreateSandbox"
 	ctx := r.Context()
@@ -217,7 +248,7 @@ func (a *API) CreateSandbox(w http.ResponseWriter, r *http.Request) {
 	if sbx.State != store.Pending {
 		a.logger.InfoContext(ctx, "returning the existing sandbox for a repeated idempotency key",
 			"idempotencyKey", idempotencyKey, "sandboxID", sbx.SandboxID, "state", sbx.State)
-		a.respond(w, r, http.StatusCreated, sbx)
+		a.respond(w, r, http.StatusCreated, NewSandboxResponse(sbx))
 		return
 	}
 
@@ -237,7 +268,7 @@ func (a *API) CreateSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.respond(w, r, http.StatusCreated, running)
+	a.respond(w, r, http.StatusCreated, NewSandboxResponse(running))
 }
 
 // markFailed records a create that the runtime refused. The error is logged
@@ -269,7 +300,34 @@ func (a *API) ListSandboxes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.respond(w, r, http.StatusOK, sbxs)
+	resp := make([]SandboxResponse, len(sbxs))
+	for i, sbx := range sbxs {
+		resp[i] = NewSandboxResponse(sbx)
+	}
+	a.respond(w, r, http.StatusOK, resp)
+}
+
+// InfoResponse is the wire form of runtime.Info.
+type InfoResponse struct {
+	ID        string    `json:"id"`
+	State     string    `json:"state"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func NewInfoResponse(info runtime.Info) InfoResponse {
+	return InfoResponse{
+		ID:        info.ID,
+		State:     string(info.State),
+		CreatedAt: info.CreatedAt,
+	}
+}
+
+func (i InfoResponse) Info() runtime.Info {
+	return runtime.Info{
+		ID:        i.ID,
+		State:     runtime.State(i.State),
+		CreatedAt: i.CreatedAt,
+	}
 }
 
 func (a *API) InspectSandbox(w http.ResponseWriter, r *http.Request) {
@@ -287,7 +345,7 @@ func (a *API) InspectSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.respond(w, r, http.StatusOK, infoObjs)
+	a.respond(w, r, http.StatusOK, NewInfoResponse(infoObjs))
 }
 
 func (a *API) DestroySandbox(w http.ResponseWriter, r *http.Request) {
@@ -327,8 +385,72 @@ func (a *API) DestroySandbox(w http.ResponseWriter, r *http.Request) {
 }
 
 type ExecRequest struct {
-	Command []string         `json:"command"`
-	Options runtime.ExecOpts `json:"options"`
+	Command []string    `json:"command"`
+	Options ExecOptions `json:"options"`
+}
+
+// ExecOptions is the wire form of runtime.ExecOpts. Timeout travels as whole
+// seconds because an untagged time.Duration would serialize as raw nanoseconds;
+// zero means the server-side default.
+type ExecOptions struct {
+	Env            map[string]string `json:"env,omitempty"`
+	WorkDir        string            `json:"work_dir,omitempty"`
+	TimeoutSeconds int64             `json:"timeout_seconds,omitempty"`
+}
+
+func NewExecOptions(opts runtime.ExecOpts) ExecOptions {
+	var secs int64
+	if opts.Timeout > 0 {
+		// Rounded up so a sub-second timeout does not become zero, which would
+		// silently mean "use the default" on the server.
+		secs = int64((opts.Timeout + time.Second - 1) / time.Second)
+	}
+	return ExecOptions{
+		Env:            opts.Env,
+		WorkDir:        opts.WorkDir,
+		TimeoutSeconds: secs,
+	}
+}
+
+func (o ExecOptions) ExecOpts() runtime.ExecOpts {
+	return runtime.ExecOpts{
+		Env:     o.Env,
+		WorkDir: o.WorkDir,
+		Timeout: time.Duration(o.TimeoutSeconds) * time.Second,
+	}
+}
+
+// ExecResponse exists because runtime.ExecResult carries no JSON tags: returning
+// it directly would publish Go field names as the wire contract by accident, and
+// renaming a field in the runtime would then be a breaking API change.
+type ExecResponse struct {
+	ExitCode int `json:"exit_code"`
+	// []byte marshals as base64, so binary output needs no per-byte JSON
+	// escaping.
+	Stdout          []byte `json:"stdout"`
+	Stderr          []byte `json:"stderr"`
+	StdoutTruncated bool   `json:"stdout_truncated"`
+	StderrTruncated bool   `json:"stderr_truncated"`
+}
+
+func NewExecResponse(result runtime.ExecResult) ExecResponse {
+	return ExecResponse{
+		ExitCode:        result.ExitCode,
+		Stdout:          result.Stdout,
+		Stderr:          result.Stderr,
+		StdoutTruncated: result.StdoutTruncated,
+		StderrTruncated: result.StderrTruncated,
+	}
+}
+
+func (r ExecResponse) ExecResult() runtime.ExecResult {
+	return runtime.ExecResult{
+		ExitCode:        r.ExitCode,
+		Stdout:          r.Stdout,
+		Stderr:          r.Stderr,
+		StdoutTruncated: r.StdoutTruncated,
+		StderrTruncated: r.StderrTruncated,
+	}
 }
 
 func (a *API) ExecInSandbox(w http.ResponseWriter, r *http.Request) {
@@ -352,13 +474,13 @@ func (a *API) ExecInSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	execResult, err := a.runtime.Exec(ctx, sandboxID, req.Command, req.Options)
+	execResult, err := a.runtime.Exec(ctx, sandboxID, req.Command, req.Options.ExecOpts())
 	if err != nil {
 		a.failWith(w, r, Wrap(op, fmt.Sprintf("executing cmd %s in sandbox %s", strings.Join(req.Command, " "), sandboxID), err))
 		return
 	}
 
-	a.respond(w, r, http.StatusOK, execResult)
+	a.respond(w, r, http.StatusOK, NewExecResponse(execResult))
 }
 
 type WriteInSandboxRequest struct {
@@ -441,6 +563,59 @@ func (a *API) ReadFromSandbox(w http.ResponseWriter, r *http.Request) {
 	a.respond(w, r, http.StatusOK, valInBytes)
 }
 
+// RemoveFromSandbox deletes a path. It is not idempotent the way DELETE on a
+// sandbox is: a missing path answers 404 rather than 204, because the runtime
+// reports it and the caller asked about one specific file rather than about a
+// resource this API owns the lifecycle of.
+func (a *API) RemoveFromSandbox(w http.ResponseWriter, r *http.Request) {
+	const op = "httpapi.API.RemoveFromSandbox"
+	ctx := r.Context()
+	sandboxID := chi.URLParam(r, sandboxIDParam)
+
+	path, ok := a.queryPath(w, r, op)
+	if !ok {
+		return
+	}
+
+	if !a.ensureRunning(w, r, op, sandboxID) {
+		return
+	}
+
+	if err := a.runtime.RemovePath(ctx, sandboxID, path); err != nil {
+		a.failWith(w, r, Wrap(op, fmt.Sprintf("removing path %s in sandbox %s", path, sandboxID), err))
+		return
+	}
+
+	a.respond(w, r, http.StatusNoContent, nil)
+}
+
+// FileInfoResponse is the wire form of runtime.FileInfo. Mode is the numeric
+// fs.FileMode value, matching how WriteInSandboxRequest carries it.
+type FileInfoResponse struct {
+	Path  string `json:"path"`
+	Size  int64  `json:"size"`
+	Mode  int64  `json:"mode"`
+	IsDir bool   `json:"is_dir"`
+}
+
+func NewFileInfoResponse(info runtime.FileInfo) FileInfoResponse {
+	return FileInfoResponse{
+		Path:  info.Path,
+		Size:  info.Size,
+		Mode:  int64(info.Mode),
+		IsDir: info.IsDir,
+	}
+}
+
+func (f FileInfoResponse) FileInfo() runtime.FileInfo {
+	return runtime.FileInfo{
+		Path:  f.Path,
+		Size:  f.Size,
+		Mode:  fs.FileMode(f.Mode),
+		IsDir: f.IsDir,
+	}
+}
+
 func (a *API) ListFromSandbox(w http.ResponseWriter, r *http.Request) {
 	const op = "httpapi.API.ListFromSandbox"
 	ctx := r.Context()
@@ -461,7 +636,21 @@ func (a *API) ListFromSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.respond(w, r, http.StatusOK, fileInfoObjs)
+	resp := make([]FileInfoResponse, len(fileInfoObjs))
+	for i, info := range fileInfoObjs {
+		resp[i] = NewFileInfoResponse(info)
+	}
+	a.respond(w, r, http.StatusOK, resp)
+}
+
+// Handler builds the routes on first use and returns them, so a test in another
+// package can wrap the API in an httptest.Server without opening a socket of
+// its own.
+func (a *API) Handler() http.Handler {
+	if a.Router == nil {
+		a.initRouter()
+	}
+	return a.Router
 }
 
 func (a *API) initRouter() {
@@ -475,21 +664,21 @@ func (a *API) initRouter() {
 			r.Post("/exec", a.ExecInSandbox)
 			r.Put("/files", a.WriteInSandbox)
 			r.Get("/files", a.ReadFromSandbox)
+			r.Delete("/files", a.RemoveFromSandbox)
 			r.Get("/dir", a.ListFromSandbox)
 		})
 	})
+}
+
+func (a *API) Start(done <-chan struct{}) {
 	// No ReadTimeout or WriteTimeout: exec can legitimately run long, and the
 	// header and idle timeouts already bound what an idle client can hold open.
 	a.Server = &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", a.Address, a.Port),
-		Handler:           a.Router,
+		Handler:           a.Handler(),
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 	}
-}
-
-func (a *API) Start(done <-chan struct{}) {
-	a.initRouter()
 	go a.Server.ListenAndServe()
 	<-done
 	a.Stop()
