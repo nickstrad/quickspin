@@ -15,6 +15,7 @@ var (
 	ErrInvalidState           = errors.New("invalid state")
 	ErrInvalidStateTransition = errors.New("invalid state transition")
 	ErrInvalidSpec            = errors.New("invalid sandbox spec")
+	ErrSandboxNotRunning      = errors.New("sandbox not in running state")
 )
 
 type StoreError struct {

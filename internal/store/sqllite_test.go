@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"strconv"
 	"testing"
 
 	"github.com/nickstrad/quickspin/internal/store"
@@ -52,15 +51,17 @@ func TestSqlliteStoreOperationsHonorCanceledContext(t *testing.T) {
 		}
 	})
 
-	sandbox, err := st.CreateSandbox(context.Background(), "seed", `{"image":"alpine:3.20"}`)
+	seedImage := "alpine:3.20"
+	sandbox, err := st.CreateSandbox(context.Background(), "seed", store.SpecFile{Image: &seedImage})
 	if err != nil {
 		t.Fatalf("CreateSandbox(seed) error = %v, want nil", err)
 	}
-	sandboxID := strconv.Itoa(sandbox.ID)
+	sandboxID := sandbox.SandboxID
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
+	canceledImage := "debian:12"
 	tests := []struct {
 		name string
 		call func() error
@@ -75,7 +76,7 @@ func TestSqlliteStoreOperationsHonorCanceledContext(t *testing.T) {
 		{
 			name: "create idempotency key",
 			call: func() error {
-				_, err := st.CreateIdempotencyKey(ctx, "canceled-key", sandbox.ID)
+				_, err := st.CreateIdempotencyKey(ctx, "canceled-key", sandboxID)
 				return err
 			},
 		},
@@ -87,16 +88,23 @@ func TestSqlliteStoreOperationsHonorCanceledContext(t *testing.T) {
 			},
 		},
 		{
+			name: "get sandboxes",
+			call: func() error {
+				_, err := st.GetSandboxes(ctx)
+				return err
+			},
+		},
+		{
 			name: "update sandbox state",
 			call: func() error {
-				_, err := st.UpdateSandboxState(ctx, string(store.Pending), string(store.Running), sandboxID)
+				_, err := st.UpdateSandboxState(ctx, sandboxID, store.Pending, store.Running)
 				return err
 			},
 		},
 		{
 			name: "create sandbox",
 			call: func() error {
-				_, err := st.CreateSandbox(ctx, "canceled-create", `{"image":"debian:12"}`)
+				_, err := st.CreateSandbox(ctx, "canceled-create", store.SpecFile{Image: &canceledImage})
 				return err
 			},
 		},

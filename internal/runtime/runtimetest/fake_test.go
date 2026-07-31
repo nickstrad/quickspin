@@ -125,5 +125,5 @@ func TestFakePanicsOnAnUnsetMethod(t *testing.T) {
 	rt := runtimetest.Fake{InspectFn: func(context.Context, string) (runtime.Info, error) {
 		return runtime.Info{}, nil
 	}}
-	_, _ = rt.Create(t.Context(), runtime.Spec{Image: "alpine:3.20"})
+	_, _ = rt.Create(t.Context(), runtime.NewSandboxID(), runtime.Spec{Image: "alpine:3.20"})
 }

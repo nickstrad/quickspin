@@ -65,9 +65,13 @@ func conformCreate(t TB, rt runtime.Runtime, spec runtime.Spec, observe time.Dur
 	ctx, cancel := timebox(observe)
 	defer cancel()
 
-	created, err := rt.Create(ctx, spec)
+	sandboxID := runtime.NewSandboxID()
+	created, err := rt.Create(ctx, sandboxID, spec)
 	if err != nil {
 		t.Fatalf("Create(%+v) error = %v, want nil", spec, err)
+	}
+	if created.ID != sandboxID {
+		t.Errorf("Create ID = %q, want the supplied %q", created.ID, sandboxID)
 	}
 
 	// Registered before the assertions below, not after them: a Fatalf here

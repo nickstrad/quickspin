@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
@@ -126,7 +125,7 @@ func TestMemRuntimeWriteFileSharesTheIdentitySentinels(t *testing.T) {
 		t.Errorf("WriteFile(unknown id) error = %v, want ErrNotFound", err)
 	}
 
-	created, err := rt.Create(ctx, runtime.Spec{})
+	created, err := rt.Create(ctx, runtime.NewSandboxID(), runtime.Spec{})
 	if err != nil {
 		t.Fatalf("Create error = %v, want nil", err)
 	}
@@ -149,7 +148,7 @@ func TestMemRuntimeReadFileSharesTheIdentitySentinels(t *testing.T) {
 		t.Errorf("ReadFile(unknown id) error = %v, want ErrNotFound", err)
 	}
 
-	created, err := rt.Create(ctx, runtime.Spec{})
+	created, err := rt.Create(ctx, runtime.NewSandboxID(), runtime.Spec{})
 	if err != nil {
 		t.Fatalf("Create error = %v, want nil", err)
 	}
@@ -175,7 +174,7 @@ func TestMemRuntimeListDirSharesTheIdentitySentinels(t *testing.T) {
 		t.Errorf("ListDir(unknown id) error = %v, want ErrNotFound", err)
 	}
 
-	created, err := rt.Create(ctx, runtime.Spec{})
+	created, err := rt.Create(ctx, runtime.NewSandboxID(), runtime.Spec{})
 	if err != nil {
 		t.Fatalf("Create error = %v, want nil", err)
 	}
@@ -204,7 +203,7 @@ func TestMemRuntimeRemovePathSharesTheIdentitySentinels(t *testing.T) {
 		t.Errorf("RemovePath(unknown id) error = %v, want ErrNotFound", err)
 	}
 
-	created, err := rt.Create(ctx, runtime.Spec{})
+	created, err := rt.Create(ctx, runtime.NewSandboxID(), runtime.Spec{})
 	if err != nil {
 		t.Fatalf("Create error = %v, want nil", err)
 	}
@@ -306,14 +305,17 @@ func (g *gate) hidden() bool {
 
 var _ runtime.Runtime = (*memRuntime)(nil)
 
-func (m *memRuntime) Create(_ context.Context, _ runtime.Spec) (runtime.Info, error) {
+func (m *memRuntime) Create(_ context.Context, sandboxID string, _ runtime.Spec) (runtime.Info, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.sandboxes == nil {
 		m.sandboxes = map[string]runtime.Info{}
 	}
-	info := runtime.NewInfo("sbx_"+uuid.NewString(), runtime.StateRunning, time.Now().UTC())
+	if sandboxID == "" {
+		sandboxID = runtime.NewSandboxID()
+	}
+	info := runtime.NewInfo(sandboxID, runtime.StateRunning, time.Now().UTC())
 	m.sandboxes[info.ID] = info
 	return info, nil
 }

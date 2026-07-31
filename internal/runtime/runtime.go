@@ -8,8 +8,9 @@ import (
 	"time"
 )
 
+// Runtime creates sandboxes under caller-owned IDs.
 type Runtime interface {
-	Create(ctx context.Context, spec Spec) (Info, error)
+	Create(ctx context.Context, sandboxID string, spec Spec) (Info, error)
 	Inspect(ctx context.Context, sandboxID string) (Info, error)
 	List(ctx context.Context) ([]Info, error)
 	Destroy(ctx context.Context, sandboxID string) error

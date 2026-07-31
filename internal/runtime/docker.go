@@ -156,14 +156,17 @@ func (d *DockerRuntime) List(ctx context.Context) ([]Info, error) {
 	return infos, nil
 }
 
-func (d *DockerRuntime) Create(ctx context.Context, spec Spec) (Info, error) {
+func (d *DockerRuntime) Create(ctx context.Context, sandboxID string, spec Spec) (Info, error) {
 	const op = "runtime.DockerRuntime.Create"
 
-	d.logger.DebugContext(ctx, "creating sandbox", "image", spec.Image)
+	d.logger.DebugContext(ctx, "creating sandbox", "sandboxID", sandboxID, "image", spec.Image)
+
+	if err := validateSandboxID(sandboxID); err != nil {
+		return Info{}, E(op, fmt.Sprintf("creating sandbox %q", sandboxID), err)
+	}
 
 	// Configs are built before the pull so an invalid spec fails without a
 	// registry round trip.
-	sandboxID := NewSandboxID()
 	containerConfig, hostConfig, err := newContainerConfigs(spec, sandboxID)
 	if err != nil {
 		return Info{}, Wrap(op, "", err)

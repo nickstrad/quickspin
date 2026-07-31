@@ -405,12 +405,12 @@ func TestCreateOrdersItsRequestsAndSendsQuickspinsConfig(t *testing.T) {
 	daemon := newFakeDaemon(t)
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	info, err := rt.Create(t.Context(), testSpec(testImage, map[string]string{"B": "2", "A": "1"}))
+	info, err := rt.Create(t.Context(), testSandboxID, testSpec(testImage, map[string]string{"B": "2", "A": "1"}))
 	if err != nil {
 		t.Fatalf("Create error = %v, want nil", err)
 	}
-	if err := validateSandboxID(info.ID); err != nil {
-		t.Errorf("Create id %q is not a well-formed sandbox id: %v", info.ID, err)
+	if info.ID != testSandboxID {
+		t.Errorf("Create id = %q, want supplied id %q", info.ID, testSandboxID)
 	}
 
 	// Pull must precede create — ContainerCreate does not pull — and create must
@@ -459,8 +459,8 @@ func TestCreateOrdersItsRequestsAndSendsQuickspinsConfig(t *testing.T) {
 	if want := []string{"A=1", "B=2"}; !slices.Equal(body.Env, want) {
 		t.Errorf("create body Env = %v, want %v", body.Env, want)
 	}
-	if body.Labels[labelSandboxID] != info.ID || body.Labels[labelManaged] != labelManagedValue {
-		t.Errorf("create body Labels = %v, want the returned id %q and the managed marker", body.Labels, info.ID)
+	if body.Labels[labelSandboxID] != testSandboxID || body.Labels[labelManaged] != labelManagedValue {
+		t.Errorf("create body Labels = %v, want the supplied id %q and the managed marker", body.Labels, testSandboxID)
 	}
 	if body.HostConfig.RestartPolicy.Name != container.RestartPolicyAlways {
 		t.Errorf("create body RestartPolicy = %q, want always", body.HostConfig.RestartPolicy.Name)
@@ -494,7 +494,7 @@ func TestCreateRejectsAnInvalidSpecBeforeTouchingTheDaemon(t *testing.T) {
 	daemon := newFakeDaemon(t)
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	_, err := rt.Create(t.Context(), NewSpec(testImage, nil, testCPULimit, 0, testPidsLimit, false))
+	_, err := rt.Create(t.Context(), testSandboxID, NewSpec(testImage, nil, testCPULimit, 0, testPidsLimit, false))
 	if !errors.Is(err, ErrInvalidSpec) {
 		t.Fatalf("Create error = %v, want errors.Is(..., ErrInvalidSpec)", err)
 	}
@@ -526,7 +526,7 @@ func TestCreateMapsADaemonNotFoundToErrImageMissing(t *testing.T) {
 			tt.set(daemon)
 			rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-			_, err := rt.Create(t.Context(), testSpec("nope:latest", nil))
+			_, err := rt.Create(t.Context(), testSandboxID, testSpec("nope:latest", nil))
 			if !errors.Is(err, ErrImageMissing) {
 				t.Fatalf("Create error = %v, want errors.Is(..., ErrImageMissing)", err)
 			}
@@ -544,7 +544,7 @@ func TestCreateReportsAPullStreamFailureAndNeverCreates(t *testing.T) {
 	}
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	_, err := rt.Create(t.Context(), testSpec(testImage, nil))
+	_, err := rt.Create(t.Context(), testSandboxID, testSpec(testImage, nil))
 	if err == nil || !strings.Contains(err.Error(), "toomanyrequests") {
 		t.Fatalf("Create error = %v, want the stream's own cause", err)
 	}
@@ -558,7 +558,7 @@ func TestCreateRemovesTheContainerItMadeWhenStartFails(t *testing.T) {
 	daemon.start = dockerError(http.StatusInternalServerError, `exec: "nope": not found`)
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	if _, err := rt.Create(t.Context(), testSpec(testImage, nil)); err == nil {
+	if _, err := rt.Create(t.Context(), testSandboxID, testSpec(testImage, nil)); err == nil {
 		t.Fatal("Create error = nil, want the start failure")
 	}
 
@@ -579,7 +579,7 @@ func TestCreateNamesTheLeakWhenCleanupAlsoFails(t *testing.T) {
 	daemon.remove = dockerError(http.StatusInternalServerError, "remove refused")
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	_, err := rt.Create(t.Context(), testSpec(testImage, nil))
+	_, err := rt.Create(t.Context(), testSandboxID, testSpec(testImage, nil))
 	if err == nil {
 		t.Fatal("Create error = nil, want the joined failure")
 	}
@@ -608,7 +608,7 @@ func TestCreateStillRemovesTheContainerWhenTheCallerCancels(t *testing.T) {
 	}
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	if _, err := rt.Create(ctx, testSpec(testImage, nil)); err == nil {
+	if _, err := rt.Create(ctx, testSandboxID, testSpec(testImage, nil)); err == nil {
 		t.Fatal("Create error = nil, want a failure after cancellation")
 	}
 
@@ -618,30 +618,46 @@ func TestCreateStillRemovesTheContainerWhenTheCallerCancels(t *testing.T) {
 	}
 }
 
-// --- Lookup ------------------------------------------------------------------
+// --- Identity validation and lookup ------------------------------------------
 
-func TestLookupRejectsAMalformedIDBeforeReachingTheDaemon(t *testing.T) {
+func TestOperationsRejectAMalformedIDBeforeReachingTheDaemon(t *testing.T) {
 	// A malformed id is a caller bug and must stay distinguishable from an
 	// absent one, so it cannot be allowed to become a 404 from the daemon.
 	const malformed = "not-a-sandbox-id"
 
-	tests := map[string]func(*testing.T, *DockerRuntime) error{
-		"Inspect": func(t *testing.T, rt *DockerRuntime) error {
-			_, err := rt.Inspect(t.Context(), malformed)
-			return err
+	tests := []struct {
+		name string
+		call func(*testing.T, *DockerRuntime) error
+	}{
+		{
+			name: "Create",
+			call: func(t *testing.T, rt *DockerRuntime) error {
+				_, err := rt.Create(t.Context(), malformed, testSpec(testImage, nil))
+				return err
+			},
 		},
-		"Destroy": func(t *testing.T, rt *DockerRuntime) error {
-			return rt.Destroy(t.Context(), malformed)
+		{
+			name: "Inspect",
+			call: func(t *testing.T, rt *DockerRuntime) error {
+				_, err := rt.Inspect(t.Context(), malformed)
+				return err
+			},
+		},
+		{
+			name: "Destroy",
+			call: func(t *testing.T, rt *DockerRuntime) error {
+				return rt.Destroy(t.Context(), malformed)
+			},
 		},
 	}
 
-	for name, call := range tests {
-		t.Run(name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			daemon := newFakeDaemon(t)
 			rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-			if err := call(t, rt); !errors.Is(err, ErrInvalidSandboxID) {
-				t.Fatalf("%s error = %v, want ErrInvalidSandboxID", name, err)
+			if err := tt.call(t, rt); !errors.Is(err, ErrInvalidSandboxID) {
+				t.Fatalf("%s error = %v, want ErrInvalidSandboxID", tt.name, err)
 			}
 			if got := daemon.routes(); len(got) != 0 {
 				t.Errorf("requests = %v, want none: validation must stop before the daemon", got)

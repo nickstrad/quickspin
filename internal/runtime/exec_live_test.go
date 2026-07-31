@@ -51,7 +51,7 @@ func liveSpec(t *testing.T) runtime.Spec {
 func newSandbox(t *testing.T, rt *runtime.DockerRuntime, spec runtime.Spec) string {
 	t.Helper()
 
-	info, err := rt.Create(t.Context(), spec)
+	info, err := rt.Create(t.Context(), runtime.NewSandboxID(), spec)
 	if err != nil {
 		t.Fatalf("Create(%s) error = %v, want nil", spec.Image, err)
 	}

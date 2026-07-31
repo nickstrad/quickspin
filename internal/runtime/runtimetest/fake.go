@@ -22,7 +22,7 @@ import (
 type Fake struct {
 	runtime.Runtime
 
-	CreateFn     func(context.Context, runtime.Spec) (runtime.Info, error)
+	CreateFn     func(context.Context, string, runtime.Spec) (runtime.Info, error)
 	InspectFn    func(context.Context, string) (runtime.Info, error)
 	ListFn       func(context.Context) ([]runtime.Info, error)
 	DestroyFn    func(context.Context, string) error
@@ -35,8 +35,8 @@ type Fake struct {
 
 var _ runtime.Runtime = Fake{}
 
-func (f Fake) Create(ctx context.Context, spec runtime.Spec) (runtime.Info, error) {
-	return f.CreateFn(ctx, spec)
+func (f Fake) Create(ctx context.Context, sandboxID string, spec runtime.Spec) (runtime.Info, error) {
+	return f.CreateFn(ctx, sandboxID, spec)
 }
 
 func (f Fake) Inspect(ctx context.Context, id string) (runtime.Info, error) {

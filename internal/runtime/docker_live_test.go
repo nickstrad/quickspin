@@ -146,7 +146,7 @@ func TestDockerCreateOnlyPromisesThatStartWasAccepted(t *testing.T) {
 	// depends on which phase happened to be visible.
 	rt := liveDocker(t)
 
-	info, err := rt.Create(t.Context(), runtime.NewSpec(shortLivedImage, nil, liveCPULimit, liveMemoryLimit, livePidsLimit, false))
+	info, err := rt.Create(t.Context(), runtime.NewSandboxID(), runtime.NewSpec(shortLivedImage, nil, liveCPULimit, liveMemoryLimit, livePidsLimit, false))
 	if err != nil {
 		t.Fatalf("Create(%s) error = %v, want nil", shortLivedImage, err)
 	}

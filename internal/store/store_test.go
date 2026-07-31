@@ -1,9 +1,12 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
-	"reflect"
+	"maps"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestCanTransitionMatrix(t *testing.T) {
@@ -19,7 +22,7 @@ func TestCanTransitionMatrix(t *testing.T) {
 	for _, from := range states {
 		for _, to := range states {
 			t.Run(string(from)+"_to_"+string(to), func(t *testing.T) {
-				err := canTransition(string(from), string(to))
+				err := canTransition(from, to)
 				if legal[[2]TaskState{from, to}] {
 					if err != nil {
 						t.Errorf("canTransition(%q, %q) error = %v, want nil", from, to, err)
@@ -42,11 +45,11 @@ func TestCanTransitionMatrix(t *testing.T) {
 func TestCanTransitionRejectsUnknownStates(t *testing.T) {
 	tests := []struct {
 		name string
-		from string
-		to   string
+		from TaskState
+		to   TaskState
 	}{
-		{name: "unknown source", from: "unknown", to: string(Running)},
-		{name: "unknown destination", from: string(Pending), to: "unknown"},
+		{name: "unknown source", from: "unknown", to: Running},
+		{name: "unknown destination", from: Pending, to: "unknown"},
 		{name: "both unknown", from: "unknown", to: "also-unknown"},
 	}
 
@@ -64,9 +67,16 @@ func TestCanTransitionRejectsUnknownStates(t *testing.T) {
 	}
 }
 
-func TestParseSpecFileAcceptsJSONAndYAML(t *testing.T) {
-	tests := map[string]string{
-		"JSON": `{
+func TestSpecFileDecodesFromJSONAndYAML(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		decode func([]byte, any) error
+	}{
+		{
+			name:   "JSON",
+			decode: json.Unmarshal,
+			input: `{
 			"image": "alpine:3.20",
 			"env": {"MODE": "test"},
 			"cpus": 0.5,
@@ -74,7 +84,11 @@ func TestParseSpecFileAcceptsJSONAndYAML(t *testing.T) {
 			"pids-limit": 64,
 			"allow-network": true
 		}`,
-		"YAML": `image: alpine:3.20
+		},
+		{
+			name:   "YAML",
+			decode: yaml.Unmarshal,
+			input: `image: alpine:3.20
 env:
   MODE: test
 cpus: 0.5
@@ -82,19 +96,23 @@ memory: 64m
 pids-limit: 64
 allow-network: true
 `,
+		},
 	}
 
-	for name, input := range tests {
-		t.Run(name, func(t *testing.T) {
-			spec, err := parseSpecFile(input)
-			if err != nil {
-				t.Fatalf("parseSpecFile() error = %v, want nil", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := &SpecFile{}
+			if err := tt.decode([]byte(tt.input), spec); err != nil {
+				t.Fatalf("%s decode error = %v, want nil", tt.name, err)
+			}
+			if err := spec.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v, want nil", err)
 			}
 
 			if spec.Image == nil || *spec.Image != "alpine:3.20" {
 				t.Errorf("Image = %v, want alpine:3.20", spec.Image)
 			}
-			if !reflect.DeepEqual(spec.Env, map[string]string{"MODE": "test"}) {
+			if !maps.Equal(spec.Env, map[string]string{"MODE": "test"}) {
 				t.Errorf("Env = %#v, want MODE=test", spec.Env)
 			}
 			if spec.CPUs == nil || *spec.CPUs != 0.5 {
@@ -113,10 +131,10 @@ allow-network: true
 	}
 }
 
-func TestParseSpecFilePreservesExplicitZeroValues(t *testing.T) {
-	spec, err := parseSpecFile(`{"cpus":0,"pids-limit":0,"allow-network":false}`)
-	if err != nil {
-		t.Fatalf("parseSpecFile() error = %v, want nil", err)
+func TestSpecFileDecodePreservesExplicitZeroValues(t *testing.T) {
+	spec := &SpecFile{}
+	if err := json.Unmarshal([]byte(`{"cpus":0,"pids-limit":0,"allow-network":false}`), spec); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v, want nil", err)
 	}
 
 	if spec.CPUs == nil || *spec.CPUs != 0 {
@@ -130,20 +148,22 @@ func TestParseSpecFilePreservesExplicitZeroValues(t *testing.T) {
 	}
 }
 
-func TestParseSpecFileRejectsInvalidInput(t *testing.T) {
+func TestSpecFileValidateRejectsEmptySpec(t *testing.T) {
 	tests := []struct {
-		name  string
-		input string
+		name string
+		spec *SpecFile
 	}{
-		{name: "empty", input: " \n\t"},
-		{name: "no recognized fields", input: `{"unknown":"value"}`},
-		{name: "malformed", input: `{"image":`},
+		{name: "nil", spec: nil},
+		{name: "zero value", spec: &SpecFile{}},
+		// `{}` and `{"unknown":"value"}` both decode to a zero SpecFile, so the
+		// empty-spec check is what rejects an unrecognized body.
+		{name: "empty env only", spec: &SpecFile{Env: map[string]string{}}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := parseSpecFile(tt.input); !errors.Is(err, ErrInvalidSpec) {
-				t.Errorf("parseSpecFile(%q) error = %v, want ErrInvalidSpec", tt.input, err)
+			if err := tt.spec.Validate(); !errors.Is(err, ErrInvalidSpec) {
+				t.Errorf("Validate() error = %v, want ErrInvalidSpec", err)
 			}
 		})
 	}
