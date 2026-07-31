@@ -1469,8 +1469,8 @@ h4:hover .heading-anchor {
   position: sticky;
   top: 56px;
   align-self: start;
-  padding: 14px 14px 0;
-  color: #5e665f;
+  padding: 14px 14px 30px;
+  color: #46544d;
 }
 
 .outline > p:first-child {
@@ -1488,7 +1488,7 @@ h4:hover .heading-anchor {
 
 .outline button {
   padding: 5px 0;
-  color: #667069;
+  color: #46564e;
   text-align: left;
   background: transparent;
   border: 0;
@@ -1506,12 +1506,12 @@ h4:hover .heading-anchor {
 
 .outline button.outline__nested {
   padding-left: 12px;
-  color: #80867f;
+  color: #5d6a63;
   font-size: 11px;
 }
 
 .outline nav > span {
-  color: #8b8e87;
+  color: #626c65;
   font-size: 12px;
   font-style: italic;
 }
@@ -1525,7 +1525,7 @@ h4:hover .heading-anchor {
 
 .outline__folio {
   margin: 0;
-  color: #8a8d86;
+  color: #616b64;
   font: 600 9px/1 var(--mono);
   letter-spacing: 0.1em;
 }
