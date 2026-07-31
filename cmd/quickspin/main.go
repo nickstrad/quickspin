@@ -8,7 +8,6 @@ import (
 	"syscall"
 
 	"github.com/nickstrad/quickspin/internal/cli"
-	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
 func main() {
@@ -27,16 +26,11 @@ func run(logger *slog.Logger, logLevel *slog.LevelVar) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	rt, err := runtime.NewDockerRuntime(nil, logger.With(
-		"component", "runtime",
-		"backend", "docker",
-	))
-	if err != nil {
-		return err
-	}
-
+	// A nil API leaves the CLI to build an HTTP client from --server. Nothing
+	// here opens a Docker connection: only `quickspin serve` needs one, and it
+	// opens it itself.
 	return cli.NewCommand(
-		rt,
+		nil,
 		logger.With("component", "cli"),
 		logLevel,
 	).ExecuteContext(ctx)

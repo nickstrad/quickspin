@@ -11,40 +11,45 @@ around a backend-neutral runtime contract: mandatory cgroup limits, network off 
 default, idempotent lifecycle operations, and a conformance suite every backend must
 pass, so container and microVM isolation sit behind the same API.
 
-> **Status: early.** What exists today is the sandbox runtime layer and a CLI over it —
-> create, inspect, list, exec, copy files into and out of, list paths in, remove paths
-> from, and destroy Docker-backed sandboxes. Sandboxes have cgroup v2 CPU/memory/pids
-> limits and network off by default; file operations enforce absolute-path validation
-> and bounded transfers. The control plane, guest agent, SDKs, and the Firecracker/Kata
-> backends are planned, not built. See [Roadmap](#roadmap) below.
+> **Status: early.** What exists today is a local HTTP control plane backed by SQLite
+> and Docker, plus a CLI client for creating, inspecting, listing, executing in, copying
+> files to and from, and destroying sandboxes. Sandboxes have cgroup v2
+> CPU/memory/pids limits and network off by default; file operations enforce
+> absolute-path validation and bounded transfers. The guest agent, SDKs, and the
+> Firecracker/Kata backends are future roadmap work. See [Roadmap](#roadmap) below.
 
 ## Architecture
 
 ```
-cmd/quickspin           main: wires logger -> runtime -> cobra command tree
+cmd/quickspin              main: wires logger -> cobra command tree
   |
-internal/cli            cobra commands, table/json/yaml rendering
-  |
-internal/runtime        Runtime interface (backend-neutral)
-  |-- DockerRuntime     the one implementation today (moby client)
-  '-- runtimetest       Fake runtime + conformance suite every backend must pass
+internal/cli
+  |-- sandbox commands --> internal/client --> HTTP control plane
+  '-- serve -------------> internal/httpapi
+                               |-- internal/store    SQLite records
+                               '-- internal/runtime  backend-neutral operations
+                                     |-- DockerRuntime
+                                     '-- runtimetest  conformance suite
 ```
 
-The central abstraction is `runtime.Runtime` ([internal/runtime/runtime.go](internal/runtime/runtime.go)):
+The control plane owns sandbox records and calls `runtime.Runtime`
+([internal/runtime/runtime.go](internal/runtime/runtime.go)) to realize them:
 
 ```go
 type Runtime interface {
-	Create(ctx context.Context, spec Spec) (Info, error)
-	Inspect(ctx context.Context, id string) (Info, error)
+	Create(ctx context.Context, sandboxID string, spec Spec) (Info, error)
+	Inspect(ctx context.Context, sandboxID string) (Info, error)
 	List(ctx context.Context) ([]Info, error)
-	Destroy(ctx context.Context, id string) error // idempotent: unknown id returns nil
-	Exec(ctx context.Context, id string, cmd []string, opts ExecOpts) (ExecResult, error)
+	Destroy(ctx context.Context, sandboxID string) error
+	Exec(ctx context.Context, sandboxID string, cmd []string, opts ExecOpts) (ExecResult, error)
+	// file operations omitted
 }
 ```
 
-Everything except `DockerRuntime` is backend-neutral. The CLI never imports the Docker client;
-it is handed a `Runtime` and knows nothing about how a sandbox is isolated. That is what
-makes the planned Firecracker and Kata backends drop-in replacements rather than rewrites.
+Everything except `DockerRuntime` is backend-neutral. Only `quickspin serve` opens the
+Docker runtime and SQLite store. Every `quickspin sandbox ...` command is an HTTP client,
+so it can use a remote control plane without needing Docker on the client machine. That
+separation also keeps future Firecracker and Kata backends behind the same server API.
 
 - **Sandbox IDs are Quickspin's, not Docker's.** A sandbox is `sbx_<uuid>`, stored as a
   container label; the Docker container ID never leaks into the CLI surface.
@@ -64,7 +69,7 @@ makes the planned Firecracker and Kata backends drop-in replacements rather than
 | Tool | Why |
 | --- | --- |
 | Go 1.26+ | building and testing the module (`go.mod` pins 1.26.4) |
-| A Docker daemon | the only runtime backend that exists today |
+| A Docker daemon | required on the machine running `quickspin serve`; Docker is the only runtime backend today |
 | [Lima](https://lima-vm.io/) (`limactl`) | macOS: provides the Linux VM the daemon runs in |
 | `docker` CLI | managing the Docker context that points at the VM |
 | `jq` | used by `make test-docker` |
@@ -135,25 +140,54 @@ The restart is required, not cosmetic. `/etc/environment` is read by PAM once pe
 opened at boot — so a running instance keeps serving the environment it had before the
 edit.
 
-## Run the CLI locally
+## Run the control plane and CLI
 
-After `make env-create`, run the CLI on the host with `make run` and pass its arguments
-through `ARGS`:
+After `make env-create`, start the control plane on the host. It connects to the active
+Docker context, listens on `127.0.0.1:8080`, and stores state in `control-plane.db` in
+the current directory by default:
 
 ```sh
+# Terminal 1
+make run ARGS="serve"
+```
+
+Keep the server running and use a second terminal for client commands:
+
+```sh
+# Terminal 2
 make run ARGS="sandbox list"
 make run ARGS="sandbox create alpine:3.20"
 ```
 
-To run the CLI itself inside Lima, cross-compile it first, then enter the VM. Lima mounts
+The client defaults to `http://127.0.0.1:8080`. For another address, use `--server` for
+one command or set `QUICKSPIN_SERVER` for the shell:
+
+```sh
+# Terminal 1: choose a different listener and database.
+quickspin serve --port 9000 --db ./quickspin.db
+
+# Terminal 2: either form points the client at that server.
+quickspin --server http://127.0.0.1:9000 sandbox list
+export QUICKSPIN_SERVER=http://127.0.0.1:9000
+quickspin sandbox list
+```
+
+Stop the server with Ctrl-C. Only the server machine needs Docker; a client targeting a
+remote server does not.
+
+To run everything inside Lima, cross-compile first and open two VM shells. Lima mounts
 the host home directory, so the checkout and built binary are available at the same
-absolute path:
+absolute path. Run `serve` in the first shell and client commands in the second:
 
 ```sh
 make build-linux
 make lima-vm-shell
 
-# Inside Lima:
+# Inside Lima, shell 1:
+cd /absolute/path/to/quickspin
+./bin/linux-arm64/quickspin serve
+
+# Inside Lima, shell 2:
 cd /absolute/path/to/quickspin
 ./bin/linux-arm64/quickspin sandbox list
 ```
@@ -164,11 +198,15 @@ The binary is `quickspin`; all sandbox verbs live under `quickspin sandbox`.
 
 ```
 quickspin
+  serve                     run the HTTP control plane
   sandbox
     create IMAGE            create a sandbox from an image
     list                    list managed sandboxes
     inspect ID              show one sandbox
     exec ID -- CMD [ARG..]  run a command inside a sandbox
+    cp SOURCE DESTINATION   copy a file into or out of a sandbox
+    ls ID PATH              list a path inside a sandbox
+    rm ID PATH              remove a path inside a sandbox
     destroy ID              destroy a sandbox
 ```
 
@@ -176,6 +214,7 @@ Persistent flags, valid on every command:
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
+| `--server` | URL | `http://127.0.0.1:8080` | control-plane address; defaults from `QUICKSPIN_SERVER` when set |
 | `-o`, `--output` | `table`, `json`, `yaml` | `table` | output format on stdout |
 | `--log-level` | `debug`, `info`, `warn`, `error` | `info` | structured log verbosity on stderr |
 
@@ -202,12 +241,15 @@ Logs go to **stderr** and command output to **stdout**, so `-o json` stays pipea
 
 ### Examples
 
+These examples assume `quickspin serve` is running and the client points to its
+address as described above.
+
 Create a sandbox and read back its ID:
 
 ```sh
 $ quickspin sandbox create alpine:3.20
-ID                                        STATE    CREATED AT
-sbx_9f1c0e3a-5c2b-4f27-9c6c-1a2d3e4f5a6b  running  2026-07-27T10:14:02Z
+ID                                        STATE    IMAGE        CREATED AT
+sbx_9f1c0e3a-5c2b-4f27-9c6c-1a2d3e4f5a6b  running  alpine:3.20  2026-07-27T10:14:02Z
 ```
 
 Create with environment variables and explicit limits, network allowed:
@@ -245,9 +287,9 @@ List sandboxes, oldest first:
 
 ```sh
 $ quickspin sandbox list
-ID                                        STATE    CREATED AT
-sbx_9f1c0e3a-5c2b-4f27-9c6c-1a2d3e4f5a6b  running  2026-07-27T10:14:02Z
-sbx_3b8d7c11-2a4e-49f0-8d31-77c9ab0e5512  running  2026-07-27T10:15:40Z
+ID                                        STATE    IMAGE        CREATED AT
+sbx_9f1c0e3a-5c2b-4f27-9c6c-1a2d3e4f5a6b  running  alpine:3.20  2026-07-27T10:14:02Z
+sbx_3b8d7c11-2a4e-49f0-8d31-77c9ab0e5512  running  alpine:3.20  2026-07-27T10:15:40Z
 ```
 
 Machine-readable output:
@@ -260,7 +302,7 @@ $ quickspin sandbox inspect sbx_9f1c0e3a-5c2b-4f27-9c6c-1a2d3e4f5a6b -o json
   "created_at": "2026-07-27T10:14:02Z"
 }
 
-$ quickspin sandbox list -o json | jq -r '.[] | select(.state == "running") | .id'
+$ quickspin sandbox list -o json | jq -r '.[] | select(.state == "running") | .sandbox_id'
 ```
 
 Destroy one, or sweep them all:
@@ -270,7 +312,7 @@ $ quickspin sandbox destroy sbx_9f1c0e3a-5c2b-4f27-9c6c-1a2d3e4f5a6b
 ID                                        STATUS
 sbx_9f1c0e3a-5c2b-4f27-9c6c-1a2d3e4f5a6b  destroyed
 
-$ quickspin sandbox list -o json | jq -r '.[].id' | xargs -n1 quickspin sandbox destroy
+$ quickspin sandbox list -o json | jq -r '.[].sandbox_id' | xargs -n1 quickspin sandbox destroy
 ```
 
 Destroying an unknown ID succeeds silently — cleanup is retry-safe by design, so a
@@ -279,13 +321,14 @@ crashed reaper can re-run without special-casing already-gone sandboxes.
 ## Development
 
 ```sh
-make build      # build bin/quickspin
-make run ARGS="sandbox list"  # build and run in one step
-make fmt        # gofmt
-make vet        # go vet
-make tidy       # sync go.mod / go.sum
-make test       # every Go test; needs no Docker
-make clean      # remove bin/
+make build              # build bin/quickspin
+make run ARGS="serve"   # build and run the control plane
+make run ARGS="sandbox list"  # in another terminal, run a client command
+make fmt                # gofmt
+make vet                # go vet
+make tidy               # sync go.mod / go.sum
+make test               # every Go test; needs no Docker
+make clean              # remove bin/
 ```
 
 `make fmt` and `make vet` should both be clean before a change is done.
@@ -300,18 +343,18 @@ make docs         # dev server
 make docs-build   # type-check and produce a static build
 ```
 
-`docs/plans/open/` holds proposed and in-progress work; `docs/plans/closed/` is history;
-`docs/reference/` is forward-looking architecture and design notes, not a spec for
-current behavior.
+`docs/plans/open/` holds open roadmap work; `docs/plans/closed/` is completed roadmap
+history; `docs/reference/` is forward-looking architecture and design notes, not a spec
+for current behavior.
 
 ## Tests
 
 There are two lanes, deliberately kept apart so the fast one stays fast.
 
 **Daemon-free (`make test`)** — pure helpers, the Docker adapter driven against an
-`httptest.Server` standing in for the daemon, and CLI tests driven by
-`runtimetest.Fake`. Runs on a machine with no Docker installed at all; the live suite
-reports itself skipped.
+`httptest.Server` standing in for the daemon, control-plane handler tests with fake
+stores and runtimes, and CLI tests with a fake control-plane client. Runs on a machine
+with no Docker installed at all; the live suite reports itself skipped.
 
 ```sh
 make test                                        # everything
@@ -345,18 +388,18 @@ and [`docs/reference/docker-test-architecture-explained.mdx`](docs/reference/doc
 
 ## Roadmap
 
-The plans in [`docs/plans/open/`](docs/plans/open/) sequence the platform. Abbreviated:
+The documents in [`docs/plans/open/`](docs/plans/open/) sequence the platform roadmap.
+Abbreviated:
 
-| Plans | Track |
+| Roadmap | Track |
 | --- | --- |
-| 01–02 | Lima lab environment; the `Runtime` interface and Docker backend *(done)* |
-| 03–04 | exec with real exit codes, cgroup limits, network policy; filesystem API *(done)* |
-| 05–08 | HTTP control plane, reconciler and leases, in-sandbox guest agent, auth/tenancy/quotas |
+| 01–05 | Lima lab environment, Docker runtime, exec and filesystem APIs, HTTP control plane *(done)* |
+| 06–08 | reconciler and leases, in-sandbox guest agent, auth/tenancy/quotas |
 | 09–12 | TypeScript and Python SDKs, snapshots, an agent-harness capstone demo |
 | 15–18 | production: Postgres store, live Docker-backed host, control-plane/worker split with heartbeats and a failure-injection suite, fleet provisioning and observability |
 | 13–14 | isolation internals: a minimal container runtime on raw kernel primitives; Firecracker microVMs as a second backend, ending with the prod cutover |
 | 19–21 | compute pools, EC2/DigitalOcean providers, Kubernetes + Kata as a third backend |
 | 22–23 | agent workflows: git-capable sandboxes with secret injection, per-agent storage |
 
-Each plan states its own dependencies; a plan existing in `open/` does not mean it is
-being worked on.
+Each roadmap document states its own dependencies; existing in `open/` does not mean it
+is being worked on.
