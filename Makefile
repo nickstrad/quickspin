@@ -9,6 +9,9 @@ BIN_DIR := bin
 VM_NAME ?= quickspin
 LINUX_ARCH ?= arm64
 DOCKER_CONTEXT := lima-$(VM_NAME)
+LINUX_BIN := $(BIN_DIR)/linux-$(LINUX_ARCH)/$(BINARY)
+# Deferred `=`: the limactl call runs only for the recipes that reference it.
+LIMA_DOCKER_HOST = $(shell limactl list $(VM_NAME) --format 'unix://{{.Dir}}/sock/docker.sock')
 export VM_NAME LINUX_ARCH
 
 .PHONY: all
@@ -20,11 +23,25 @@ build: ## Build the binary into bin/
 
 .PHONY: build-linux
 build-linux: ## Build the linux binary into bin/
-	CGO_ENABLED=0 GOOS=linux GOARCH=$(LINUX_ARCH) go build -o $(BIN_DIR)/linux-$(LINUX_ARCH)/$(BINARY) $(PKG)
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(LINUX_ARCH) go build -o $(LINUX_BIN) $(PKG)
 
 .PHONY: run
 run: ## Run the app (pass args with ARGS="...")
 	go run $(PKG) $(ARGS)
+
+# The Docker SDK reads DOCKER_HOST and ignores the docker CLI's context, so the
+# server needs the socket named even when $(DOCKER_CONTEXT) is already active.
+# `?=` yields to an environment that already names a daemon.
+.PHONY: serve
+serve: export DOCKER_HOST ?= $(LIMA_DOCKER_HOST)
+serve: ## Run the control plane on the host against the VM's Docker daemon (flags via ARGS="...")
+	go run $(PKG) serve $(ARGS)
+
+# --host 0.0.0.0 because Lima only forwards guest ports bound to all interfaces,
+# and --db under the guest's home because the repo mount is read-only in the guest.
+.PHONY: serve-lima
+serve-lima: build-linux ## Run the control plane inside the Lima VM, reachable on the host at 127.0.0.1:8080
+	limactl shell $(VM_NAME) -- sh -c 'exec "$(CURDIR)/$(LINUX_BIN)" serve --host 0.0.0.0 --db "$$HOME/quickspin-control-plane.db" $(ARGS)'
 
 # The dedicated live-test VM. It is a different instance from VM_NAME on
 # purpose: the live suite sweeps Quickspin containers, and the development VM
@@ -111,7 +128,7 @@ lima-vm-shell:
 
 .PHONY: host-docker-context-create
 host-docker-context-create:
-	docker context create $(DOCKER_CONTEXT) --docker "host=$$(limactl list $(VM_NAME) --format 'unix://{{.Dir}}/sock/docker.sock')"
+	docker context create $(DOCKER_CONTEXT) --docker "host=$(LIMA_DOCKER_HOST)"
 
 .PHONY: host-docker-context-use
 host-docker-context-use:
