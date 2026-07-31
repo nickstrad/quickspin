@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
+	"github.com/nickstrad/quickspin/internal/store"
 	"gopkg.in/yaml.v3"
 )
 
@@ -18,8 +19,12 @@ func (r renderer) writeInfo(w io.Writer, info runtime.Info) error {
 	return r.write(w, info, infoTableRows([]runtime.Info{info}))
 }
 
-func (r renderer) writeInfos(w io.Writer, infos []runtime.Info) error {
-	return r.write(w, infos, infoTableRows(infos))
+func (r renderer) writeSandbox(w io.Writer, sandbox *store.Sandbox) error {
+	return r.write(w, sandbox, sandboxTableRows([]*store.Sandbox{sandbox}))
+}
+
+func (r renderer) writeSandboxes(w io.Writer, sandboxes []*store.Sandbox) error {
+	return r.write(w, sandboxes, sandboxTableRows(sandboxes))
 }
 
 func (r renderer) writeDestroyResult(w io.Writer, result destroyResult) error {
@@ -54,6 +59,24 @@ func infoTableRows(infos []runtime.Info) [][]string {
 			info.ID,
 			string(info.State),
 			info.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	return rows
+}
+
+func sandboxTableRows(sandboxes []*store.Sandbox) [][]string {
+	rows := make([][]string, 1, len(sandboxes)+1)
+	rows[0] = []string{"ID", "STATE", "IMAGE", "CREATED AT"}
+	for _, sandbox := range sandboxes {
+		image := ""
+		if sandbox.Spec.Image != nil {
+			image = *sandbox.Spec.Image
+		}
+		rows = append(rows, []string{
+			sandbox.SandboxID,
+			string(sandbox.State),
+			image,
+			sandbox.CreatedAt.Format(time.RFC3339),
 		})
 	}
 	return rows

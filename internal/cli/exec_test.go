@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
 )
 
 // execCall records what the CLI handed the runtime, so a test can assert the
@@ -19,8 +18,8 @@ type execCall struct {
 	opts runtime.ExecOpts
 }
 
-func recordingExec(got *execCall, result runtime.ExecResult) runtimetest.Fake {
-	return runtimetest.Fake{
+func recordingExec(got *execCall, result runtime.ExecResult) fakeAPI {
+	return fakeAPI{
 		ExecFn: func(_ context.Context, id string, cmd []string, opts runtime.ExecOpts) (runtime.ExecResult, error) {
 			*got = execCall{id: id, cmd: cmd, opts: opts}
 			return result, nil
@@ -33,9 +32,9 @@ func TestExecPassesTheCommandAfterDashDashUntouched(t *testing.T) {
 	// are the container's, and quickspin must neither consume nor reorder them —
 	// `-e` here is grep's, not quickspin's --env.
 	var got execCall
-	rt := recordingExec(&got, runtime.ExecResult{})
+	api := recordingExec(&got, runtime.ExecResult{})
 
-	if _, _, err := execute(t, rt,
+	if _, _, err := execute(t, api,
 		"sandbox", "exec", testID, "--", "grep", "-e", "memory.max", "/proc/self/cgroup",
 	); err != nil {
 		t.Fatalf("execute exec error = %v, want nil", err)
@@ -55,12 +54,12 @@ func TestExecSeparatesTheCommandsStreams(t *testing.T) {
 	// stdout here would throw that away at the last hop. Neither goes through the
 	// renderer: `exec <id> -- cat memory.max` must yield the file, not a table.
 	var got execCall
-	rt := recordingExec(&got, runtime.ExecResult{
+	api := recordingExec(&got, runtime.ExecResult{
 		Stdout: []byte("67108864\n"),
 		Stderr: []byte("warning: cgroup v1 fallback\n"),
 	})
 
-	stdout, stderr, err := execute(t, rt, "sandbox", "exec", testID, "--", "cat", "memory.max")
+	stdout, stderr, err := execute(t, api, "sandbox", "exec", testID, "--", "cat", "memory.max")
 	if err != nil {
 		t.Fatalf("execute exec error = %v, want nil", err)
 	}
@@ -107,9 +106,9 @@ func TestExecWarnsWhenAStreamWasTruncated(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got execCall
-			rt := recordingExec(&got, tt.result)
+			api := recordingExec(&got, tt.result)
 
-			stdout, stderr, err := execute(t, rt, "sandbox", "exec", testID, "--", "cat", "big.json")
+			stdout, stderr, err := execute(t, api, "sandbox", "exec", testID, "--", "cat", "big.json")
 			if err != nil {
 				t.Fatalf("execute exec error = %v, want nil", err)
 			}
@@ -133,9 +132,9 @@ func TestExecReportsANonZeroExitCode(t *testing.T) {
 	// rather than swallowed. It is reported in the error text, not in the process
 	// exit status — see the note in exec.go.
 	var got execCall
-	rt := recordingExec(&got, runtime.ExecResult{ExitCode: 137, Stdout: []byte("partial\n")})
+	api := recordingExec(&got, runtime.ExecResult{ExitCode: 137, Stdout: []byte("partial\n")})
 
-	stdout, _, err := execute(t, rt, "sandbox", "exec", testID, "--", "sh", "-c", "eat_memory")
+	stdout, _, err := execute(t, api, "sandbox", "exec", testID, "--", "sh", "-c", "eat_memory")
 	if err == nil || !strings.Contains(err.Error(), "exited 137") {
 		t.Fatalf("execute exec error = %v, want the exit code reported", err)
 	}
@@ -169,9 +168,9 @@ func TestExecTimeoutFlagReachesExecOpts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got execCall
-			rt := recordingExec(&got, runtime.ExecResult{})
+			api := recordingExec(&got, runtime.ExecResult{})
 
-			if _, _, err := execute(t, rt, tt.args...); err != nil {
+			if _, _, err := execute(t, api, tt.args...); err != nil {
 				t.Fatalf("execute exec error = %v, want nil", err)
 			}
 			if got.opts.Timeout != tt.want {
@@ -185,9 +184,9 @@ func TestExecEnvAndWorkdirReachExecOptsNotTheSpec(t *testing.T) {
 	// These are per-process, layered over the container's own environment for this
 	// call only — unlike create's --env, which is baked into the container.
 	var got execCall
-	rt := recordingExec(&got, runtime.ExecResult{})
+	api := recordingExec(&got, runtime.ExecResult{})
 
-	_, _, err := execute(t, rt,
+	_, _, err := execute(t, api,
 		"sandbox", "exec", testID,
 		"--env", "LANG=C",
 		"--workdir", "/sys/fs/cgroup",
@@ -206,18 +205,7 @@ func TestExecEnvAndWorkdirReachExecOptsNotTheSpec(t *testing.T) {
 }
 
 func TestExecRequiresACommand(t *testing.T) {
-	called := false
-	rt := runtimetest.Fake{
-		ExecFn: func(context.Context, string, []string, runtime.ExecOpts) (runtime.ExecResult, error) {
-			called = true
-			return runtime.ExecResult{}, nil
-		},
-	}
-
-	if _, _, err := execute(t, rt, "sandbox", "exec", testID); err == nil {
+	if _, _, err := execute(t, fakeAPI{}, "sandbox", "exec", testID); err == nil {
 		t.Fatal("execute exec error = nil, want an argument error for a missing command")
-	}
-	if called {
-		t.Error("Exec was called with no command")
 	}
 }

@@ -6,23 +6,33 @@ import (
 	"testing"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
+	"github.com/nickstrad/quickspin/internal/store"
 )
 
-func TestCreatePassesImageAndEnvironmentAndWritesATable(t *testing.T) {
-	var gotSpec runtime.Spec
-	rt := runtimetest.Fake{
-		CreateFn: func(_ context.Context, spec runtime.Spec) (runtime.Info, error) {
-			gotSpec = spec
-			return runtime.Info{
-				ID:        testID,
-				State:     runtime.StateRunning,
-				CreatedAt: testTime,
-			}, nil
+func recordingCreate(got *store.SpecFile) fakeAPI {
+	return fakeAPI{
+		CreateFn: func(_ context.Context, _ string, spec store.SpecFile) (*store.Sandbox, error) {
+			*got = spec
+			return sandboxRecord(testID, "alpine:3.20", store.Running), nil
 		},
 	}
+}
 
-	stdout, _, err := execute(t, rt,
+func mustResolve(t *testing.T, spec store.SpecFile) runtime.Spec {
+	t.Helper()
+
+	resolved, err := spec.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve() error = %v, want nil", err)
+	}
+	return resolved
+}
+
+func TestCreatePassesImageAndEnvironmentAndWritesATable(t *testing.T) {
+	var sent store.SpecFile
+	api := recordingCreate(&sent)
+
+	stdout, _, err := execute(t, api,
 		"sandbox", "create", "alpine:3.20",
 		"--env", "GREETING=hello world",
 		"--env", "EMPTY=",
@@ -31,6 +41,7 @@ func TestCreatePassesImageAndEnvironmentAndWritesATable(t *testing.T) {
 		t.Fatalf("execute create error = %v, want nil", err)
 	}
 
+	gotSpec := mustResolve(t, sent)
 	if gotSpec.Image != "alpine:3.20" {
 		t.Errorf("Create spec image = %q, want %q", gotSpec.Image, "alpine:3.20")
 	}
@@ -39,23 +50,18 @@ func TestCreatePassesImageAndEnvironmentAndWritesATable(t *testing.T) {
 	}
 
 	want := "" +
-		"ID                                        STATE    CREATED AT\n" +
-		testID + "  running  2026-07-25T12:00:00Z\n"
+		"ID                                        STATE    IMAGE        CREATED AT\n" +
+		testID + "  running  alpine:3.20  2026-07-25T12:00:00Z\n"
 	if stdout != want {
 		t.Errorf("create output =\n%q\nwant\n%q", stdout, want)
 	}
 }
 
 func TestCreateLimitFlagsReachTheSpec(t *testing.T) {
-	var gotSpec runtime.Spec
-	rt := runtimetest.Fake{
-		CreateFn: func(_ context.Context, spec runtime.Spec) (runtime.Info, error) {
-			gotSpec = spec
-			return runtime.Info{ID: testID, State: runtime.StateRunning, CreatedAt: testTime}, nil
-		},
-	}
+	var sent store.SpecFile
+	api := recordingCreate(&sent)
 
-	_, _, err := execute(t, rt,
+	_, _, err := execute(t, api,
 		"sandbox", "create", "alpine:3.20",
 		"--cpus", "0.5",
 		"--memory", "64m",
@@ -66,6 +72,7 @@ func TestCreateLimitFlagsReachTheSpec(t *testing.T) {
 		t.Fatalf("execute create error = %v, want nil", err)
 	}
 
+	gotSpec := mustResolve(t, sent)
 	if gotSpec.CPULimit != 0.5 {
 		t.Errorf("CPULimit = %v, want 0.5 cores", gotSpec.CPULimit)
 	}
@@ -83,21 +90,14 @@ func TestCreateLimitFlagsReachTheSpec(t *testing.T) {
 }
 
 func TestCreateWithoutLimitFlagsStillSendsEnforceableLimits(t *testing.T) {
-	// Spec rejects a zero limit rather than reading it as unlimited, so every
-	// flag needs a default — an omitted --memory must not produce an unbounded
-	// sandbox, and AllowNetwork must default closed.
-	var gotSpec runtime.Spec
-	rt := runtimetest.Fake{
-		CreateFn: func(_ context.Context, spec runtime.Spec) (runtime.Info, error) {
-			gotSpec = spec
-			return runtime.Info{ID: testID, State: runtime.StateRunning, CreatedAt: testTime}, nil
-		},
-	}
+	var sent store.SpecFile
+	api := recordingCreate(&sent)
 
-	if _, _, err := execute(t, rt, "sandbox", "create", "alpine:3.20"); err != nil {
+	if _, _, err := execute(t, api, "sandbox", "create", "alpine:3.20"); err != nil {
 		t.Fatalf("execute create error = %v, want nil", err)
 	}
 
+	gotSpec := mustResolve(t, sent)
 	if err := gotSpec.Validate(); err != nil {
 		t.Errorf("default spec does not validate: %v", err)
 	}
@@ -150,40 +150,38 @@ func TestCreateRejectsUnenforceableLimitsBeforeCallingCreate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			called := false
-			rt := runtimetest.Fake{
-				CreateFn: func(context.Context, runtime.Spec) (runtime.Info, error) {
-					called = true
-					return runtime.Info{}, nil
-				},
-			}
-
 			args := append([]string{"sandbox", "create", "alpine:3.20"}, tt.args...)
-			_, _, err := execute(t, rt, args...)
+			_, _, err := execute(t, fakeAPI{}, args...)
 			if err == nil || !strings.Contains(err.Error(), tt.wantMsg) {
 				t.Fatalf("execute create error = %v, want it to name %q", err, tt.wantMsg)
-			}
-			if called {
-				t.Error("Create was called for a spec whose limits are not enforceable")
 			}
 		})
 	}
 }
 
 func TestInvalidEnvironmentStopsBeforeCreate(t *testing.T) {
-	called := false
-	rt := runtimetest.Fake{
-		CreateFn: func(context.Context, runtime.Spec) (runtime.Info, error) {
-			called = true
-			return runtime.Info{}, nil
-		},
-	}
-
-	_, _, err := execute(t, rt, "sandbox", "create", "alpine:3.20", "--env", "MISSING_VALUE")
+	_, _, err := execute(t, fakeAPI{}, "sandbox", "create", "alpine:3.20", "--env", "MISSING_VALUE")
 	if err == nil || !strings.Contains(err.Error(), "expected KEY=VALUE") {
 		t.Fatalf("execute create error = %v, want KEY=VALUE validation error", err)
 	}
-	if called {
-		t.Error("Create was called for invalid environment input")
+}
+
+func TestCreateSendsAFreshIdempotencyKey(t *testing.T) {
+	var keys []string
+	api := fakeAPI{
+		CreateFn: func(_ context.Context, key string, _ store.SpecFile) (*store.Sandbox, error) {
+			keys = append(keys, key)
+			return sandboxRecord(testID, "alpine:3.20", store.Running), nil
+		},
+	}
+
+	for range 2 {
+		if _, _, err := execute(t, api, "sandbox", "create", "alpine:3.20"); err != nil {
+			t.Fatalf("execute create error = %v, want nil", err)
+		}
+	}
+
+	if len(keys) != 2 || keys[0] == "" || keys[0] == keys[1] {
+		t.Errorf("idempotency keys = %v, want two distinct non-empty keys", keys)
 	}
 }

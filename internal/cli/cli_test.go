@@ -10,8 +10,7 @@ import (
 	"time"
 
 	"github.com/nickstrad/quickspin/internal/cli"
-	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
+	"github.com/nickstrad/quickspin/internal/store"
 )
 
 const (
@@ -21,15 +20,15 @@ const (
 
 var testTime = time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 
-func execute(t *testing.T, rt runtime.Runtime, args ...string) (string, string, error) {
+func execute(t *testing.T, api fakeAPI, args ...string) (string, string, error) {
 	t.Helper()
 
-	return executeWithLogs(t, rt, io.Discard, args...)
+	return executeWithLogs(t, api, io.Discard, args...)
 }
 
 func executeWithLogs(
 	t *testing.T,
-	rt runtime.Runtime,
+	api fakeAPI,
 	logs io.Writer,
 	args ...string,
 ) (string, string, error) {
@@ -40,7 +39,7 @@ func executeWithLogs(
 		With("component", "cli")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := cli.NewCommand(rt, logger, level)
+	cmd := cli.NewCommand(api, logger, level)
 	cmd.SetArgs(args)
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -50,8 +49,8 @@ func executeWithLogs(
 }
 
 func TestLogLevelFlagControlsDebugLogging(t *testing.T) {
-	rt := runtimetest.Fake{
-		ListFn: func(context.Context) ([]runtime.Info, error) {
+	api := fakeAPI{
+		ListFn: func(context.Context) ([]*store.Sandbox, error) {
 			return nil, nil
 		},
 	}
@@ -68,7 +67,7 @@ func TestLogLevelFlagControlsDebugLogging(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			if _, _, err := executeWithLogs(t, rt, &logs, tt.args...); err != nil {
+			if _, _, err := executeWithLogs(t, api, &logs, tt.args...); err != nil {
 				t.Fatalf("execute list error = %v, want nil", err)
 			}
 
@@ -85,7 +84,7 @@ func TestLogLevelFlagControlsDebugLogging(t *testing.T) {
 }
 
 func TestInvalidLogLevelIsRejected(t *testing.T) {
-	_, _, err := execute(t, runtimetest.Fake{}, "--log-level", "trace")
+	_, _, err := execute(t, fakeAPI{}, "--log-level", "trace")
 	if err == nil || !strings.Contains(err.Error(), `invalid log level "trace"`) {
 		t.Fatalf("execute error = %v, want invalid log level error", err)
 	}

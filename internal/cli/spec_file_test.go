@@ -1,7 +1,6 @@
 package cli_test
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,7 +9,7 @@ import (
 	"time"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
+	"github.com/nickstrad/quickspin/internal/store"
 )
 
 // writeSpec puts content in a temp file and returns its path, so a test can
@@ -28,39 +27,20 @@ func writeSpec(t *testing.T, name, content string) string {
 func createdSpec(t *testing.T, args ...string) (runtime.Spec, error) {
 	t.Helper()
 
-	var gotSpec runtime.Spec
-	rt := runtimetest.Fake{
-		CreateFn: func(_ context.Context, spec runtime.Spec) (runtime.Info, error) {
-			gotSpec = spec
-			return runtime.Info{ID: testID, State: runtime.StateRunning, CreatedAt: testTime}, nil
-		},
+	var sent store.SpecFile
+	_, _, err := execute(t, recordingCreate(&sent), args...)
+	if err != nil {
+		return runtime.Spec{}, err
 	}
-
-	_, _, err := execute(t, rt, args...)
-	return gotSpec, err
+	return mustResolve(t, sent), nil
 }
 
-// rejectedBefore asserts the CLI failed with a message naming wantMsg and that
-// it never reached the runtime, which is the point of resolving the spec file
-// before any daemon work starts. calls counts whichever method the command uses.
-func rejectedBefore(t *testing.T, rt runtimetest.Fake, calls *bool, wantMsg string, args ...string) {
+func rejectedBefore(t *testing.T, api fakeAPI, wantMsg string, args ...string) {
 	t.Helper()
 
-	_, _, err := execute(t, rt, args...)
+	_, _, err := execute(t, api, args...)
 	if err == nil || !strings.Contains(err.Error(), wantMsg) {
 		t.Fatalf("execute error = %v, want it to name %q", err, wantMsg)
-	}
-	if *calls {
-		t.Error("the runtime was called for an input the CLI should have rejected")
-	}
-}
-
-func countingCreate(called *bool) runtimetest.Fake {
-	return runtimetest.Fake{
-		CreateFn: func(context.Context, runtime.Spec) (runtime.Info, error) {
-			*called = true
-			return runtime.Info{}, nil
-		},
 	}
 }
 
@@ -184,8 +164,7 @@ func TestCreateSpecFileIsRejectedWhenUnusable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			called := false
-			rejectedBefore(t, countingCreate(&called), &called, tt.wantMsg,
+			rejectedBefore(t, fakeAPI{}, tt.wantMsg,
 				"sandbox", "create", "--file", writeSpec(t, "spec.yaml", tt.content),
 			)
 		})
@@ -201,12 +180,12 @@ func TestCreateMissingSpecFileIsReported(t *testing.T) {
 
 func TestExecReadsTheRequestFromASpecFile(t *testing.T) {
 	var got execCall
-	rt := recordingExec(&got, runtime.ExecResult{})
+	api := recordingExec(&got, runtime.ExecResult{})
 
 	path := writeSpec(t, "task.yaml",
 		"command: [sh, -c, echo hello]\nworkdir: /tmp\ntimeout: 5s\nenv:\n  MODE: debug\n",
 	)
-	if _, _, err := execute(t, rt, "sandbox", "exec", testID, "--file", path); err != nil {
+	if _, _, err := execute(t, api, "sandbox", "exec", testID, "--file", path); err != nil {
 		t.Fatalf("execute exec error = %v, want nil", err)
 	}
 
@@ -228,10 +207,10 @@ func TestExecReadsTheRequestFromASpecFile(t *testing.T) {
 
 func TestExecFlagsAndArgumentsOverrideTheSpecFile(t *testing.T) {
 	var got execCall
-	rt := recordingExec(&got, runtime.ExecResult{})
+	api := recordingExec(&got, runtime.ExecResult{})
 
 	path := writeSpec(t, "task.yaml", "command: [true]\nworkdir: /tmp\ntimeout: 5s\n")
-	if _, _, err := execute(t, rt,
+	if _, _, err := execute(t, api,
 		"sandbox", "exec", testID, "--file", path, "-w", "/app", "--", "echo", "hi",
 	); err != nil {
 		t.Fatalf("execute exec error = %v, want nil", err)
@@ -271,15 +250,7 @@ func TestExecIsRejectedWhenTheRequestIsUnusable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			called := false
-			rt := runtimetest.Fake{
-				ExecFn: func(context.Context, string, []string, runtime.ExecOpts) (runtime.ExecResult, error) {
-					called = true
-					return runtime.ExecResult{}, nil
-				},
-			}
-
-			rejectedBefore(t, rt, &called, tt.wantMsg, tt.args...)
+			rejectedBefore(t, fakeAPI{}, tt.wantMsg, tt.args...)
 		})
 	}
 }

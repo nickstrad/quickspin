@@ -97,7 +97,7 @@ func (app *application) newExecCommand() *cobra.Command {
 			"from both. The file may be YAML or JSON; its keys match the flag names.\n" +
 			"Flags win over the file, and --env merges into the file's env one\n" +
 			"variable at a time. The file has no id key; ID is always an argument.",
-		Example: `  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .id)
+		Example: `  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .sandbox_id)
 
   # Everything after -- belongs to the sandbox, its own flags included.
   quickspin sandbox exec "$ID" -- sh -c 'echo hello'
@@ -140,7 +140,7 @@ EOF
 			}
 			app.logCommand(cmd, "sandboxID", id, "command", command, "timeout", opts.Timeout, "specFile", specPath)
 
-			result, err := app.runtime.Exec(cmd.Context(), id, command, opts)
+			result, err := app.api.Exec(cmd.Context(), id, command, opts)
 			if err != nil {
 				return fmt.Errorf("exec in sandbox %q: %w", id, err)
 			}

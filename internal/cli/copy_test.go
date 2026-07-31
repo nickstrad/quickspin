@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
 )
 
 func TestCopyUploadsLocalBytesAndMode(t *testing.T) {
@@ -30,14 +29,14 @@ func TestCopyUploadsLocalBytesAndMode(t *testing.T) {
 		gotContent []byte
 		gotMode    fs.FileMode
 	)
-	rt := runtimetest.Fake{
+	api := fakeAPI{
 		WriteFileFn: func(_ context.Context, id, path string, content []byte, mode fs.FileMode) error {
 			gotID, gotPath, gotContent, gotMode = id, path, bytes.Clone(content), mode
 			return nil
 		},
 	}
 
-	stdout, _, err := execute(t, rt, "sandbox", "cp", localPath, testID+":/work/main.go")
+	stdout, _, err := execute(t, api, "sandbox", "cp", localPath, testID+":/work/main.go")
 	if err != nil {
 		t.Fatalf("execute cp upload error = %v, want nil", err)
 	}
@@ -58,7 +57,7 @@ func TestCopyUploadsLocalBytesAndMode(t *testing.T) {
 func TestCopyDownloadsSandboxBytes(t *testing.T) {
 	content := []byte{0x00, 0xff, 0x10, '\n'}
 	var gotID, gotPath string
-	rt := runtimetest.Fake{
+	api := fakeAPI{
 		ReadFileFn: func(_ context.Context, id, path string) ([]byte, error) {
 			gotID, gotPath = id, path
 			return content, nil
@@ -66,7 +65,7 @@ func TestCopyDownloadsSandboxBytes(t *testing.T) {
 	}
 	localPath := filepath.Join(t.TempDir(), "artifact.bin")
 
-	if _, _, err := execute(t, rt, "sandbox", "cp", testID+":/work/artifact.bin", localPath); err != nil {
+	if _, _, err := execute(t, api, "sandbox", "cp", testID+":/work/artifact.bin", localPath); err != nil {
 		t.Fatalf("execute cp download error = %v, want nil", err)
 	}
 	if gotID != testID || gotPath != "/work/artifact.bin" {
@@ -96,14 +95,14 @@ func TestCopyRefusesAnOversizedLocalFileBeforeTheRuntime(t *testing.T) {
 	}
 
 	called := false
-	rt := runtimetest.Fake{
+	api := fakeAPI{
 		WriteFileFn: func(context.Context, string, string, []byte, fs.FileMode) error {
 			called = true
 			return nil
 		},
 	}
 
-	_, _, err = execute(t, rt, "sandbox", "cp", localPath, testID+":/work/too-big.bin")
+	_, _, err = execute(t, api, "sandbox", "cp", localPath, testID+":/work/too-big.bin")
 	if !errors.Is(err, runtime.ErrFileTooLarge) {
 		t.Fatalf("execute cp oversized error = %v, want ErrFileTooLarge", err)
 	}
@@ -118,7 +117,7 @@ func TestCopyRequiresExactlyOneSandboxPath(t *testing.T) {
 		{testID + ":/work/a", otherID + ":/work/b"},
 	}
 	for _, args := range tests {
-		_, _, err := execute(t, runtimetest.Fake{}, "sandbox", "cp", args[0], args[1])
+		_, _, err := execute(t, fakeAPI{}, "sandbox", "cp", args[0], args[1])
 		if err == nil {
 			t.Errorf("cp %q %q error = nil, want an ambiguous-direction error", args[0], args[1])
 		}

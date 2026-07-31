@@ -12,7 +12,7 @@ func (app *application) newListPathCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "ls ID PATH",
 		Short: "List a path inside a sandbox",
-		Example: `  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .id)
+		Example: `  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .sandbox_id)
 
   quickspin sandbox ls "$ID" /app
 
@@ -23,7 +23,7 @@ func (app *application) newListPathCommand() *cobra.Command {
 			id, filePath := args[0], args[1]
 			app.logCommand(cmd, "sandboxID", id, "path", filePath)
 
-			infos, err := app.runtime.ListDir(cmd.Context(), id, filePath)
+			infos, err := app.api.ListDir(cmd.Context(), id, filePath)
 			if err != nil {
 				return fmt.Errorf("list path %s in sandbox %q: %w", filePath, id, err)
 			}

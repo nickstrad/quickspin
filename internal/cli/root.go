@@ -1,24 +1,43 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
 	"strings"
 
+	"github.com/nickstrad/quickspin/internal/client"
 	"github.com/nickstrad/quickspin/internal/runtime"
+	"github.com/nickstrad/quickspin/internal/store"
 	"github.com/spf13/cobra"
 )
 
+type sandboxAPI interface {
+	CreateSandbox(ctx context.Context, idempotencyKey string, spec store.SpecFile) (*store.Sandbox, error)
+	ListSandboxes(ctx context.Context) ([]*store.Sandbox, error)
+	InspectSandbox(ctx context.Context, sandboxID string) (runtime.Info, error)
+	DestroySandbox(ctx context.Context, sandboxID string) error
+	Exec(ctx context.Context, sandboxID string, cmd []string, opts runtime.ExecOpts) (runtime.ExecResult, error)
+	WriteFile(ctx context.Context, sandboxID, path string, content []byte, mode fs.FileMode) error
+	ReadFile(ctx context.Context, sandboxID, path string) ([]byte, error)
+	ListDir(ctx context.Context, sandboxID, path string) ([]runtime.FileInfo, error)
+	RemovePath(ctx context.Context, sandboxID, path string) error
+}
+
 type application struct {
-	runtime  runtime.Runtime
+	api      sandboxAPI
 	renderer renderer
 	logger   *slog.Logger
 }
 
-// NewCommand builds the CLI around the backend-neutral runtime contract.
+const serverAddressEnv = "QUICKSPIN_SERVER"
+
+// NewCommand builds the CLI. A nil api uses the server selected by --server.
 // logLevel must also back the supplied logger's handler so the persistent flag
 // can change every child logger that shares that handler.
-func NewCommand(rt runtime.Runtime, logger *slog.Logger, logLevel *slog.LevelVar) *cobra.Command {
+func NewCommand(api sandboxAPI, logger *slog.Logger, logLevel *slog.LevelVar) *cobra.Command {
 	if logger == nil {
 		panic("cli.NewCommand: logger is required")
 	}
@@ -27,18 +46,24 @@ func NewCommand(rt runtime.Runtime, logger *slog.Logger, logLevel *slog.LevelVar
 	}
 
 	app := &application{
-		runtime: rt,
-		renderer: renderer{
-			format: outputTable,
-		},
-		logger: logger,
+		api:      api,
+		renderer: renderer{format: outputTable},
+		logger:   logger,
+	}
+
+	serverURL := os.Getenv(serverAddressEnv)
+	if serverURL == "" {
+		serverURL = client.DefaultBaseURL
 	}
 
 	cmd := &cobra.Command{
 		Use:   "quickspin",
 		Short: "Create and manage Quickspin sandboxes",
-		Example: `  # A whole session: create, use, destroy.
-  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .id)
+		Example: `  # The control plane first; every other command is a client of it.
+  quickspin serve &
+
+  # A whole session: create, use, destroy.
+  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .sandbox_id)
   quickspin sandbox exec "$ID" -- sh -c 'echo hello'
   quickspin sandbox destroy "$ID"
 
@@ -51,7 +76,19 @@ func NewCommand(rt runtime.Runtime, logger *slog.Logger, logLevel *slog.LevelVar
 		SilenceUsage:  true,
 		Args:          cobra.NoArgs,
 		RunE:          showHelp,
+		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+			if app.api == nil {
+				app.api = client.New(serverURL, nil)
+			}
+			return nil
+		},
 	}
+	cmd.PersistentFlags().StringVar(
+		&serverURL,
+		"server",
+		serverURL,
+		"control plane base URL (env "+serverAddressEnv+")",
+	)
 	cmd.PersistentFlags().Var(
 		logLevelFlag{level: logLevel},
 		"log-level",
@@ -64,7 +101,7 @@ func NewCommand(rt runtime.Runtime, logger *slog.Logger, logLevel *slog.LevelVar
 		"output format: table, json, or yaml",
 	)
 	cmd.RegisterFlagCompletionFunc("output", completeOutputFormat)
-	cmd.AddCommand(app.newSandboxCommand())
+	cmd.AddCommand(app.newSandboxCommand(), app.newServeCommand())
 
 	return cmd
 }

@@ -3,20 +3,18 @@ package cli_test
 import (
 	"context"
 	"testing"
-
-	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
 )
 
 func TestDestroyWritesMachineReadableConfirmation(t *testing.T) {
 	var gotID string
-	rt := runtimetest.Fake{
+	api := fakeAPI{
 		DestroyFn: func(_ context.Context, id string) error {
 			gotID = id
 			return nil
 		},
 	}
 
-	stdout, _, err := execute(t, rt, "sandbox", "destroy", testID, "-o", "json")
+	stdout, _, err := execute(t, api, "sandbox", "destroy", testID, "-o", "json")
 	if err != nil {
 		t.Fatalf("execute destroy error = %v, want nil", err)
 	}

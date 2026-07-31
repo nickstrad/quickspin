@@ -2,16 +2,17 @@ package cli_test
 
 import (
 	"context"
-	"errors"
+	"net/http"
 	"testing"
 
+	"github.com/nickstrad/quickspin/internal/client"
+	"github.com/nickstrad/quickspin/internal/httpapi"
 	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
 )
 
 func TestInspectWritesYAML(t *testing.T) {
 	var gotID string
-	rt := runtimetest.Fake{
+	api := fakeAPI{
 		InspectFn: func(_ context.Context, id string) (runtime.Info, error) {
 			gotID = id
 			return runtime.Info{
@@ -22,7 +23,7 @@ func TestInspectWritesYAML(t *testing.T) {
 		},
 	}
 
-	stdout, _, err := execute(t, rt, "sandbox", "inspect", testID, "--output=yaml")
+	stdout, _, err := execute(t, api, "sandbox", "inspect", testID, "--output=yaml")
 	if err != nil {
 		t.Fatalf("execute inspect error = %v, want nil", err)
 	}
@@ -39,15 +40,22 @@ func TestInspectWritesYAML(t *testing.T) {
 	}
 }
 
-func TestCommandPreservesRuntimeSentinels(t *testing.T) {
-	rt := runtimetest.Fake{
+// Sentinels do not survive the wire: what the CLI gets back is the envelope's
+// code, and wrapping with %w is what keeps it reachable through the command's
+// own "inspect sandbox ..." message.
+func TestCommandPreservesTheAPIErrorCode(t *testing.T) {
+	api := fakeAPI{
 		InspectFn: func(context.Context, string) (runtime.Info, error) {
-			return runtime.Info{}, runtime.E("runtime.DockerRuntime.Inspect", "resolving sandbox", runtime.ErrNotFound)
+			return runtime.Info{}, &client.Error{
+				Status:  http.StatusNotFound,
+				Code:    httpapi.CodeNotFound,
+				Message: "sandbox not found",
+			}
 		},
 	}
 
-	_, _, err := execute(t, rt, "sandbox", "inspect", testID)
-	if !errors.Is(err, runtime.ErrNotFound) {
-		t.Fatalf("execute inspect error = %v, want errors.Is(..., ErrNotFound)", err)
+	_, _, err := execute(t, api, "sandbox", "inspect", testID)
+	if !client.HasCode(err, httpapi.CodeNotFound) {
+		t.Fatalf("execute inspect error = %v, want the not_found code to survive wrapping", err)
 	}
 }

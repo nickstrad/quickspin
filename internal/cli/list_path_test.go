@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
 )
 
 func TestListPathPassesTheTargetAndWritesStableJSON(t *testing.T) {
@@ -16,14 +15,14 @@ func TestListPathPassesTheTargetAndWritesStableJSON(t *testing.T) {
 		{Path: "/work/logs", Mode: fs.ModeDir | 0o750, IsDir: true},
 	}
 	var gotID, gotPath string
-	rt := runtimetest.Fake{
+	api := fakeAPI{
 		ListDirFn: func(_ context.Context, id, path string) ([]runtime.FileInfo, error) {
 			gotID, gotPath = id, path
 			return infos, nil
 		},
 	}
 
-	stdout, _, err := execute(t, rt, "sandbox", "ls", testID, "/work", "--output", "json")
+	stdout, _, err := execute(t, api, "sandbox", "ls", testID, "/work", "--output", "json")
 	if err != nil {
 		t.Fatalf("execute ls error = %v, want nil", err)
 	}

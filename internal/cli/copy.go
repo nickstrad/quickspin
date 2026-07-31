@@ -32,7 +32,7 @@ func (app *application) newCopyCommand() *cobra.Command {
 			"Exactly one of SOURCE and DESTINATION is a sandbox path, written\n" +
 			"ID:/absolute/path. The other is a local path. Copying in preserves the\n" +
 			"local file's permission bits.",
-		Example: `  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .id)
+		Example: `  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .sandbox_id)
 
   # In, then back out.
   quickspin sandbox cp ./config.yaml "$ID":/app/config.yaml
@@ -51,7 +51,7 @@ func (app *application) newCopyCommand() *cobra.Command {
 
 			if sourceInSandbox {
 				app.logCommand(cmd, "sandboxID", source.id, "source", source.path, "destination", args[1])
-				content, err := app.runtime.ReadFile(cmd.Context(), source.id, source.path)
+				content, err := app.api.ReadFile(cmd.Context(), source.id, source.path)
 				if err != nil {
 					return fmt.Errorf("copy %s from sandbox %q: %w", source.path, source.id, err)
 				}
@@ -73,7 +73,7 @@ func (app *application) newCopyCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("read local file %q: %w", args[0], err)
 			}
-			if err := app.runtime.WriteFile(
+			if err := app.api.WriteFile(
 				cmd.Context(),
 				destination.id,
 				destination.path,

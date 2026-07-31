@@ -6,7 +6,7 @@ func (app *application) newSandboxCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sandbox",
 		Short: "Manage sandboxes",
-		Example: `  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .id)
+		Example: `  ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .sandbox_id)
 
   # Two argument forms to know: KEY=VALUE for --env, and ID:/absolute/path for cp.
   quickspin sandbox create alpine:3.20 -e NAME=world

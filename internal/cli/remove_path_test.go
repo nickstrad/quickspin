@@ -2,23 +2,23 @@ package cli_test
 
 import (
 	"context"
-	"errors"
+	"net/http"
 	"testing"
 
-	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
+	"github.com/nickstrad/quickspin/internal/client"
+	"github.com/nickstrad/quickspin/internal/httpapi"
 )
 
 func TestRemovePathPassesTheTargetAndStaysSilent(t *testing.T) {
 	var gotID, gotPath string
-	rt := runtimetest.Fake{
+	api := fakeAPI{
 		RemovePathFn: func(_ context.Context, id, path string) error {
 			gotID, gotPath = id, path
 			return nil
 		},
 	}
 
-	stdout, _, err := execute(t, rt, "sandbox", "rm", testID, "/work/build")
+	stdout, _, err := execute(t, api, "sandbox", "rm", testID, "/work/build")
 	if err != nil {
 		t.Fatalf("execute rm error = %v, want nil", err)
 	}
@@ -30,15 +30,19 @@ func TestRemovePathPassesTheTargetAndStaysSilent(t *testing.T) {
 	}
 }
 
-func TestRemovePathPreservesRuntimeSentinels(t *testing.T) {
-	rt := runtimetest.Fake{
+func TestRemovePathPreservesTheAPIErrorCode(t *testing.T) {
+	api := fakeAPI{
 		RemovePathFn: func(context.Context, string, string) error {
-			return runtime.E("runtime.DockerRuntime.RemovePath", "resolving sandbox", runtime.ErrNotFound)
+			return &client.Error{
+				Status:  http.StatusNotFound,
+				Code:    httpapi.CodeNotFound,
+				Message: "path not found in the sandbox",
+			}
 		},
 	}
 
-	_, _, err := execute(t, rt, "sandbox", "rm", testID, "/work/build")
-	if !errors.Is(err, runtime.ErrNotFound) {
-		t.Fatalf("execute rm error = %v, want errors.Is(..., ErrNotFound)", err)
+	_, _, err := execute(t, api, "sandbox", "rm", testID, "/work/build")
+	if !client.HasCode(err, httpapi.CodeNotFound) {
+		t.Fatalf("execute rm error = %v, want the not_found code to survive wrapping", err)
 	}
 }
