@@ -288,7 +288,11 @@ fi
 LIVE_TEST_TIMEOUT="${LIVE_TEST_TIMEOUT:-30m}"
 printf '\nRunning the live Docker suites (timeout %s).\n' "${LIVE_TEST_TIMEOUT}"
 
-mapfile -t live_packages < <(go list ./internal/runtime/... ./internal/client/...)
+# Not mapfile: macOS ships bash 3.2, where it does not exist.
+live_packages=()
+while IFS= read -r pkg; do
+    live_packages+=("$pkg")
+done < <(go list ./internal/runtime/... ./internal/client/...)
 for pkg in "${live_packages[@]}"; do
     printf '\n--- %s\n' "$pkg"
     QUICKSPIN_TEST_DOCKER=1 go test -count=1 -v -timeout "$LIVE_TEST_TIMEOUT" "$pkg"
