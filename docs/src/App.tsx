@@ -9,7 +9,16 @@ import {
   useRef,
   useState,
 } from "react";
-import { ArrowIcon, CheckIcon, CloseIcon, MenuIcon, SearchIcon } from "./icons";
+import {
+  ArrowIcon,
+  CheckIcon,
+  ChevronIcon,
+  CloseIcon,
+  MenuIcon,
+  ReaderModeIcon,
+  SearchIcon,
+  SettingsIcon,
+} from "./icons";
 import {
   documents,
   resolveDocument,
@@ -22,6 +31,50 @@ const completionDateFormatter = new Intl.DateTimeFormat("en-US", {
   dateStyle: "long",
   timeZone: "UTC",
 });
+
+type ReaderFontSize = "xs" | "sm" | "md" | "lg" | "xl";
+
+type ReaderPreferences = {
+  fontSize: ReaderFontSize;
+  readerMode: boolean;
+  sidebarCollapsed: boolean;
+};
+
+const defaultReaderPreferences: ReaderPreferences = {
+  fontSize: "md",
+  readerMode: false,
+  sidebarCollapsed: false,
+};
+
+const fontSizeOptions: { label: string; shortLabel: string; value: ReaderFontSize }[] = [
+  { label: "Very small", shortLabel: "XS", value: "xs" },
+  { label: "Small", shortLabel: "S", value: "sm" },
+  { label: "Default", shortLabel: "M", value: "md" },
+  { label: "Large", shortLabel: "L", value: "lg" },
+  { label: "Very large", shortLabel: "XL", value: "xl" },
+];
+
+const readerPreferencesKey = "quickspin-reader-preferences";
+
+function loadReaderPreferences(): ReaderPreferences {
+  try {
+    const saved = window.localStorage.getItem(readerPreferencesKey);
+    if (!saved) return defaultReaderPreferences;
+
+    const parsed = JSON.parse(saved) as Partial<ReaderPreferences>;
+    const fontSize = fontSizeOptions.some((option) => option.value === parsed.fontSize)
+      ? parsed.fontSize!
+      : defaultReaderPreferences.fontSize;
+
+    return {
+      fontSize,
+      readerMode: parsed.readerMode === true,
+      sidebarCollapsed: parsed.sidebarCollapsed === true,
+    };
+  } catch {
+    return defaultReaderPreferences;
+  }
+}
 
 function RoadmapStatus({ roadmap }: { roadmap: Roadmap }) {
   const completed = roadmap.status === "completed";
@@ -78,6 +131,9 @@ const Sidebar = memo(function Sidebar({
   onNavigate,
   open,
   onClose,
+  collapsed,
+  collapseLocked,
+  onToggleCollapsed,
   searchRef,
 }: {
   active: ReaderDocument;
@@ -86,6 +142,9 @@ const Sidebar = memo(function Sidebar({
   onNavigate: (document: ReaderDocument) => void;
   open: boolean;
   onClose: () => void;
+  collapsed: boolean;
+  collapseLocked: boolean;
+  onToggleCollapsed: () => void;
   searchRef: React.RefObject<HTMLInputElement | null>;
 }) {
   const filtered = useMemo(() => {
@@ -102,9 +161,19 @@ const Sidebar = memo(function Sidebar({
         onClick={onClose}
         aria-label="Close navigation"
       />
-      <aside className={`sidebar ${open ? "sidebar--open" : ""}`}>
+      <aside
+        id="documentation-sidebar"
+        className={`sidebar ${open ? "sidebar--open" : ""} ${
+          collapsed ? "sidebar--collapsed" : ""
+        }`}
+      >
         <header className="brand">
-          <button className="brand__mark" onClick={() => onNavigate(resolveDocument(""))}>
+          <button
+            className="brand__mark"
+            onClick={() => onNavigate(resolveDocument(""))}
+            aria-label="Quickspin documentation home"
+            title={collapsed ? "Quickspin home" : undefined}
+          >
             <span>Q</span>
           </button>
           <div>
@@ -115,6 +184,19 @@ const Sidebar = memo(function Sidebar({
             <CloseIcon />
           </button>
         </header>
+
+        {!collapseLocked ? (
+          <button
+            className="sidebar__collapse"
+            onClick={onToggleCollapsed}
+            aria-controls="documentation-sidebar"
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+            title={collapsed ? "Expand navigation" : "Collapse navigation"}
+          >
+            <ChevronIcon />
+          </button>
+        ) : null}
 
         <label className="search">
           <SearchIcon />
@@ -128,7 +210,7 @@ const Sidebar = memo(function Sidebar({
           <kbd>/</kbd>
         </label>
 
-        <nav className="document-nav" aria-label="Roadmap">
+        <nav id="document-navigation" className="document-nav" aria-label="Roadmap">
           {filtered.length ? (
             <section className="nav-section">
               <div className="nav-section__heading">
@@ -142,9 +224,11 @@ const Sidebar = memo(function Sidebar({
                     document.path === active.path ? "nav-item--active" : ""
                   }`}
                   onClick={() => onNavigate(document)}
+                  aria-current={document.path === active.path ? "page" : undefined}
+                  title={collapsed ? document.navTitle : undefined}
                 >
                   <span className="nav-item__number">{document.roadmap.number}</span>
-                  <span>{document.navTitle}</span>
+                  <span className="nav-item__label">{document.navTitle}</span>
                   {document.roadmap.status === "completed" ? (
                     <span className="nav-item__complete" title="Completed roadmap">
                       <CheckIcon />
@@ -178,7 +262,12 @@ function App() {
   const [query, setQuery] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [readingProgress, setReadingProgress] = useState(0);
+  const [preferences, setPreferences] = useState(loadReaderPreferences);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const readerControlsRef = useRef<HTMLDivElement>(null);
+
+  const sidebarCollapsed = preferences.sidebarCollapsed || preferences.readerMode;
 
   const activeIndex = documents.findIndex((document) => document.path === active.path);
   const previous = activeIndex > 0 ? documents[activeIndex - 1] : undefined;
@@ -205,6 +294,27 @@ function App() {
   }, [active]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(readerPreferencesKey, JSON.stringify(preferences));
+    } catch {
+      // Preferences remain available for the current session when storage is unavailable.
+    }
+  }, [preferences]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!readerControlsRef.current?.contains(event.target as Node)) {
+        setSettingsOpen(false);
+      }
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [settingsOpen]);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
         event.key === "/" &&
@@ -212,11 +322,17 @@ function App() {
         document.activeElement?.tagName !== "TEXTAREA"
       ) {
         event.preventDefault();
-        searchRef.current?.focus();
+        setPreferences((current) => ({
+          ...current,
+          readerMode: false,
+          sidebarCollapsed: false,
+        }));
+        window.requestAnimationFrame(() => searchRef.current?.focus());
       }
       if (event.key === "Escape") {
         setQuery("");
         setMenuOpen(false);
+        setSettingsOpen(false);
         searchRef.current?.blur();
       }
     };
@@ -264,7 +380,11 @@ function App() {
     active.roadmap.status === "completed" ? "Completed roadmap" : "Roadmap";
 
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell reader-font--${preferences.fontSize} ${
+        sidebarCollapsed ? "app-shell--sidebar-collapsed" : ""
+      } ${preferences.readerMode ? "app-shell--reader-mode" : ""}`}
+    >
       <div className="reading-progress" style={{ width: `${readingProgress}%` }} />
 
       <Sidebar
@@ -274,6 +394,14 @@ function App() {
         onNavigate={navigate}
         open={menuOpen}
         onClose={closeMenu}
+        collapsed={sidebarCollapsed}
+        collapseLocked={preferences.readerMode}
+        onToggleCollapsed={() =>
+          setPreferences((current) => ({
+            ...current,
+            sidebarCollapsed: !current.sidebarCollapsed,
+          }))
+        }
         searchRef={searchRef}
       />
 
@@ -361,6 +489,80 @@ function App() {
           </p>
         </aside>
       </main>
+
+      <div className="reader-controls" ref={readerControlsRef}>
+        {settingsOpen ? (
+          <div
+            id="reader-settings"
+            className="reader-settings"
+            role="dialog"
+            aria-labelledby="reader-settings-title"
+          >
+            <div className="reader-settings__header">
+              <div>
+                <p id="reader-settings-title">Reading settings</p>
+                <span>Choose a comfortable text size.</span>
+              </div>
+              <span className="reader-settings__folio">Aa / 05</span>
+            </div>
+            <div className="reader-settings__sizes" role="radiogroup" aria-label="Text size">
+              {fontSizeOptions.map((option) => (
+                <button
+                  key={option.value}
+                  className={
+                    option.value === preferences.fontSize
+                      ? "reader-settings__size reader-settings__size--active"
+                      : "reader-settings__size"
+                  }
+                  onClick={() =>
+                    setPreferences((current) => ({ ...current, fontSize: option.value }))
+                  }
+                  role="radio"
+                  aria-checked={option.value === preferences.fontSize}
+                  aria-label={`${option.label} text`}
+                  title={option.label}
+                >
+                  <span className={`reader-settings__sample reader-settings__sample--${option.value}`}>
+                    Aa
+                  </span>
+                  <small>{option.shortLabel}</small>
+                </button>
+              ))}
+            </div>
+            <p className="reader-settings__current" aria-live="polite">
+              {fontSizeOptions.find((option) => option.value === preferences.fontSize)?.label}
+            </p>
+          </div>
+        ) : null}
+
+        <div className="reader-controls__dock">
+          <button
+            className={settingsOpen ? "reader-control reader-control--active" : "reader-control"}
+            onClick={() => setSettingsOpen((open) => !open)}
+            aria-controls="reader-settings"
+            aria-expanded={settingsOpen}
+            aria-label="Reading settings"
+            title="Reading settings"
+          >
+            <SettingsIcon />
+          </button>
+          <span className="reader-controls__divider" />
+          <button
+            className={
+              preferences.readerMode ? "reader-control reader-control--active" : "reader-control"
+            }
+            onClick={() => {
+              setPreferences((current) => ({ ...current, readerMode: !current.readerMode }));
+              setSettingsOpen(false);
+            }}
+            aria-pressed={preferences.readerMode}
+            aria-label={preferences.readerMode ? "Exit reader mode" : "Enter reader mode"}
+            title={preferences.readerMode ? "Exit reader mode" : "Enter reader mode"}
+          >
+            <ReaderModeIcon />
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
