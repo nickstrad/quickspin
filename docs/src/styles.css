@@ -512,7 +512,7 @@ summary:focus-visible {
   display: grid;
   min-height: 100vh;
   margin-left: 318px;
-  grid-template-columns: minmax(0, 920px) 210px;
+  grid-template-columns: minmax(0, 920px) 238px;
   justify-content: center;
   gap: 58px;
   padding: 58px 54px 90px;
@@ -1407,7 +1407,7 @@ h4:hover .heading-anchor {
   position: sticky;
   top: 56px;
   align-self: start;
-  padding-top: 14px;
+  padding: 14px 14px 0;
   color: #5e665f;
 }
 
