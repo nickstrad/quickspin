@@ -64,6 +64,14 @@ func TestNewContainerConfigsCarriesEveryQuickspinDecision(t *testing.T) {
 	if cfg.Image != testImage {
 		t.Errorf("Image = %q, want %q", cfg.Image, testImage)
 	}
+	wantEntrypoint := []string{"sleep", "infinity"}
+	if !slices.Equal(cfg.Entrypoint, wantEntrypoint) {
+		t.Errorf("Entrypoint = %v, want %v", cfg.Entrypoint, wantEntrypoint)
+	}
+	// Docker clears the image's command when Entrypoint is overridden and Cmd is empty.
+	if len(cfg.Cmd) != 0 {
+		t.Errorf("Cmd = %v, want empty", cfg.Cmd)
+	}
 	// Sorting itself is envToArgs' contract, pinned by TestEnvToArgs. What this
 	// asserts is that the config carries the sorted form rather than map order.
 	wantEnv := []string{"FOO=1", "FOO2=2", "FOO_A=3"}

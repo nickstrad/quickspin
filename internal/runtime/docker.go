@@ -71,9 +71,11 @@ func newContainerConfigs(spec Spec, sandboxID string) (container.Config, contain
 	}
 
 	return container.Config{
-			Image:  spec.Image,
-			Env:    envToArgs(spec.Env),
-			Labels: managedLabels(sandboxID),
+			Image: spec.Image,
+			// Sandbox images must provide sleep with "infinity" support.
+			Entrypoint: []string{"sleep", "infinity"},
+			Env:        envToArgs(spec.Env),
+			Labels:     managedLabels(sandboxID),
 		}, container.HostConfig{
 			RestartPolicy:   container.RestartPolicy{Name: container.RestartPolicyAlways},
 			PublishAllPorts: true,
