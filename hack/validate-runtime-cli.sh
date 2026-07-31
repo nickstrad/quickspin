@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# One compiled-binary lifecycle smoke: create → inspect → list → destroy →
-# destroy again → confirm absent, each in its own process, reading JSON output.
+# The compiled-binary smoke: build it, run `serve` as a separate process, and
+# drive it with a second process that talks over a real socket.
 #
-# It proves composition — Cobra argument handling, runtime.NewDockerRuntime(nil),
-# the forwarded socket, a real daemon, and the process exit status — and nothing
-# else. Flag parsing, output formats, sorting, and sentinel wrapping are covered
-# far more cheaply through runtimetest.Fake in internal/cli.
+# It covers the process boundaries `go test` cannot: the compiled entrypoint,
+# QUICKSPIN_SERVER discovery, and command exit status. The real-daemon lifecycle
+# lives in internal/client/client_live_test.go.
 #
-# The caller supplies a working DOCKER_HOST; this script never chooses a daemon.
-# hack/test-runtime-docker.sh is what points it at the dedicated test VM.
+# Nothing here creates a sandbox, so this script needs no Docker daemon and no
+# fixture image. `serve` builds a Docker client from the environment, but the SDK
+# does not connect until a request needs it, and none of the commands below does.
 
 set -euo pipefail
 
@@ -18,18 +18,17 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${REPO_ROOT}/hack/common.sh"
 
 BIN="${REPO_ROOT}/bin/quickspin"
-# hack/test-runtime-docker.sh exports this so the smoke and the live Go suite pin
-# the same image. The default is only for a standalone run; the requirement is a
-# default process that stays up, so inspect and list are not racing the
-# container's own exit.
-IMAGE="${QUICKSPIN_SMOKE_IMAGE:-docker.io/library/nginx:1.27-alpine}"
+
+# A fixed port rather than an ephemeral one: the server reports the port it was
+# told to use, not the one the kernel picked, so port 0 would leave this script
+# with no way to learn where to connect. Overridable for the collision case.
+SERVER_PORT="${QUICKSPIN_SMOKE_PORT:-8757}"
+SERVER_READY_TIMEOUT="${SERVER_READY_TIMEOUT:-30}"
 
 require_command go
-require_command jq "The smoke asserts on parsed JSON rather than grepped text."
+require_command make
 
-[[ -n "${DOCKER_HOST:-}" ]] || fail "DOCKER_HOST is unset. Run this through 'make test-docker', which points it at the dedicated test VM."
-
-# --- 0. The real binary -------------------------------------------------------
+# --- 1. The real binary -------------------------------------------------------
 #
 # Built rather than `go run`: the point is the compiled entrypoint, including its
 # exit status, which `go run` conflates with its own.
@@ -38,69 +37,65 @@ make -C "$REPO_ROOT" build >/dev/null
 
 pass "Built ${BIN}."
 
-# --- 1. Create ----------------------------------------------------------------
-created="$("$BIN" sandbox create "$IMAGE" --output json)"
-# Captured first, then parsed, so a non-JSON payload can be printed by the
-# diagnostic below. `|| true` for the same EOF-under-`set -e` reason as the
-# `limactl list` read in hack/test-runtime-docker.sh.
-IFS=$'\t' read -r id state < <(jq -r '[.id, .state] | @tsv' <<<"$created") || true
+# --- 2. The control plane -----------------------------------------------------
+#
+# Its own database in a temp directory, never the developer's default.
+STATE_DIR="$(mktemp -d)"
+SERVER_LOG="${STATE_DIR}/serve.log"
+export QUICKSPIN_SERVER="http://127.0.0.1:${SERVER_PORT}"
 
-if [[ -z "$id" || "$id" == "null" ]]; then
-    printf '%s\n' "$created" >&2
-    fail "sandbox create printed no id (output above)."
-fi
+"$BIN" serve --host 127.0.0.1 --port "$SERVER_PORT" --db "${STATE_DIR}/quickspin.db" \
+    >"$SERVER_LOG" 2>&1 &
+SERVER_PID=$!
 
-# Registered here, before any assertion that can fail: a smoke that died between
-# create and destroy would leak the container and then fail the harness's leak
-# check for the wrong reason.
 cleanup() {
-    "$BIN" sandbox destroy "$id" --output json >/dev/null 2>&1 || true
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    rm -rf "$STATE_DIR"
 }
 trap cleanup EXIT
 
-[[ "$state" == "running" ]] || fail "sandbox create reported state '${state}', expected 'running'."
+# Probe with the client under test, avoiding an extra curl dependency.
+probe_server() {
+    list_output="$("$BIN" sandbox list --output json 2>/dev/null)"
+}
 
-pass "sandbox create returned ${id} in state running."
+server_ready=0
+for ((attempt = 0; attempt < SERVER_READY_TIMEOUT; attempt++)); do
+    if probe_server; then
+        server_ready=1
+        break
+    fi
+    kill -0 "$SERVER_PID" 2>/dev/null || break
+    sleep 1
+done
 
-# --- 2. Inspect ---------------------------------------------------------------
-inspected="$("$BIN" sandbox inspect "$id" --output json)"
-IFS=$'\t' read -r inspected_id inspected_state < <(jq -r '[.id, .state] | @tsv' <<<"$inspected") || true
-
-if [[ "$inspected_id" != "$id" ]]; then
-    printf '%s\n' "$inspected" >&2
-    fail "sandbox inspect reported id '${inspected_id}', expected '${id}' (output above)."
+if (( ! server_ready )); then
+    cat "$SERVER_LOG" >&2
+    fail "The control plane at ${QUICKSPIN_SERVER} was not ready within ${SERVER_READY_TIMEOUT}s (server log above)."
 fi
-[[ "$inspected_state" == "running" ]] || fail "sandbox inspect reported state '${inspected_state}', expected 'running'."
 
-pass "sandbox inspect finds ${id} running in a separate process."
+pass "A second process reached the control plane at ${QUICKSPIN_SERVER}."
 
-# --- 3. List ------------------------------------------------------------------
+# --- 3. An empty store lists as an empty JSON array ---------------------------
 #
-# Membership, not a count: the daemon may hold sandboxes this script did not make.
-if ! "$BIN" sandbox list --output json | jq -e --arg id "$id" 'any(.[]; .id == $id)' >/dev/null; then
-    fail "sandbox list does not contain ${id}."
-fi
+# `[]` rather than `null` or nothing at all: it is the one output assertion worth
+# making from a separate process, because it is the shape every client parses.
+[[ "$list_output" == "[]" ]] || fail "sandbox list on an empty store printed '${list_output}', expected '[]'."
 
-pass "sandbox list contains ${id}."
+pass "sandbox list prints an empty JSON array."
 
-# --- 4. Destroy, twice --------------------------------------------------------
-"$BIN" sandbox destroy "$id" --output json >/dev/null || fail "sandbox destroy ${id} failed."
-
-# Cleanup is retry safe by contract, and a nonzero exit here is what a recovery
-# loop would trip over.
-"$BIN" sandbox destroy "$id" --output json >/dev/null || fail "the second sandbox destroy ${id} failed; destroy must be idempotent."
-
-pass "sandbox destroy ${id} succeeds twice."
-
-# --- 5. Absence ---------------------------------------------------------------
+# --- 4. A failed command exits nonzero ----------------------------------------
 #
-# Inspect must fail, which also proves the binary exits nonzero on a runtime
-# error rather than printing one and exiting 0.
-if "$BIN" sandbox inspect "$id" --output json >/dev/null 2>&1; then
-    fail "sandbox inspect ${id} succeeded after destroy, expected a not-found failure."
+# The one assertion no Go test can make: internal/cli returns an error, and
+# main.go is what turns it into an exit status. An id the store has never seen
+# is a 404 the server answers without consulting the runtime.
+if "$BIN" sandbox inspect sbx-does-not-exist --output json >/dev/null 2>&1; then
+    fail "sandbox inspect on an unknown id exited 0; a failed command must exit nonzero."
 fi
 
-pass "sandbox inspect ${id} fails after destroy."
+pass "A failed command exits nonzero."
 
 trap - EXIT
+cleanup
 printf '\nCLI smoke passed.\n'

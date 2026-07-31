@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Runs the live Docker runtime suite and the CLI smoke against a dedicated,
+# Runs the live Docker suites and the compiled-binary smoke against a dedicated,
 # test-owned Lima VM.
 #
 # The VM stays running between invocations: the feedback loop matters more than
@@ -38,12 +38,11 @@ TEST_VM_CPUS="${TEST_VM_CPUS:-2}"
 TEST_VM_MEMORY="${TEST_VM_MEMORY:-2}"
 TEST_VM_DISK="${TEST_VM_DISK:-20}"
 
-# The one place the fixture image is pinned. Exported so the live Go suite and the
-# CLI smoke cannot drift onto different images; each keeps its own default only
-# for a standalone run. A default process that stays up is the requirement — see
-# internal/runtime/docker_live_test.go.
+# The one place the fixture image is pinned. Exported so the live suites in
+# internal/runtime and internal/client cannot drift onto different images; each
+# keeps its own default only for a standalone run. A default process that stays
+# up is the requirement — see internal/runtime/docker_live_test.go.
 export QUICKSPIN_TEST_IMAGE="${QUICKSPIN_TEST_IMAGE:-docker.io/library/nginx:1.27-alpine}"
-export QUICKSPIN_SMOKE_IMAGE="$QUICKSPIN_TEST_IMAGE"
 
 # MODE selects between the full run and the two maintenance paths. CLEAN_ONLY is
 # the one path allowed to remove managed containers without failing the run.
@@ -267,7 +266,7 @@ if ! docker pull "${QUICKSPIN_TEST_IMAGE}"; then
 	printf 'Pre-pull failed; continuing — the runtime pulls for itself.\n'
 fi
 
-# --- 7. The live Go suite -----------------------------------------------------
+# --- 7. The live Go suites ----------------------------------------------------
 #
 # -count=1 because Go's test cache keys on the test binary and its inputs, and
 # cannot know the daemon's state changed between runs.
@@ -284,16 +283,20 @@ fi
 # nothing until it is over — indistinguishable from a wedged run. go test streams
 # line by line only when handed exactly one package, which is what the loop does.
 #
-# `go list` rather than a hard-coded list: a package added under internal/runtime
-# should be run, and a loop that silently skipped it would be worse than none.
+# internal/client is included because its live tests exercise the HTTP handlers
+# against the real runtime.
 LIVE_TEST_TIMEOUT="${LIVE_TEST_TIMEOUT:-30m}"
-printf '\nRunning the live Docker runtime suite (timeout %s).\n' "${LIVE_TEST_TIMEOUT}"
+printf '\nRunning the live Docker suites (timeout %s).\n' "${LIVE_TEST_TIMEOUT}"
 
-for pkg in $(go list ./internal/runtime/...); do
-	printf '\n--- %s\n' "${pkg}"
-	QUICKSPIN_TEST_DOCKER=1 go test -count=1 -v -timeout "${LIVE_TEST_TIMEOUT}" "${pkg}"
+mapfile -t live_packages < <(go list ./internal/runtime/... ./internal/client/...)
+for pkg in "${live_packages[@]}"; do
+    printf '\n--- %s\n' "$pkg"
+    QUICKSPIN_TEST_DOCKER=1 go test -count=1 -v -timeout "$LIVE_TEST_TIMEOUT" "$pkg"
 done
 
-# --- 8. The CLI smoke ---------------------------------------------------------
-printf '\nRunning the compiled-CLI lifecycle smoke.\n'
+# --- 8. The compiled-binary smoke ---------------------------------------------
+#
+# It needs no daemon of its own, but it runs here because this is the harness
+# that already builds and exercises everything else.
+printf '\nRunning the compiled-binary smoke.\n'
 "${REPO_ROOT}/hack/validate-runtime-cli.sh"
