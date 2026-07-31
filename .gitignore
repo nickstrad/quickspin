@@ -34,6 +34,11 @@ go.work.sum
 # Build output
 /bin/
 
+# Local SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
 # Local documentation reader
 /docs/node_modules/
 /docs/dist/
