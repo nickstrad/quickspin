@@ -29,28 +29,80 @@ provision:
     script: |
       #!/bin/bash
       set -eux -o pipefail
-      command -v docker >/dev/null 2>&1 && exit 0
-      export DEBIAN_FRONTEND=noninteractive
-      curl -fsSL https://get.docker.com | sh
-      # NOTE: you may remove the lines below, if you prefer to use rootful docker, not rootless
-      systemctl disable --now docker.service docker.socket containerd.service containerd.socket || true
-      systemctl mask docker.service docker.socket containerd.service containerd.socket || true
-      apt-get install -y uidmap dbus-user-session
-  - mode: yq
-    path: "{{.Home}}/.config/docker/daemon.json"
-    expression: |
-      .features.cdi = true |
-      .features.containerd-snapshotter = {{.Param.containerdSnapshotter}}
-    owner: "{{.User}}"
-  - mode: user
+      if ! command -v docker >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        # Rootful, not rootless. gVisor cannot run under rootless Docker with the
+        # limits Spec guarantees: rootless uses the systemd cgroup driver, runsc
+        # reports no support for it and is denied by polkit when it tries the
+        # system bus; switching that daemon to the cgroupfs driver makes Docker
+        # report "CgroupDriver=none" and silently stop applying limits at all.
+        curl -fsSL https://get.docker.com | sh
+      fi
+      # `usermod -aG docker` alone does not make the socket reachable: Lima's ssh
+      # ControlMaster is already open by the time provisioning runs, so no session
+      # picks up the new supplementary group. The SocketGroup drop-in below is what
+      # actually grants access; the usermod is for later interactive logins.
+      usermod -aG docker '{{.User}}'
+      group="$(id -gn '{{.User}}')"
+      dropin=/etc/systemd/system/docker.socket.d/10-lima-user.conf
+      install -d "$(dirname "$dropin")"
+      printf '[Socket]\nSocketGroup=%s\n' "$group" >"$dropin"
+      if [ "$(stat -c %G /var/run/docker.sock 2>/dev/null || true)" != "$group" ]; then
+        systemctl daemon-reload
+        systemctl restart docker.socket docker.service
+      fi
+  - mode: system
+    # gVisor, so sandbox syscalls are serviced by runsc's userspace kernel rather
+    # than reaching this VM's kernel directly. The package installs the binary
+    # only; the daemon registration is the next script's job.
     script: |
       #!/bin/bash
       set -eux -o pipefail
-      systemctl --user start dbus
-      dockerd-rootless-setuptool.sh install
-      # Only the docker CLI reads this context; SDK clients such as quickspin read
-      # DOCKER_HOST, which `make lima-vm-create` injects as `.env.DOCKER_HOST`.
-      docker context use rootless
+      command -v runsc >/dev/null 2>&1 && exit 0
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y apt-transport-https ca-certificates curl gnupg
+      curl -fsSL https://gvisor.dev/archive.key |
+        gpg --yes --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+        >/etc/apt/sources.list.d/gvisor.list
+      apt-get update
+      apt-get install -y runsc
+  - mode: system
+    # One writer for /etc/docker/daemon.json, so the feature flags and the runtime
+    # registration cannot race each other across provisioning stages. get.docker.com
+    # has already started the daemon by now, hence the restart — guarded on the
+    # file actually changing, since this script reruns on every boot.
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      install -d -m 0755 /etc/docker
+      before="$(sha256sum /etc/docker/daemon.json 2>/dev/null || true)"
+      # json.loads, not a bare substitution: the Lima param is JSON's `true`,
+      # which is not a Python literal.
+      export SNAPSHOTTER='{{.Param.containerdSnapshotter}}'
+      python3 - <<'PY'
+      import json, os
+      path = "/etc/docker/daemon.json"
+      config = {}
+      if os.path.exists(path) and os.path.getsize(path):
+          config = json.load(open(path))
+      config.setdefault("features", {})
+      config["features"]["cdi"] = True
+      config["features"]["containerd-snapshotter"] = json.loads(os.environ["SNAPSHOTTER"])
+      json.dump(config, open(path, "w"), indent=2)
+      PY
+      # `runsc install` rather than a hand-written path: it records its own
+      # location, which the multi-file gVisor layout may move.
+      #
+      # --overlay2=none is load-bearing, not tuning. gVisor defaults to
+      # "root:self", keeping writes to the container root in a sandbox-internal
+      # overlay the host never sees — which splits the filesystem in two for
+      # quickspin, whose file API copies through the daemon: a file an exec writes
+      # is invisible to ReadFile, and a path an exec removes is still there. The
+      # cost is that writes now go through the gofer to the host filesystem.
+      runsc install -- --overlay2=none
+      [ "$before" = "$(sha256sum /etc/docker/daemon.json)" ] || systemctl restart docker
 probes:
   - script: |
       #!/bin/bash
@@ -59,8 +111,14 @@ probes:
         echo >&2 "docker is not installed yet"
         exit 1
       fi
-      if ! timeout 30s bash -c "until pgrep rootlesskit; do sleep 3; done"; then
-        echo >&2 "rootlesskit (used by rootless docker) is not running"
+      if ! timeout 60s bash -c "until docker info >/dev/null 2>&1; do sleep 3; done"; then
+        echo >&2 "the docker daemon is not responding"
+        exit 1
+      fi
+      # Registration, not just installation: an unregistered runsc leaves a daemon
+      # that looks healthy and rejects every --runtime=runsc container.
+      if ! docker info --format '{{"{{"}}.Runtimes{{"}}"}}' | grep -q runsc; then
+        echo >&2 "runsc (gVisor) is not registered with the docker daemon"
         exit 1
       fi
     hint: See "/var/log/cloud-init-output.log" in the guest
@@ -70,7 +128,7 @@ hostResolver:
   hosts:
     host.docker.internal: host.lima.internal
 portForwards:
-  - guestSocket: "/run/user/{{.UID}}/docker.sock"
+  - guestSocket: "/var/run/docker.sock"
     hostSocket: "{{.Dir}}/sock/docker.sock"
 message: |
   To run `docker` on the host (assumes docker-cli is installed), run the following commands:

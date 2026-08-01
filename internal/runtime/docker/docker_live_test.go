@@ -201,7 +201,7 @@ func liveDocker(t *testing.T) *docker.Runtime {
 	}
 
 	logger := slog.New(slog.NewTextHandler(testLogWriter{t}, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	rt, err := docker.New(nil, logger)
+	rt, err := docker.New(t.Context(), nil, logger)
 	if err != nil {
 		t.Fatalf("docker.New from the environment: %v", err)
 	}

@@ -39,6 +39,9 @@ LOG_LEVEL ?= debug
 # `?=` yields to an environment that already names a daemon.
 .PHONY: serve
 serve: export DOCKER_HOST ?= $(LIMA_DOCKER_HOST)
+# A darwin binary against the VM's Linux daemon: the GOOS default would pick the
+# daemon's runtime, not gVisor.
+serve: export QUICKSPIN_DOCKER_RUNTIME ?= runsc
 serve: ## Run the control plane on the host against the VM's Docker daemon (flags via ARGS="...")
 	go run $(PKG) serve --log-level $(LOG_LEVEL) $(ARGS)
 
@@ -113,14 +116,13 @@ docs-build: $(DOCS_DEPS) ## Type-check and build the documentation reader
 clean: ## Remove build artifacts
 	rm -rf $(BIN_DIR)
 
-# Lima gives the guest user the host's UID, so the rootless Docker socket lands
-# under the same numeric path on both sides.
-HOST_UID := $(shell id -u)
-
+# The VM runs rootful Docker, so this is the daemon's default path already;
+# injecting it keeps the guest's DOCKER_HOST explicit rather than relying on the
+# SDK's built-in fallback.
 .PHONY: lima-vm-create
 lima-vm-create:
 	limactl start lima/quickspin.yaml --name=$(VM_NAME) \
-		--set '.env.DOCKER_HOST = "unix:///run/user/$(HOST_UID)/docker.sock"'
+		--set '.env.DOCKER_HOST = "unix:///var/run/docker.sock"'
 
 .PHONY: lima-vm-delete
 lima-vm-delete:

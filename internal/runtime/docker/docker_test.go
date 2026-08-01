@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -46,7 +48,7 @@ func testSpec(image string, env map[string]string) runtime.Spec {
 }
 
 func TestNewRequiresLogger(t *testing.T) {
-	_, err := New(&client.Client{}, nil)
+	_, err := New(t.Context(), &client.Client{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "logger is required") {
 		t.Fatalf("New error = %v, want required logger error", err)
 	}
@@ -57,7 +59,7 @@ func TestNewRequiresLogger(t *testing.T) {
 func TestNewContainerConfigsCarriesEveryQuickspinDecision(t *testing.T) {
 	spec := testSpec(testImage, map[string]string{"FOO_A": "3", "FOO": "1", "FOO2": "2"})
 
-	cfg, host, err := newContainerConfigs(spec, testSandboxID)
+	cfg, host, err := newContainerConfigs(spec, testSandboxID, "")
 	if err != nil {
 		t.Fatalf("newContainerConfigs error = %v, want nil", err)
 	}
@@ -95,7 +97,7 @@ func TestNewContainerConfigsCarriesEveryQuickspinDecision(t *testing.T) {
 // NanoCPUs is cores × 10⁹, PidsLimit is a plain count — and a mistake produces a
 // wrong kernel ceiling rather than an error, so nothing downstream catches it.
 func TestSpecToHostConfigMapsEveryLimit(t *testing.T) {
-	_, host, err := newContainerConfigs(testSpec(testImage, nil), testSandboxID)
+	_, host, err := newContainerConfigs(testSpec(testImage, nil), testSandboxID, "")
 	if err != nil {
 		t.Fatalf("newContainerConfigs error = %v, want nil", err)
 	}
@@ -131,7 +133,7 @@ func TestNewContainerConfigsMapsAllowNetworkToNetworkMode(t *testing.T) {
 	} {
 		spec := runtime.NewSpec(testImage, nil, testCPULimit, testMemoryLimit, testPidsLimit, tt.allow)
 
-		_, host, err := newContainerConfigs(spec, testSandboxID)
+		_, host, err := newContainerConfigs(spec, testSandboxID, "")
 		if err != nil {
 			t.Fatalf("newContainerConfigs(AllowNetwork=%v) error = %v, want nil", tt.allow, err)
 		}
@@ -141,13 +143,95 @@ func TestNewContainerConfigsMapsAllowNetworkToNetworkMode(t *testing.T) {
 	}
 }
 
+// TestNewContainerConfigsCarriesTheOCIRuntime pins the field that decides
+// whether a sandbox's syscalls reach the host kernel. An empty Runtime is not
+// "runc" — it is "send no field", which lets the daemon pick — so the two cases
+// are asserted separately.
+func TestNewContainerConfigsCarriesTheOCIRuntime(t *testing.T) {
+	for _, want := range []string{"", gVisorRuntime} {
+		_, host, err := newContainerConfigs(testSpec(testImage, nil), testSandboxID, want)
+		if err != nil {
+			t.Fatalf("newContainerConfigs(%q) error = %v, want nil", want, err)
+		}
+		if host.Runtime != want {
+			t.Errorf("Runtime = %q, want %q", host.Runtime, want)
+		}
+	}
+}
+
+func TestDefaultContainerRuntimePrefersGVisorOnLinux(t *testing.T) {
+	t.Run("the environment wins over the platform", func(t *testing.T) {
+		// The daemon a client reaches is not the platform the client was built
+		// for: `make serve` runs a darwin binary against the Linux VM's daemon.
+		t.Setenv(containerRuntimeEnv, gVisorRuntime)
+		if got := defaultContainerRuntime(); got != gVisorRuntime {
+			t.Errorf("defaultContainerRuntime = %q, want %q", got, gVisorRuntime)
+		}
+	})
+
+	t.Run("an explicitly empty value opts back out", func(t *testing.T) {
+		// Set-but-empty has to mean "daemon default" rather than "unset", or a
+		// Linux host has no way to turn gVisor off.
+		t.Setenv(containerRuntimeEnv, "")
+		if got := defaultContainerRuntime(); got != "" {
+			t.Errorf("defaultContainerRuntime = %q, want the daemon default", got)
+		}
+	})
+
+	t.Run("the platform decides when the environment is silent", func(t *testing.T) {
+		if _, ok := os.LookupEnv(containerRuntimeEnv); ok {
+			t.Skipf("%s is set in this environment", containerRuntimeEnv)
+		}
+		want := ""
+		if goruntime.GOOS == "linux" {
+			want = gVisorRuntime
+		}
+		if got := defaultContainerRuntime(); got != want {
+			t.Errorf("defaultContainerRuntime on %s = %q, want %q", goruntime.GOOS, got, want)
+		}
+	})
+}
+
+// TestNewRefusesADaemonWithoutTheSelectedRuntime covers the failure that is
+// otherwise invisible: a daemon with no runsc still runs every sandbox, just on
+// a weaker boundary, so the absence has to be an error at construction rather
+// than a fact nobody queries.
+func TestNewRefusesADaemonWithoutTheSelectedRuntime(t *testing.T) {
+	t.Setenv(containerRuntimeEnv, gVisorRuntime)
+
+	daemon := newFakeDaemon(t)
+	daemon.info = runtimesInfoOK("runc")
+
+	_, err := New(t.Context(), newDockerTestClient(t, daemon), slog.New(slog.DiscardHandler))
+	if err == nil {
+		t.Fatal("New error = nil, want a refusal: the daemon cannot run the requested runtime")
+	}
+	// The offered runtimes are in the message because the actionable question is
+	// which ones the daemon does have.
+	if !strings.Contains(err.Error(), gVisorRuntime) || !strings.Contains(err.Error(), "runc") {
+		t.Errorf("New error = %v, want it to name both the missing runtime and what the daemon offers", err)
+	}
+}
+
+func TestNewAcceptsADaemonThatHasTheSelectedRuntime(t *testing.T) {
+	t.Setenv(containerRuntimeEnv, gVisorRuntime)
+
+	rt, err := New(t.Context(), newDockerTestClient(t, newFakeDaemon(t)), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("New error = %v, want nil", err)
+	}
+	if rt.containerRuntime != gVisorRuntime {
+		t.Errorf("containerRuntime = %q, want %q", rt.containerRuntime, gVisorRuntime)
+	}
+}
+
 func TestNewContainerConfigsRefusesAnInvalidSpec(t *testing.T) {
 	// newContainerConfigs is the last place a Spec can be rejected before its
 	// limits become kernel state, so it must not hand back a usable config for a
 	// spec Validate rejects.
 	spec := runtime.NewSpec(testImage, nil, testCPULimit, testMemoryLimit, 0, false)
 
-	cfg, host, err := newContainerConfigs(spec, testSandboxID)
+	cfg, host, err := newContainerConfigs(spec, testSandboxID, "")
 	if !errors.Is(err, runtime.ErrInvalidSpec) {
 		t.Fatalf("newContainerConfigs error = %v, want errors.Is(..., ErrInvalidSpec)", err)
 	}
@@ -494,6 +578,29 @@ func TestCreateOrdersItsRequestsAndSendsQuickspinsConfig(t *testing.T) {
 	}
 	if want := container.NetworkMode("none"); body.HostConfig.NetworkMode != want {
 		t.Errorf("create body NetworkMode = %q, want %q", body.HostConfig.NetworkMode, want)
+	}
+}
+
+// TestCreateSendsTheSelectedOCIRuntime asserts on the wire because the struct
+// field alone proves nothing: the SDK omits an empty Runtime, and an omitted key
+// is what a sandbox silently falling back to runc looks like.
+func TestCreateSendsTheSelectedOCIRuntime(t *testing.T) {
+	daemon := newFakeDaemon(t)
+	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
+	// newDockerTestRuntime pinned the daemon default; this is the gVisor case.
+	rt.containerRuntime = gVisorRuntime
+
+	if _, err := rt.Create(t.Context(), testSandboxID, testSpec(testImage, nil)); err != nil {
+		t.Fatalf("Create error = %v, want nil", err)
+	}
+
+	var body struct{ HostConfig struct{ Runtime string } }
+	create := daemon.lastMatchingPath(http.MethodPost, "/containers/create")
+	if err := json.Unmarshal(create.body, &body); err != nil {
+		t.Fatalf("decode create body: %v", err)
+	}
+	if body.HostConfig.Runtime != gVisorRuntime {
+		t.Errorf("create body Runtime = %q, want %q", body.HostConfig.Runtime, gVisorRuntime)
 	}
 }
 
@@ -923,6 +1030,7 @@ type fakeDaemon struct {
 	mu       sync.Mutex
 	recorded []recordedRequest
 
+	info        http.HandlerFunc
 	pull        http.HandlerFunc
 	create      http.HandlerFunc
 	start       http.HandlerFunc
@@ -959,7 +1067,10 @@ func (r recordedRequest) String() string { return r.route() }
 
 func newFakeDaemon(t *testing.T) *fakeDaemon {
 	return &fakeDaemon{
-		t:      t,
+		t: t,
+		// A daemon that has gVisor. Only New's registration check reads this, and
+		// only when a runtime was named, so most tests never reach it.
+		info:   runtimesInfoOK(gVisorRuntime, "runc"),
 		pull:   func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, `{"status":"Download complete"}`) },
 		create: func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, map[string]any{"Id": testContainerID}) },
 		start:  func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) },
@@ -997,6 +1108,8 @@ func (d *fakeDaemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	path := r.URL.Path
 	switch {
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/info"):
+		d.info(w, r)
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/images/create"):
 		d.pull(w, r)
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/containers/create"):
@@ -1177,11 +1290,21 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func newDockerTestRuntime(
-	t *testing.T,
-	level slog.Level,
-	handler http.Handler,
-) (*Runtime, *bytes.Buffer) {
+// runtimesInfoOK answers /info with exactly the named runtimes registered.
+func runtimesInfoOK(names ...string) http.HandlerFunc {
+	runtimes := make(map[string]any, len(names))
+	for _, name := range names {
+		runtimes[name] = map[string]any{"path": "/usr/bin/" + name}
+	}
+	return func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"Runtimes": runtimes})
+	}
+}
+
+// newDockerTestClient points a Docker client at handler. Separate from
+// newDockerTestRuntime so tests about New itself can construct the client
+// without the runtime, and without that helper's environment pin.
+func newDockerTestClient(t *testing.T, handler http.Handler) *client.Client {
 	t.Helper()
 
 	server := httptest.NewServer(handler)
@@ -1202,9 +1325,26 @@ func newDockerTestRuntime(
 	}
 	t.Cleanup(func() { _ = dockerClient.Close() })
 
+	return dockerClient
+}
+
+func newDockerTestRuntime(
+	t *testing.T,
+	level slog.Level,
+	handler http.Handler,
+) (*Runtime, *bytes.Buffer) {
+	t.Helper()
+
+	// New resolves the OCI runtime from GOOS, so without this every wire
+	// assertion below would depend on which machine ran the test. Tests about the
+	// selection itself set the variable themselves.
+	t.Setenv(containerRuntimeEnv, "")
+
+	dockerClient := newDockerTestClient(t, handler)
+
 	logs := new(bytes.Buffer)
 	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: level}))
-	rt, err := New(dockerClient, logger)
+	rt, err := New(t.Context(), dockerClient, logger)
 	if err != nil {
 		t.Fatalf("New error = %v, want nil", err)
 	}

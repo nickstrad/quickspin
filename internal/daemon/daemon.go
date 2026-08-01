@@ -24,7 +24,7 @@ type Config struct {
 
 // Serve blocks until ctx is done or the server stops.
 func Serve(ctx context.Context, cfg Config) error {
-	sandboxRuntime, err := docker.New(nil, cfg.Logger.With(
+	sandboxRuntime, err := docker.New(ctx, nil, cfg.Logger.With(
 		"subcomponent", "runtime",
 		"backend", "docker",
 	))

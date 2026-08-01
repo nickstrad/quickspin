@@ -44,6 +44,10 @@ TEST_VM_DISK="${TEST_VM_DISK:-20}"
 # up is the requirement — see internal/runtime/docker_live_test.go.
 export QUICKSPIN_TEST_IMAGE="${QUICKSPIN_TEST_IMAGE:-docker.io/library/nginx:1.27-alpine}"
 
+# Same reason as `make serve`: these suites run on the Mac against the VM's
+# daemon, so without this the isolation boundary under test would be runc.
+export QUICKSPIN_DOCKER_RUNTIME="${QUICKSPIN_DOCKER_RUNTIME:-runsc}"
+
 # MODE selects between the full run and the two maintenance paths. CLEAN_ONLY is
 # the one path allowed to remove managed containers without failing the run.
 MODE="run"

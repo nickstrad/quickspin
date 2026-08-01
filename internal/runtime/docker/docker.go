@@ -2,12 +2,17 @@ package docker
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
+	"os"
 	"regexp"
+	goruntime "runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,14 +36,52 @@ const execKillTimeout = 10 * time.Second
 // file writes.
 const fileCopyTimeout = 30 * time.Second
 
+// gVisorRuntime is the name Docker knows gVisor by; it must match the key the
+// daemon was configured with, which `runsc install` writes as "runsc".
+const gVisorRuntime = "runsc"
+
+// containerRuntimeEnv names the OCI runtime for the daemon this process talks
+// to, overriding the GOOS default below. It exists because the two are
+// independent: the Lima daemon is the same daemon whether the client that
+// reached it was cross-compiled into the VM or run from the Mac.
+const containerRuntimeEnv = "QUICKSPIN_DOCKER_RUNTIME"
+
+// daemonDefaultRuntimeLabel keeps the empty string out of logs, where it reads as
+// a dropped field rather than as the deliberate "let the daemon choose".
+const daemonDefaultRuntimeLabel = "daemon-default"
+
+// runtimeCheckTimeout bounds the one daemon round trip New makes; it is a
+// liveness check on an already-open client, not a user-facing operation.
+const runtimeCheckTimeout = 10 * time.Second
+
+// defaultContainerRuntime picks gVisor on Linux and the daemon's own default
+// elsewhere; GOOS is a proxy for "this daemon has runsc", since a darwin build
+// reaches Docker Desktop or a forwarded socket that may not.
+//
+// The empty string means "send no Runtime field", which is not the same as
+// sending "runc" — the daemon's configured default may be neither.
+func defaultContainerRuntime() string {
+	if name, ok := os.LookupEnv(containerRuntimeEnv); ok {
+		return name
+	}
+	if goruntime.GOOS == "linux" {
+		return gVisorRuntime
+	}
+	return ""
+}
+
 type Runtime struct {
 	Client *client.Client
 	logger *slog.Logger
+
+	// containerRuntime is resolved once at construction so every sandbox in a
+	// process lands on the same isolation boundary.
+	containerRuntime string
 }
 
 var _ runtime.Runtime = (*Runtime)(nil)
 
-func New(c *client.Client, logger *slog.Logger) (*Runtime, error) {
+func New(ctx context.Context, c *client.Client, logger *slog.Logger) (*Runtime, error) {
 	if logger == nil {
 		return nil, runtime.E("docker.New", "logger is required", nil)
 	}
@@ -51,15 +94,54 @@ func New(c *client.Client, logger *slog.Logger) (*Runtime, error) {
 		c = fromEnv
 	}
 
+	containerRuntime := defaultContainerRuntime()
+	logger.Debug("selected container runtime", "containerRuntime", cmp.Or(containerRuntime, daemonDefaultRuntimeLabel))
+
+	if err := checkRuntimeRegistered(ctx, c, containerRuntime); err != nil {
+		return nil, err
+	}
+
 	return &Runtime{
-		Client: c,
-		logger: logger,
+		Client:           c,
+		logger:           logger,
+		containerRuntime: containerRuntime,
 	}, nil
+}
+
+// ContainerRuntime reports the OCI runtime this Runtime asks the daemon for.
+// Empty means the daemon's own default was left to stand.
+func (d *Runtime) ContainerRuntime() string { return d.containerRuntime }
+
+// checkRuntimeRegistered refuses to construct a Runtime when the daemon has no
+// runtime by the selected name. Create would otherwise be the first thing to
+// notice, and only for the request that hit it — a daemon missing runsc would
+// keep serving sandboxes on whatever boundary it does have.
+func checkRuntimeRegistered(ctx context.Context, c *client.Client, name string) error {
+	const op = "docker.New"
+
+	// Empty means the daemon picks, so there is no name to disprove.
+	if name == "" {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, runtimeCheckTimeout)
+	defer cancel()
+
+	info, err := c.Info(ctx, client.InfoOptions{})
+	if err != nil {
+		return runtime.E(op, "asking the daemon which runtimes it has", err)
+	}
+
+	if _, ok := info.Info.Runtimes[name]; !ok {
+		return runtime.E(op, fmt.Sprintf(
+			"the daemon has no %q runtime; it offers %v", name, slices.Sorted(maps.Keys(info.Info.Runtimes))), nil)
+	}
+	return nil
 }
 
 // newContainerConfigs is the one place Spec becomes Docker's vocabulary.
 // Receiver-free so the field mapping can be tested without a live daemon.
-func newContainerConfigs(spec runtime.Spec, sandboxID string) (container.Config, container.HostConfig, error) {
+func newContainerConfigs(spec runtime.Spec, sandboxID, containerRuntime string) (container.Config, container.HostConfig, error) {
 	const op = "docker.newContainerConfigs"
 
 	if err := spec.Validate(); err != nil {
@@ -81,6 +163,9 @@ func newContainerConfigs(spec runtime.Spec, sandboxID string) (container.Config,
 			RestartPolicy:   container.RestartPolicy{Name: container.RestartPolicyAlways},
 			PublishAllPorts: true,
 			NetworkMode:     networkMode,
+			// The daemon rejects a name it has no runtime for, so a missing runsc
+			// fails Create loudly rather than dropping to a weaker boundary.
+			Runtime: containerRuntime,
 			Resources: container.Resources{
 				// Memory is bytes, NanoCPUs is cores × 10⁹; a units mistake here
 				// becomes a wrong cgroup limit rather than an error.
@@ -170,7 +255,7 @@ func (d *Runtime) Create(ctx context.Context, sandboxID string, spec runtime.Spe
 
 	// Configs are built before the pull so an invalid spec fails without a
 	// registry round trip.
-	containerConfig, hostConfig, err := newContainerConfigs(spec, sandboxID)
+	containerConfig, hostConfig, err := newContainerConfigs(spec, sandboxID, d.containerRuntime)
 	if err != nil {
 		return runtime.Info{}, runtime.Wrap(op, "", err)
 	}
@@ -193,6 +278,7 @@ func (d *Runtime) Create(ctx context.Context, sandboxID string, spec runtime.Spe
 		"sandboxID", sandboxID,
 		"containerID", created.ID,
 		"image", spec.Image,
+		"containerRuntime", cmp.Or(d.containerRuntime, daemonDefaultRuntimeLabel),
 	)
 	logger.DebugContext(ctx, "created container")
 

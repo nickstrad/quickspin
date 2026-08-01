@@ -8,6 +8,7 @@
 package docker_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/runtime/docker"
 )
@@ -29,10 +33,6 @@ const (
 	// is a failed fork, not a stressed VM. A generous limit would make the test
 	// itself the denial of service it is checking for.
 	forkBombPidsLimit = 64
-
-	// SIGKILL's exit code as a shell reports it: 128 + 9. This is the kernel's OOM
-	// killer speaking, not the process choosing to exit.
-	exitSIGKILL = 137
 
 	execTimeout = 30 * time.Second
 )
@@ -208,11 +208,9 @@ func TestOutputTruncation(t *testing.T) {
 // limit present in Spec but absent from the container's cgroup is worse than no
 // limit, since callers will trust it.
 //
-// The files are read through the container's own /sys/fs/cgroup rather than the
-// host path under /sys/fs/cgroup/system.slice/docker-<id>.scope, because the
-// container is in its own cgroup namespace and sees its cgroup at the root. That
-// avoids depending on the host being systemd-managed, which the docker-<id>.scope
-// path assumes and a Lima VM may not honor.
+// The files are read on the VM host rather than inside the sandbox: under gVisor
+// the sandbox sees the sentry's synthesized cgroup v1 hierarchy, so the v2 paths
+// asserted on here exist only on the host.
 func TestLimitsReachTheContainersCgroupFiles(t *testing.T) {
 	rt := liveDocker(t)
 
@@ -223,10 +221,10 @@ func TestLimitsReachTheContainersCgroupFiles(t *testing.T) {
 	)
 	spec := runtime.NewSpec(longRunningImage(), nil, wantCPU, wantMemory, wantPids, false)
 	id := newSandbox(t, rt, spec)
+	cgroup := hostCgroupOf(t, id, "memory.max", "cpu.max", "pids.max")
 
 	t.Run("memory.max", func(t *testing.T) {
-		got := strings.TrimSpace(execOrFatal(t, rt, id, sh("cat /sys/fs/cgroup/memory.max")))
-		if got != strconv.Itoa(wantMemory) {
+		if got := cgroup["memory.max"]; got != strconv.Itoa(wantMemory) {
 			t.Errorf("memory.max = %q, want %d — Memory is bytes verbatim", got, wantMemory)
 		}
 	})
@@ -235,7 +233,7 @@ func TestLimitsReachTheContainersCgroupFiles(t *testing.T) {
 		// cpu.max is "<quota> <period>", both in microseconds — not nano-CPUs.
 		// 0.5 cores at the default 100000µs period is "50000 100000". The daemon
 		// derives this from NanoCPUs, so this pins the second translation hop.
-		got := strings.TrimSpace(execOrFatal(t, rt, id, sh("cat /sys/fs/cgroup/cpu.max")))
+		got := cgroup["cpu.max"]
 		quota, period, ok := strings.Cut(got, " ")
 		if !ok {
 			t.Fatalf("cpu.max = %q, want \"<quota> <period>\"", got)
@@ -257,7 +255,7 @@ func TestLimitsReachTheContainersCgroupFiles(t *testing.T) {
 		// "max" here is the literal string the kernel writes for unlimited — the
 		// exact outcome a dropped nil *int64 produces, and the reason this
 		// assertion is not just a number comparison.
-		got := strings.TrimSpace(execOrFatal(t, rt, id, sh("cat /sys/fs/cgroup/pids.max")))
+		got := cgroup["pids.max"]
 		if got == "max" {
 			t.Fatal("pids.max = \"max\": the limit was dropped and the sandbox is unbounded")
 		}
@@ -265,6 +263,124 @@ func TestLimitsReachTheContainersCgroupFiles(t *testing.T) {
 			t.Errorf("pids.max = %q, want %d", got, wantPids)
 		}
 	})
+}
+
+// TestSandboxesLandOnTheConfiguredRuntime closes the gap between what quickspin
+// asks for and what the daemon did. Everything else in this suite passes just as
+// green on runc, so without this the isolation boundary is attested only by
+// hack/validate-01.sh, which runs its own `docker run --runtime=runsc` rather
+// than the Create path that puts sandboxes on it.
+func TestSandboxesLandOnTheConfiguredRuntime(t *testing.T) {
+	rt := liveDocker(t)
+
+	want := rt.ContainerRuntime()
+	if want == "" {
+		t.Skip("no OCI runtime configured, so the daemon chose: set QUICKSPIN_DOCKER_RUNTIME to assert the boundary")
+	}
+
+	id := newSandbox(t, rt, liveSpec(t))
+
+	ctx, cancel := context.WithTimeout(t.Context(), execTimeout)
+	defer cancel()
+
+	inspected, err := liveClient.ContainerInspect(ctx, containerIDOf(t, id), client.ContainerInspectOptions{})
+	if err != nil {
+		t.Fatalf("inspecting the container for sandbox %s: %v", id, err)
+	}
+
+	if got := inspected.Container.HostConfig.Runtime; got != want {
+		t.Errorf("HostConfig.Runtime = %q, want %q: the sandbox is not on the isolation boundary quickspin asked for", got, want)
+	}
+}
+
+// hostCgroupOf reads the named cgroup files for a sandbox as the VM kernel holds
+// them, in one throwaway container that bind-mounts the host's /sys/fs/cgroup.
+// That container deliberately runs on the daemon's default runtime: under gVisor
+// it would see the sentry's synthesized hierarchy instead of the host's.
+func hostCgroupOf(t *testing.T, sandboxID string, files ...string) map[string]string {
+	t.Helper()
+
+	containerID := containerIDOf(t, sandboxID)
+
+	const mount = "/hostcgroup"
+	// Searching for the container id rather than assuming systemd's
+	// system.slice/docker-<id>.scope keeps the cgroup driver out of the assertion.
+	script := fmt.Sprintf(
+		`dir=$(find %s -maxdepth 4 -type d -name "*%s*" -print -quit); `+
+			`[ -n "$dir" ] || { echo "no cgroup directory for %s" >&2; exit 1; }; `+
+			`for f in %s; do printf '%%s\t%%s\n' "$f" "$(cat "$dir/$f")"; done`,
+		mount, containerID, containerID, strings.Join(files, " "))
+
+	ctx, cancel := context.WithTimeout(t.Context(), execTimeout)
+	defer cancel()
+
+	created, err := liveClient.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: &container.Config{
+			Image: shortLivedImage,
+			Cmd:   sh(script),
+		},
+		HostConfig: &container.HostConfig{
+			// Read-only: this helper must not be able to change the limits it is
+			// checking.
+			Binds:      []string{"/sys/fs/cgroup:" + mount + ":ro"},
+			AutoRemove: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create cgroup reader: %v", err)
+	}
+
+	attached, err := liveClient.ContainerAttach(ctx, created.ID, client.ContainerAttachOptions{
+		Stream: true, Stdout: true, Stderr: true,
+	})
+	if err != nil {
+		t.Fatalf("attach cgroup reader: %v", err)
+	}
+	defer attached.Close()
+
+	if _, err := liveClient.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+		t.Fatalf("start cgroup reader: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdout, &stderr, attached.Reader); err != nil {
+		t.Fatalf("read cgroup reader output: %v", err)
+	}
+
+	values := make(map[string]string, len(files))
+	for line := range strings.SplitSeq(strings.TrimSpace(stdout.String()), "\n") {
+		if name, value, ok := strings.Cut(strings.TrimSpace(line), "\t"); ok {
+			values[name] = value
+		}
+	}
+	if len(values) != len(files) {
+		t.Fatalf("reading %v for sandbox %s produced %v: %s",
+			files, sandboxID, values, strings.TrimSpace(stderr.String()))
+	}
+	return values
+}
+
+// containerIDOf resolves the sandbox to its container through the daemon's own
+// label query rather than through Runtime.List, for the same reason TestMain's
+// sweep does: these tests have to keep working when the implementation under test
+// is the broken thing.
+func containerIDOf(t *testing.T, sandboxID string) string {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(t.Context(), execTimeout)
+	defer cancel()
+
+	result, err := liveClient.ContainerList(ctx, client.ContainerListOptions{
+		All:     true,
+		Filters: client.Filters{}.Add("label", sandboxIDLabel+"="+sandboxID),
+	})
+	if err != nil {
+		t.Fatalf("listing the container for sandbox %s: %v", sandboxID, err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("found %d containers labelled %s=%s, want exactly one", len(result.Items), sandboxIDLabel, sandboxID)
+	}
+	return result.Items[0].ID
 }
 
 func TestMemoryLimitEnforced(t *testing.T) {
@@ -281,9 +397,11 @@ func TestMemoryLimitEnforced(t *testing.T) {
 		t.Fatalf("Exec error = %v, want nil: an OOM kill is an exit code, not a transport failure", err)
 	}
 
-	if result.ExitCode != exitSIGKILL {
-		t.Errorf("ExitCode = %d, want %d (128 + SIGKILL): the kernel should have OOM-killed this",
-			result.ExitCode, exitSIGKILL)
+	// Non-zero rather than exactly 137: gVisor does not encode 128+signal through
+	// the exec path, returning 128 for an OOM kill and 1 for an explicit `kill -9`
+	// where runc reports 137 for both.
+	if result.ExitCode == 0 {
+		t.Errorf("ExitCode = 0, want non-zero: the allocation should have been killed, not completed")
 	}
 
 	// The sandbox survives its own OOM kill. cgroup v2 kills inside the cgroup;
@@ -295,36 +413,38 @@ func TestMemoryLimitEnforced(t *testing.T) {
 	}
 }
 
+// TestPidsLimitStopsForkBomb asserts containment, not the sandbox's survival:
+// runc contains the bomb with EAGAIN and nothing dies, while under gVisor each
+// guest task needs a host stub process, so the same limit kills the sentry and
+// the sandbox with it. Only the blast radius is common to both.
 func TestPidsLimitStopsForkBomb(t *testing.T) {
-	// The distinctive behavior: hitting pids.max does not kill anything. fork
-	// returns EAGAIN and the bomb simply cannot spawn — so the evidence is a
-	// failed fork plus a still-responsive VM, not a corpse.
 	rt := liveDocker(t)
 	spec := runtime.NewSpec(longRunningImage(), nil, liveCPULimit, liveMemoryLimit, forkBombPidsLimit, false)
 	id := newSandbox(t, rt, spec)
 
+	// Read host-side and before the bomb: the limit has to be in force at the
+	// moment it is tested, and under gVisor the sandbox may not be around
+	// afterwards to be asked.
+	if got := hostCgroupOf(t, id, "pids.max")["pids.max"]; got != strconv.Itoa(forkBombPidsLimit) {
+		t.Fatalf("pids.max = %q before the bomb, want %d: nothing would be under test", got, forkBombPidsLimit)
+	}
+
 	// Bounded rather than a true `:(){ :|:& };:`: an unbounded bomb would still be
-	// spawning against the limit when the test moves on, and the assertion is
-	// about fork failing, which a bounded loop shows just as well.
+	// spawning against the limit when the test moves on.
 	_, err := rt.Exec(t.Context(), id,
 		sh("i=0; while [ $i -lt 500 ]; do sleep 30 & i=$((i+1)); done; wait"),
 		runtime.ExecOpts{Timeout: 10 * time.Second})
+	// A sandbox that dies under its own bomb takes its exec down with it, which
+	// is a legitimate outcome here rather than a transport failure.
 	if err != nil && !errors.Is(err, runtime.ErrExecTimeout) {
-		t.Fatalf("Exec error = %v, want nil or a timeout", err)
+		t.Logf("exec ended with %v (the sandbox may have died under its own bomb)", err)
 	}
 
-	// The VM stays responsive — the real point of a pids limit. A sandbox that
-	// exhausted the host's process table would fail here rather than above.
-	out := execOrFatal(t, rt, id, sh("echo alive"))
-	if strings.TrimSpace(out) != "alive" {
-		t.Errorf("post-fork-bomb echo = %q, want %q: the sandbox stopped responding", out, "alive")
-	}
-
-	// And the limit is still in force rather than having been raised by the
-	// pressure — which would mean nothing was actually enforced.
-	pids := strings.TrimSpace(execOrFatal(t, rt, id, sh("cat /sys/fs/cgroup/pids.max")))
-	if pids != strconv.Itoa(forkBombPidsLimit) {
-		t.Errorf("pids.max = %q, want %d", pids, forkBombPidsLimit)
+	// The host is what must survive, and the check is the thing a bomb that
+	// escaped its cgroup would have taken away: starting and running a process.
+	survivor := newSandbox(t, rt, liveSpec(t))
+	if out := execOrFatal(t, rt, survivor, sh("echo alive")); strings.TrimSpace(out) != "alive" {
+		t.Errorf("post-fork-bomb echo in a fresh sandbox = %q, want %q", out, "alive")
 	}
 }
 

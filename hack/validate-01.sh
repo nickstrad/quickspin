@@ -116,6 +116,21 @@ fi
 
 pass "docker run --rm alpine uname -s prints Linux."
 
+# --- 4a. The gVisor runtime is registered and actually intercepts --------------
+#
+# The dmesg banner is proof of interception rather than of configuration: under
+# gVisor the kernel identifying itself is runsc's sentry, which distinguishes a
+# daemon that ran the container on runc anyway from one that rejected the flag.
+gvisor_dmesg="$(run_or_fail "docker run --runtime=runsc failed. Is runsc registered in the guest's /etc/docker/daemon.json? Recreate the VM with: make lima-vm-delete lima-vm-create" \
+    docker run --rm --runtime=runsc alpine dmesg)" || exit 1
+
+if ! printf '%s' "$gvisor_dmesg" | grep -qi 'gvisor'; then
+    printf '%s\n' "$gvisor_dmesg" >&2
+    fail "The container started under --runtime=runsc but its dmesg does not mention gVisor, so it is not running on the sentry."
+fi
+
+pass "Containers run under gVisor (--runtime=runsc dmesg reports the sentry)."
+
 # --- 5. A cross-compiled Go binary runs inside the VM -------------------------
 #
 # LINUX_ARCH is passed on the make command line so the build and $LINUX_BIN can
@@ -129,9 +144,9 @@ run_or_fail "make build-linux failed." \
 
 # `--` separates limactl's own flags from the guest command. The binary lives
 # under $HOME, which Lima mounts into the guest, so no copy step is needed.
-# `sandbox list` proves both that the binary runs and that the guest session
-# carries DOCKER_HOST for the rootless daemon (provisioned via /etc/environment,
-# which PAM applies even to this non-interactive SSH command).
+# `sandbox list` proves both that the binary runs and that the guest session can
+# reach the rootful daemon — DOCKER_HOST via /etc/environment, which PAM applies
+# even to this non-interactive SSH command, and the socket's docker group.
 # `fail` inside a command substitution can only exit that subshell, so the
 # explicit `|| exit 1` is what stops the script here.
 guest_output="$(run_or_fail "The linux/${LINUX_ARCH} binary could not list sandboxes inside '${VM_NAME}'. Is DOCKER_HOST set in the guest's /etc/environment?" \

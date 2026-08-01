@@ -59,7 +59,7 @@ func newLiveClient(t *testing.T) *client.Client {
 
 	// A nil client, so the SDK reads DOCKER_HOST — the same construction
 	// internal/cli/serve.go performs.
-	rt, err := docker.New(nil, logger)
+	rt, err := docker.New(t.Context(), nil, logger)
 	if err != nil {
 		t.Fatalf("docker.New from the environment: %v", err)
 	}
