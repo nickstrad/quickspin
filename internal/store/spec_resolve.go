@@ -13,6 +13,7 @@ const (
 	DefaultCPUs      = 1.0
 	DefaultMemory    = "512m"
 	DefaultPidsLimit = 256
+	DefaultImage     = "alpine:3.20"
 )
 
 // Resolve applies defaults and converts Memory to bytes without validating limits.
@@ -29,7 +30,7 @@ func (s *SpecFile) Resolve() (runtime.Spec, error) {
 	}
 
 	return runtime.NewSpec(
-		orDefault(s.Image, ""),
+		orDefault(s.Image, DefaultImage),
 		s.Env,
 		orDefault(s.CPUs, DefaultCPUs),
 		memoryBytes,

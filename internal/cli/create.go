@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -26,9 +25,6 @@ func resolveCreateSpec(
 ) (store.SpecFile, error) {
 	if len(args) > 0 && args[0] != "" {
 		file.Image = &args[0]
-	}
-	if file.Image == nil || *file.Image == "" {
-		return store.SpecFile{}, errors.New("no image: pass IMAGE as an argument or set image in the spec file")
 	}
 
 	environment, err := resolveEnvironment(file.Env, flags.env)
@@ -75,7 +71,10 @@ func (app *application) newCreateCommand() *cobra.Command {
 			"Inputs may come from flags, from a --file spec, or from both. The file may\n" +
 			"be YAML or JSON; its keys match the flag names. Flags win over the file,\n" +
 			"and --env merges into the file's env one variable at a time.",
-		Example: `  # Defaults: 1 CPU, 512m memory, 256 pids, no network.
+		Example: `  # Defaults: ` + store.DefaultImage + `, 1 CPU, 512m memory, 256 pids, no network.
+  quickspin sandbox create
+
+  # Or name the image.
   quickspin sandbox create alpine:3.20
 
   # The same request as a spec file. Keys match the flag names, and the file
@@ -109,7 +108,12 @@ EOF
 			if err != nil {
 				return err
 			}
-			app.logCommand(cmd, "image", *spec.Image, "specFile", specPath)
+			// Log the effective image even when the wire form leaves it implicit.
+			image := store.DefaultImage
+			if spec.Image != nil {
+				image = *spec.Image
+			}
+			app.logCommand(cmd, "image", image, "specFile", specPath)
 
 			sandbox, err := app.api.CreateSandbox(cmd.Context(), uuid.NewString(), spec)
 			if err != nil {

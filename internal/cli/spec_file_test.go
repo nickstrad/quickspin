@@ -101,10 +101,9 @@ func TestCreateFlagsOverrideTheSpecFile(t *testing.T) {
 	}
 }
 
-// A key the file omits still gets its default, so a partial file is enough.
 func TestCreateSpecFileOmissionsFallBackToDefaults(t *testing.T) {
 	spec, err := createdSpec(t, "sandbox", "create",
-		"--file", writeSpec(t, "spec.yaml", "image: alpine:3.20\n"),
+		"--file", writeSpec(t, "spec.yaml", "cpus: 0.5\n"),
 	)
 	if err != nil {
 		t.Fatalf("execute create error = %v, want nil", err)
@@ -112,6 +111,9 @@ func TestCreateSpecFileOmissionsFallBackToDefaults(t *testing.T) {
 
 	if err := spec.Validate(); err != nil {
 		t.Errorf("spec from a minimal file does not validate: %v", err)
+	}
+	if spec.Image != store.DefaultImage {
+		t.Errorf("Image = %q, want %q", spec.Image, store.DefaultImage)
 	}
 	if spec.AllowNetwork {
 		t.Error("AllowNetwork = true, want default-deny when the file is silent")
@@ -142,11 +144,6 @@ func TestCreateSpecFileIsRejectedWhenUnusable(t *testing.T) {
 			name:    "two documents",
 			content: "image: alpine:3.20\n---\nimage: debian:12\n",
 			wantMsg: "more than one document",
-		},
-		{
-			name:    "no image in file or argument",
-			content: "cpus: 0.5\n",
-			wantMsg: "no image",
 		},
 		{
 			// An explicit zero is not "unset": it has to reach Validate and be

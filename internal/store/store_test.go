@@ -148,24 +148,25 @@ func TestSpecFileDecodePreservesExplicitZeroValues(t *testing.T) {
 	}
 }
 
-func TestSpecFileValidateRejectsEmptySpec(t *testing.T) {
-	tests := []struct {
-		name string
-		spec *SpecFile
-	}{
-		{name: "nil", spec: nil},
-		{name: "zero value", spec: &SpecFile{}},
-		// `{}` and `{"unknown":"value"}` both decode to a zero SpecFile, so the
-		// empty-spec check is what rejects an unrecognized body.
-		{name: "empty env only", spec: &SpecFile{Env: map[string]string{}}},
+func TestSpecFileValidateRejectsNilSpec(t *testing.T) {
+	if err := (*SpecFile)(nil).Validate(); !errors.Is(err, ErrInvalidSpec) {
+		t.Errorf("Validate() on nil error = %v, want ErrInvalidSpec", err)
 	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := tt.spec.Validate(); !errors.Is(err, ErrInvalidSpec) {
-				t.Errorf("Validate() error = %v, want ErrInvalidSpec", err)
-			}
-		})
+func TestSpecFileValidateAcceptsEmptySpec(t *testing.T) {
+	if err := (&SpecFile{}).Validate(); err != nil {
+		t.Errorf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestSpecFileResolveUsesDefaultImage(t *testing.T) {
+	resolved, err := (&SpecFile{}).Resolve()
+	if err != nil {
+		t.Fatalf("Resolve() error = %v, want nil", err)
+	}
+	if resolved.Image != DefaultImage {
+		t.Errorf("Image = %q, want %q", resolved.Image, DefaultImage)
 	}
 }
 

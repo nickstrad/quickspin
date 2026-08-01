@@ -89,15 +89,18 @@ func TestCreateLimitFlagsReachTheSpec(t *testing.T) {
 	}
 }
 
-func TestCreateWithoutLimitFlagsStillSendsEnforceableLimits(t *testing.T) {
+func TestCreateWithoutFlagsUsesDefaults(t *testing.T) {
 	var sent store.SpecFile
 	api := recordingCreate(&sent)
 
-	if _, _, err := execute(t, api, "sandbox", "create", "alpine:3.20"); err != nil {
+	if _, _, err := execute(t, api, "sandbox", "create"); err != nil {
 		t.Fatalf("execute create error = %v, want nil", err)
 	}
 
 	gotSpec := mustResolve(t, sent)
+	if gotSpec.Image != store.DefaultImage {
+		t.Errorf("Image = %q, want %q", gotSpec.Image, store.DefaultImage)
+	}
 	if err := gotSpec.Validate(); err != nil {
 		t.Errorf("default spec does not validate: %v", err)
 	}

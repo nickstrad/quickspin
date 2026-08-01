@@ -44,20 +44,19 @@ func Run(t *testing.T, factory Factory) {
 		}
 	})
 
-	t.Run("EmptySpecRejected", func(t *testing.T) {
+	// Stored specs preserve omitted fields rather than materializing defaults.
+	t.Run("EmptySpecIsStoredUnresolved", func(t *testing.T) {
 		ctx := context.Background()
 		st := factory(t)
 
-		if _, err := st.CreateSandbox(ctx, "empty-spec", store.SpecFile{}); !errors.Is(err, store.ErrInvalidSpec) {
-			t.Fatalf("CreateSandbox(empty spec) error = %v, want ErrInvalidSpec", err)
-		}
+		created := createSandbox(t, ctx, st, "empty-spec", store.SpecFile{})
 
-		key, err := st.GetIdempotencyKey(ctx, "empty-spec")
+		got, err := st.GetSandbox(ctx, created.SandboxID)
 		if err != nil {
-			t.Fatalf("GetIdempotencyKey(empty-spec) error = %v, want nil", err)
+			t.Fatalf("GetSandbox(%s) error = %v, want nil", created.SandboxID, err)
 		}
-		if key != nil {
-			t.Errorf("GetIdempotencyKey(empty-spec) = %#v, want nil", key)
+		if got.Spec.Image != nil {
+			t.Errorf("GetSandbox(%s) Spec.Image = %v, want nil", created.SandboxID, got.Spec.Image)
 		}
 	})
 

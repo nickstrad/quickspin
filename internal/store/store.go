@@ -73,19 +73,12 @@ func (s *SpecFile) ToJSON() (string, error) {
 	return string(data), nil
 }
 
+// An empty SpecFile represents a request that uses every default.
 func (s *SpecFile) Validate() error {
 	if s == nil {
 		return E("store.SpecFile.Validate", "spec is nil", ErrInvalidSpec)
 	}
-	if s.Image != nil ||
-		len(s.Env) > 0 ||
-		s.CPUs != nil ||
-		s.Memory != nil ||
-		s.PidsLimit != nil ||
-		s.AllowNetwork != nil {
-		return nil
-	}
-	return E("store.SpecFile.Validate", "spec contains no recognized fields", ErrInvalidSpec)
+	return nil
 }
 
 type Sandbox struct {

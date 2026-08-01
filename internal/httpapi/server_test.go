@@ -19,6 +19,11 @@ import (
 
 func newTestAPI(t *testing.T) *API {
 	t.Helper()
+	return newTestAPIWithStore(t, newTestStore(t))
+}
+
+func newTestStore(t *testing.T) *store.SqlliteStore {
+	t.Helper()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	st, err := store.NewSqlliteStore(context.Background(), ":memory:", "", logger)
@@ -30,8 +35,7 @@ func newTestAPI(t *testing.T) *API {
 			t.Errorf("Cleanup() error = %v, want nil", err)
 		}
 	})
-
-	return newTestAPIWithStore(t, st)
+	return st
 }
 
 func newTestAPIWithStore(t *testing.T, st store.Store) *API {
@@ -186,6 +190,29 @@ func TestCreateSandboxReturnsCreatedRecord(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxWithNoFieldsUsesTheDefaultImage(t *testing.T) {
+	st := newTestStore(t)
+
+	var gotSpec runtime.Spec
+	api := newTestAPIWithRuntime(t, st, runtimetest.Fake{
+		CreateFn: func(_ context.Context, _ string, spec runtime.Spec) (runtime.Info, error) {
+			gotSpec = spec
+			return runtime.Info{}, nil
+		},
+	})
+
+	record := mustCreate(t, api, "k1", `{}`)
+	if gotSpec.Image != store.DefaultImage {
+		t.Errorf("runtime image = %q, want %q", gotSpec.Image, store.DefaultImage)
+	}
+
+	// Stored specs remain unresolved so defaults can change independently.
+	spec, ok := record["spec"].(map[string]any)
+	if !ok || spec["image"] != nil {
+		t.Errorf("echoed spec = %#v, want a null image", spec)
+	}
+}
+
 // The autoincrement row id is an internal key; a client that learns it can
 // enumerate every sandbox on the host.
 func TestCreateSandboxDoesNotLeakRowID(t *testing.T) {
@@ -233,15 +260,6 @@ func TestCreateSandboxRejectsBadRequests(t *testing.T) {
 			body:   `{"image":"alpine:3.20","gpus":4}`,
 			status: http.StatusBadRequest,
 			code:   CodeInvalidRequest,
-		},
-		{
-			// Decodes cleanly but names nothing, so the store's ErrInvalidSpec
-			// is what rejects it — a semantic failure, not a syntactic one.
-			name:   "empty spec",
-			key:    "k1",
-			body:   `{}`,
-			status: http.StatusUnprocessableEntity,
-			code:   CodeUnprocessable,
 		},
 		{
 			name:   "unrecognized keys only",
@@ -303,16 +321,7 @@ func TestCreateSandboxIsIdempotentAcrossRequests(t *testing.T) {
 // that fails has to be recorded on it. A sandbox left in pending is
 // indistinguishable from one still starting.
 func TestCreateSandboxMarksTheSandboxFailedWhenTheRuntimeFails(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.NewSqlliteStore(context.Background(), ":memory:", "", logger)
-	if err != nil {
-		t.Fatalf("NewSqlliteStore(:memory:) error = %v, want nil", err)
-	}
-	t.Cleanup(func() {
-		if err := st.Cleanup(); err != nil {
-			t.Errorf("Cleanup() error = %v, want nil", err)
-		}
-	})
+	st := newTestStore(t)
 
 	api := newTestAPIWithRuntime(t, st, runtimetest.Fake{
 		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
