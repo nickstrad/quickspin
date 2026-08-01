@@ -51,8 +51,8 @@ func TestNewSandboxIDPassesItsOwnValidator(t *testing.T) {
 	// own Inspect rejects.
 	for range 100 {
 		id := NewSandboxID()
-		if err := validateSandboxID(id); err != nil {
-			t.Fatalf("validateSandboxID(%q) = %v, want nil for a freshly generated id", id, err)
+		if err := ValidateSandboxID(id); err != nil {
+			t.Fatalf("ValidateSandboxID(%q) = %v, want nil for a freshly generated id", id, err)
 		}
 	}
 }
@@ -82,14 +82,14 @@ func TestValidateSandboxID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateSandboxID(tt.id)
+			err := ValidateSandboxID(tt.id)
 			if gotErr := err != nil; gotErr != tt.wantErr {
-				t.Fatalf("validateSandboxID(%q) error = %v, want error presence %v", tt.id, err, tt.wantErr)
+				t.Fatalf("ValidateSandboxID(%q) error = %v, want error presence %v", tt.id, err, tt.wantErr)
 			}
 			// Rejecting is half the contract; an error without the sentinel is
 			// unusable to a caller that branches on it.
 			if tt.wantErr && !errors.Is(err, ErrInvalidSandboxID) {
-				t.Errorf("validateSandboxID(%q) error = %v, want errors.Is(err, ErrInvalidSandboxID)", tt.id, err)
+				t.Errorf("ValidateSandboxID(%q) error = %v, want errors.Is(err, ErrInvalidSandboxID)", tt.id, err)
 			}
 		})
 	}
@@ -113,8 +113,8 @@ func TestValidateSandboxIDAcceptsOnlyTheCanonicalUUIDForm(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := validateSandboxID(tt.id); err == nil {
-				t.Errorf("validateSandboxID(%q) = nil, want an error: %s, so NewSandboxID cannot produce it", tt.id, tt.why)
+			if err := ValidateSandboxID(tt.id); err == nil {
+				t.Errorf("ValidateSandboxID(%q) = nil, want an error: %s, so NewSandboxID cannot produce it", tt.id, tt.why)
 			}
 		})
 	}
@@ -127,8 +127,8 @@ func TestValidateSandboxIDRejectsTheNilUUID(t *testing.T) {
 	var unassigned uuid.UUID
 	id := sandboxIDPrefix + unassigned.String()
 
-	if err := validateSandboxID(id); !errors.Is(err, ErrInvalidSandboxID) {
-		t.Errorf("validateSandboxID(%q) error = %v, want ErrInvalidSandboxID", id, err)
+	if err := ValidateSandboxID(id); !errors.Is(err, ErrInvalidSandboxID) {
+		t.Errorf("ValidateSandboxID(%q) error = %v, want ErrInvalidSandboxID", id, err)
 	}
 }
 
@@ -154,8 +154,8 @@ func TestValidateSandboxIDRejectsMalformedSuffixes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := validateSandboxID(tt.id); !errors.Is(err, ErrInvalidSandboxID) {
-				t.Errorf("validateSandboxID(%q) error = %v, want ErrInvalidSandboxID", tt.id, err)
+			if err := ValidateSandboxID(tt.id); !errors.Is(err, ErrInvalidSandboxID) {
+				t.Errorf("ValidateSandboxID(%q) error = %v, want ErrInvalidSandboxID", tt.id, err)
 			}
 		})
 	}

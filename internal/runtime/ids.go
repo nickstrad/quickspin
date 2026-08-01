@@ -10,9 +10,9 @@ const sandboxIDPrefix = "sbx_"
 
 func NewSandboxID() string { return sandboxIDPrefix + uuid.NewString() }
 
-// validateSandboxID rejects anything NewSandboxID could not have produced, so a
+// ValidateSandboxID rejects anything NewSandboxID could not have produced, so a
 // malformed id can answer 400 where a missing one answers 404.
-func validateSandboxID(id string) error {
+func ValidateSandboxID(id string) error {
 	uid, ok := strings.CutPrefix(id, sandboxIDPrefix)
 	if !ok {
 		return ErrInvalidSandboxID

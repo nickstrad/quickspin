@@ -1,4 +1,4 @@
-package store_test
+package sqlite_test
 
 import (
 	"context"
@@ -7,18 +7,20 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/nickstrad/quickspin/internal/store"
+	"github.com/nickstrad/quickspin/internal/store/sqlite"
 	"github.com/nickstrad/quickspin/internal/store/storetest"
 )
 
-func TestSqlliteStore(t *testing.T) {
+func TestSqliteStore(t *testing.T) {
 	storetest.Run(t, func(t *testing.T) store.Store {
 		t.Helper()
 
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-		st, err := store.NewSqlliteStore(context.Background(), ":memory:", "", logger)
+		st, err := sqlite.New(context.Background(), ":memory:", "", logger)
 		if err != nil {
-			t.Fatalf("NewSqlliteStore(:memory:) error = %v, want nil", err)
+			t.Fatalf("New(:memory:) error = %v, want nil", err)
 		}
 		t.Cleanup(func() {
 			if err := st.Cleanup(); err != nil {
@@ -29,21 +31,21 @@ func TestSqlliteStore(t *testing.T) {
 	})
 }
 
-func TestNewSqlliteStoreHonorsCanceledContext(t *testing.T) {
+func TestNewHonorsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if _, err := store.NewSqlliteStore(ctx, ":memory:", "", logger); !errors.Is(err, context.Canceled) {
-		t.Errorf("NewSqlliteStore() error = %v, want context.Canceled", err)
+	if _, err := sqlite.New(ctx, ":memory:", "", logger); !errors.Is(err, context.Canceled) {
+		t.Errorf("New() error = %v, want context.Canceled", err)
 	}
 }
 
-func TestSqlliteStoreOperationsHonorCanceledContext(t *testing.T) {
+func TestSqliteStoreOperationsHonorCanceledContext(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.NewSqlliteStore(context.Background(), ":memory:", "", logger)
+	st, err := sqlite.New(context.Background(), ":memory:", "", logger)
 	if err != nil {
-		t.Fatalf("NewSqlliteStore(:memory:) error = %v, want nil", err)
+		t.Fatalf("New(:memory:) error = %v, want nil", err)
 	}
 	t.Cleanup(func() {
 		if err := st.Cleanup(); err != nil {
@@ -52,11 +54,11 @@ func TestSqlliteStoreOperationsHonorCanceledContext(t *testing.T) {
 	})
 
 	seedImage := "alpine:3.20"
-	sandbox, err := st.CreateSandbox(context.Background(), "seed", store.SpecFile{Image: &seedImage})
+	sbx, err := st.CreateSandbox(context.Background(), "seed", sandbox.SpecFile{Image: &seedImage})
 	if err != nil {
 		t.Fatalf("CreateSandbox(seed) error = %v, want nil", err)
 	}
-	sandboxID := sandbox.SandboxID
+	sandboxID := sbx.SandboxID
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -97,14 +99,14 @@ func TestSqlliteStoreOperationsHonorCanceledContext(t *testing.T) {
 		{
 			name: "update sandbox state",
 			call: func() error {
-				_, err := st.UpdateSandboxState(ctx, sandboxID, store.Pending, store.Running)
+				_, err := st.UpdateSandboxState(ctx, sandboxID, sandbox.Pending, sandbox.Running)
 				return err
 			},
 		},
 		{
 			name: "create sandbox",
 			call: func() error {
-				_, err := st.CreateSandbox(ctx, "canceled-create", store.SpecFile{Image: &canceledImage})
+				_, err := st.CreateSandbox(ctx, "canceled-create", sandbox.SpecFile{Image: &canceledImage})
 				return err
 			},
 		},
@@ -122,8 +124,8 @@ func TestSqlliteStoreOperationsHonorCanceledContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox(%s) after canceled operations error = %v, want nil", sandboxID, err)
 	}
-	if got.State != store.Pending {
-		t.Errorf("State after canceled update = %q, want %q", got.State, store.Pending)
+	if got.State != sandbox.Pending {
+		t.Errorf("State after canceled update = %q, want %q", got.State, sandbox.Pending)
 	}
 	key, err := st.GetIdempotencyKey(context.Background(), "canceled-key")
 	if err != nil {

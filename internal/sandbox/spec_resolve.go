@@ -1,4 +1,4 @@
-package store
+package sandbox
 
 import (
 	"fmt"
@@ -18,7 +18,7 @@ const (
 
 // Resolve applies defaults and converts Memory to bytes without validating limits.
 func (s *SpecFile) Resolve() (runtime.Spec, error) {
-	const op = "store.SpecFile.Resolve"
+	const op = "sandbox.SpecFile.Resolve"
 
 	if s == nil {
 		return runtime.Spec{}, E(op, "spec is nil", ErrInvalidSpec)

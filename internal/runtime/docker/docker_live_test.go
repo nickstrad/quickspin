@@ -2,7 +2,7 @@
 // runtimetest, and runtimetest imports runtime. It compiles during an ordinary
 // `make test` and skips at run time, so a machine with no Docker still builds
 // every assertion here — a build tag would let this file rot unnoticed.
-package runtime_test
+package docker_test
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 	"github.com/nickstrad/quickspin/internal/runtime"
+	"github.com/nickstrad/quickspin/internal/runtime/docker"
 	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
 )
 
@@ -191,7 +192,7 @@ func TestDockerCreateOnlyPromisesThatStartWasAccepted(t *testing.T) {
 // liveDocker builds the runtime exactly the way cmd/quickspin does — a nil
 // client, so the SDK reads DOCKER_HOST — because a test that constructed its own
 // client would not prove the shipped construction path works.
-func liveDocker(t *testing.T) *runtime.DockerRuntime {
+func liveDocker(t *testing.T) *docker.Runtime {
 	t.Helper()
 
 	if os.Getenv(dockerGate) != "1" {
@@ -200,9 +201,9 @@ func liveDocker(t *testing.T) *runtime.DockerRuntime {
 	}
 
 	logger := slog.New(slog.NewTextHandler(testLogWriter{t}, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	rt, err := runtime.NewDockerRuntime(nil, logger)
+	rt, err := docker.New(nil, logger)
 	if err != nil {
-		t.Fatalf("NewDockerRuntime from the environment: %v", err)
+		t.Fatalf("docker.New from the environment: %v", err)
 	}
 
 	return rt

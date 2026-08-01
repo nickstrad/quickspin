@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/nickstrad/quickspin/internal/store"
+	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/spf13/cobra"
 )
 
@@ -19,17 +19,17 @@ type createFlags struct {
 
 func resolveCreateSpec(
 	args []string,
-	file store.SpecFile,
+	file sandbox.SpecFile,
 	flags createFlags,
 	flagSet func(name string) bool,
-) (store.SpecFile, error) {
+) (sandbox.SpecFile, error) {
 	if len(args) > 0 && args[0] != "" {
 		file.Image = &args[0]
 	}
 
 	environment, err := resolveEnvironment(file.Env, flags.env)
 	if err != nil {
-		return store.SpecFile{}, err
+		return sandbox.SpecFile{}, err
 	}
 	file.Env = environment
 
@@ -49,10 +49,10 @@ func resolveCreateSpec(
 	// Validate the resolved values while keeping defaults out of the wire form.
 	resolved, err := file.Resolve()
 	if err != nil {
-		return store.SpecFile{}, err
+		return sandbox.SpecFile{}, err
 	}
 	if err := resolved.Validate(); err != nil {
-		return store.SpecFile{}, fmt.Errorf("invalid limits: %w", err)
+		return sandbox.SpecFile{}, fmt.Errorf("invalid limits: %w", err)
 	}
 
 	return file, nil
@@ -71,7 +71,7 @@ func (app *application) newCreateCommand() *cobra.Command {
 			"Inputs may come from flags, from a --file spec, or from both. The file may\n" +
 			"be YAML or JSON; its keys match the flag names. Flags win over the file,\n" +
 			"and --env merges into the file's env one variable at a time.",
-		Example: `  # Defaults: ` + store.DefaultImage + `, 1 CPU, 512m memory, 256 pids, no network.
+		Example: `  # Defaults: ` + sandbox.DefaultImage + `, 1 CPU, 512m memory, 256 pids, no network.
   quickspin sandbox create
 
   # Or name the image.
@@ -99,7 +99,7 @@ EOF
   ID=$(quickspin sandbox create alpine:3.20 -o json | jq -r .sandbox_id)`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			file, err := loadFile[store.SpecFile](specPath)
+			file, err := loadFile[sandbox.SpecFile](specPath)
 			if err != nil {
 				return err
 			}
@@ -109,7 +109,7 @@ EOF
 				return err
 			}
 			// Log the effective image even when the wire form leaves it implicit.
-			image := store.DefaultImage
+			image := sandbox.DefaultImage
 			if spec.Image != nil {
 				image = *spec.Image
 			}
@@ -134,20 +134,20 @@ EOF
 	cmd.Flags().Float64Var(
 		&flags.cpus,
 		"cpus",
-		store.DefaultCPUs,
+		sandbox.DefaultCPUs,
 		"CPU cores the sandbox may use (fractional allowed, e.g. 0.5)",
 	)
 	cmd.Flags().StringVarP(
 		&flags.memory,
 		"memory",
 		"m",
-		store.DefaultMemory,
+		sandbox.DefaultMemory,
 		"memory limit, with an optional b/k/m/g suffix (e.g. 512m)",
 	)
 	cmd.Flags().Int64Var(
 		&flags.pidsLimit,
 		"pids-limit",
-		store.DefaultPidsLimit,
+		sandbox.DefaultPidsLimit,
 		"maximum number of processes the sandbox may have",
 	)
 	cmd.Flags().BoolVar(

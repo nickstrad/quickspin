@@ -1,4 +1,4 @@
-package store
+package sqlite
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"log/slog"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
+	"github.com/nickstrad/quickspin/internal/sandbox"
+	"github.com/nickstrad/quickspin/internal/store"
 	_ "modernc.org/sqlite"
 )
 
@@ -17,12 +19,12 @@ const (
 	DefaultDriverType = "sqlite"
 )
 
-type SqlliteStore struct {
+type Store struct {
 	db     *sql.DB
 	logger *slog.Logger
 }
 
-var _ Store = (*SqlliteStore)(nil)
+var _ store.Store = (*Store)(nil)
 
 // platform_id is the persisted name of Sandbox.SandboxID.
 const SandboxSchema = `CREATE TABLE IF NOT EXISTS sandboxes (
@@ -66,7 +68,7 @@ WHERE platform_id = ? AND state = ?
 RETURNING id, platform_id, state, spec, created_at, updated_at;`
 
 const InsertSandboxQuery = `
-INSERT INTO 
+INSERT INTO
 	sandboxes (state, spec, platform_id)
 VALUES (?, ?, ?)
 RETURNING id, platform_id, state, spec, created_at, updated_at;`
@@ -80,14 +82,14 @@ const GetSandboxesQuery = `
 SELECT id, platform_id, state, spec, created_at, updated_at
 FROM sandboxes;`
 
-func NewSqlliteStore(ctx context.Context, dbFilePath string, dbDriverType string, logger *slog.Logger) (*SqlliteStore, error) {
+func New(ctx context.Context, dbFilePath string, dbDriverType string, logger *slog.Logger) (*Store, error) {
 
 	if dbFilePath == "" {
 		dbFilePath = DefaultDBPath
 	}
 
 	if logger == nil {
-		return nil, E("store.NewSqlliteStore", "logger is required", nil)
+		return nil, store.E("sqlite.New", "logger is required", nil)
 	}
 
 	if dbDriverType == "" {
@@ -99,7 +101,7 @@ func NewSqlliteStore(ctx context.Context, dbFilePath string, dbDriverType string
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", dbFilePath)
 	db, err := sql.Open(dbDriverType, dsn)
 	if err != nil {
-		return nil, E("store.NewSqlliteStore",
+		return nil, store.E("sqlite.New",
 			fmt.Sprintf("opening %s database %s", dbDriverType, dbFilePath), err)
 	}
 
@@ -111,27 +113,27 @@ func NewSqlliteStore(ctx context.Context, dbFilePath string, dbDriverType string
 	for _, schema := range schemas {
 		if _, err := db.ExecContext(ctx, schema); err != nil {
 			_ = db.Close()
-			return nil, E("store.NewSqlliteStore", "executing schema", err)
+			return nil, store.E("sqlite.New", "executing schema", err)
 		}
 	}
 
 	logger.InfoContext(ctx, "store opened", "path", dbFilePath, "driver", dbDriverType)
 
-	return &SqlliteStore{
+	return &Store{
 		db:     db,
 		logger: logger,
 	}, nil
 }
 
-func (s *SqlliteStore) GetIdempotencyKey(ctx context.Context, idempotencyKey string) (*IdempotencyKey, error) {
+func (s *Store) GetIdempotencyKey(ctx context.Context, idempotencyKey string) (*sandbox.IdempotencyKey, error) {
 
 	k, err := scanIdempotencyKey(s.db.QueryRowContext(ctx, GetIdempotencyKeyQuery, idempotencyKey))
 	if err != nil {
-		if errors.Is(err, ErrNotFound) {
+		if errors.Is(err, store.ErrNotFound) {
 			s.logger.DebugContext(ctx, "idempotency key miss", "idempotencyKey", idempotencyKey)
 			return nil, nil
 		}
-		return nil, Wrap("store.SqlliteStore.GetIdempotencyKey",
+		return nil, store.Wrap("sqlite.Store.GetIdempotencyKey",
 			fmt.Sprintf("reading idempotency key %s", idempotencyKey), err)
 	}
 
@@ -140,8 +142,8 @@ func (s *SqlliteStore) GetIdempotencyKey(ctx context.Context, idempotencyKey str
 	return k, nil
 }
 
-func scanIdempotencyKey(row *sql.Row) (*IdempotencyKey, error) {
-	k := &IdempotencyKey{}
+func scanIdempotencyKey(row *sql.Row) (*sandbox.IdempotencyKey, error) {
+	k := &sandbox.IdempotencyKey{}
 
 	err := row.Scan(
 		&k.ID,
@@ -154,18 +156,18 @@ func scanIdempotencyKey(row *sql.Row) (*IdempotencyKey, error) {
 		// A bare sentinel, not E: a missing row is an expected outcome (every
 		// fresh create misses the key lookup), so no stack capture.
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
+			return nil, store.ErrNotFound
 		}
-		return nil, E("store.scanIdempotencyKey", "scanning idempotency key row", err)
+		return nil, store.E("sqlite.scanIdempotencyKey", "scanning idempotency key row", err)
 	}
 
 	return k, nil
 }
 
-func (s *SqlliteStore) CreateIdempotencyKey(ctx context.Context, idempotencyKey, sandboxID string) (*IdempotencyKey, error) {
+func (s *Store) CreateIdempotencyKey(ctx context.Context, idempotencyKey, sandboxID string) (*sandbox.IdempotencyKey, error) {
 	k, err := scanIdempotencyKey(s.db.QueryRowContext(ctx, InsertIdempotencyKeyQuery, idempotencyKey, sandboxID))
 	if err != nil {
-		return nil, Wrap("store.SqlliteStore.CreateIdempotencyKey",
+		return nil, store.Wrap("sqlite.Store.CreateIdempotencyKey",
 			fmt.Sprintf("recording idempotency key %s", idempotencyKey), err)
 	}
 
@@ -178,110 +180,110 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanSandbox(scanner rowScanner) (*Sandbox, error) {
-	sandbox := &Sandbox{}
+func scanSandbox(scanner rowScanner) (*sandbox.Sandbox, error) {
+	sbx := &sandbox.Sandbox{}
 	var rawSpec string
 
 	err := scanner.Scan(
-		&sandbox.ID,
-		&sandbox.SandboxID,
-		&sandbox.State,
+		&sbx.ID,
+		&sbx.SandboxID,
+		&sbx.State,
 		&rawSpec,
-		&sandbox.CreatedAt,
-		&sandbox.UpdatedAt,
+		&sbx.CreatedAt,
+		&sbx.UpdatedAt,
 	)
 	if err != nil {
-		return nil, E("store.scanSandbox", "scanning sandbox row", err)
+		return nil, store.E("sqlite.scanSandbox", "scanning sandbox row", err)
 	}
 
-	if err := json.Unmarshal([]byte(rawSpec), &sandbox.Spec); err != nil {
-		return nil, E("store.scanSandbox", "database contained invalid spec json", err)
+	if err := json.Unmarshal([]byte(rawSpec), &sbx.Spec); err != nil {
+		return nil, store.E("sqlite.scanSandbox", "database contained invalid spec json", err)
 	}
 
-	return sandbox, nil
+	return sbx, nil
 }
 
-func scanSandboxRow(row *sql.Row) (*Sandbox, error) {
-	sandbox, err := scanSandbox(row)
+func scanSandboxRow(row *sql.Row) (*sandbox.Sandbox, error) {
+	sbx, err := scanSandbox(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, store.ErrNotFound
 	}
 
-	return sandbox, err
+	return sbx, err
 }
 
-func scanSandboxes(rows *sql.Rows) ([]*Sandbox, error) {
-	sandboxes := []*Sandbox{}
+func scanSandboxes(rows *sql.Rows) ([]*sandbox.Sandbox, error) {
+	sandboxes := []*sandbox.Sandbox{}
 	for rows.Next() {
-		sandbox, err := scanSandbox(rows)
+		sbx, err := scanSandbox(rows)
 		if err != nil {
-			return nil, Wrap("store.scanSandboxes", "", err)
+			return nil, store.Wrap("sqlite.scanSandboxes", "", err)
 		}
-		sandboxes = append(sandboxes, sandbox)
+		sandboxes = append(sandboxes, sbx)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, Wrap("store.scanSandboxes", "error during rows iteration", err)
+		return nil, store.Wrap("sqlite.scanSandboxes", "error during rows iteration", err)
 	}
 
 	return sandboxes, nil
 }
 
-func (s *SqlliteStore) UpdateSandboxState(ctx context.Context, sandboxID string, from, to TaskState) (*Sandbox, error) {
+func (s *Store) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState) (*sandbox.Sandbox, error) {
 	s.logger.DebugContext(ctx, "transitioning sandbox state", "sandboxID", sandboxID, "from", from, "state", to)
 
-	const op = "store.SqlliteStore.UpdateSandboxState"
+	const op = "sqlite.Store.UpdateSandboxState"
 	msg := fmt.Sprintf("transitioning sandbox %s from %s to %s", sandboxID, from, to)
 
-	if err := canTransition(from, to); err != nil {
-		return nil, E(op, msg, err)
+	if err := sandbox.CanTransition(from, to); err != nil {
+		return nil, store.E(op, msg, err)
 	}
 
-	sandbox, err := scanSandboxRow(s.db.QueryRowContext(ctx, UpdateSandboxStateQuery, to, sandboxID, from))
+	sbx, err := scanSandboxRow(s.db.QueryRowContext(ctx, UpdateSandboxStateQuery, to, sandboxID, from))
 	if err != nil {
 		// No row matched (id, from). The row is either absent or no longer in
 		// `from`; one extra read tells which, and because the gate is in the
 		// UPDATE's WHERE, nothing was written either way.
-		if errors.Is(err, ErrNotFound) {
+		if errors.Is(err, store.ErrNotFound) {
 			if _, getErr := s.GetSandbox(ctx, sandboxID); getErr != nil {
-				return nil, Wrap(op, msg, getErr)
+				return nil, store.Wrap(op, msg, getErr)
 			}
-			return nil, E(op, msg, ErrInvalidStateTransition)
+			return nil, store.E(op, msg, sandbox.ErrInvalidStateTransition)
 		}
-		return nil, Wrap(op, msg, err)
+		return nil, store.Wrap(op, msg, err)
 	}
 
 	s.logger.InfoContext(ctx, "sandbox state changed", "sandboxID", sandboxID, "from", from, "state", to)
 
-	return sandbox, nil
+	return sbx, nil
 }
 
-func (s *SqlliteStore) CreateSandbox(ctx context.Context, idempotencyKey string, spec SpecFile) (*Sandbox, error) {
-	const op = "store.SqlliteStore.CreateSandbox"
+func (s *Store) CreateSandbox(ctx context.Context, idempotencyKey string, spec sandbox.SpecFile) (*sandbox.Sandbox, error) {
+	const op = "sqlite.Store.CreateSandbox"
 	msg := fmt.Sprintf("creating sandbox for idempotency key %s", idempotencyKey)
 
 	s.logger.DebugContext(ctx, "creating sandbox", "idempotencyKey", idempotencyKey)
 
 	if err := spec.Validate(); err != nil {
-		return nil, Wrap(op, msg, err)
+		return nil, store.Wrap(op, msg, err)
 	}
 
 	key, err := s.GetIdempotencyKey(ctx, idempotencyKey)
 	if err != nil {
-		return nil, Wrap(op, msg, err)
+		return nil, store.Wrap(op, msg, err)
 	}
 	if key != nil {
-		sandbox, err := s.GetSandbox(ctx, key.SandboxID)
+		sbx, err := s.GetSandbox(ctx, key.SandboxID)
 		if err != nil {
-			return nil, Wrap(op, msg, err)
+			return nil, store.Wrap(op, msg, err)
 		}
 		s.logger.InfoContext(ctx, "returning existing sandbox for idempotency key",
-			"idempotencyKey", idempotencyKey, "sandboxID", sandbox.SandboxID, "state", sandbox.State)
-		return sandbox, nil
+			"idempotencyKey", idempotencyKey, "sandboxID", sbx.SandboxID, "state", sbx.State)
+		return sbx, nil
 	}
 
 	specJSON, err := spec.ToJSON()
 	if err != nil {
-		return nil, Wrap(op, msg, err)
+		return nil, store.Wrap(op, msg, err)
 	}
 
 	sandboxID := runtime.NewSandboxID()
@@ -291,60 +293,60 @@ func (s *SqlliteStore) CreateSandbox(ctx context.Context, idempotencyKey string,
 	// would create a second one — the exact outcome the key exists to prevent.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, E(op, msg, err)
+		return nil, store.E(op, msg, err)
 	}
 	defer tx.Rollback()
 
-	sandbox, err := scanSandboxRow(tx.QueryRowContext(ctx, InsertSandboxQuery, Pending, specJSON, sandboxID))
+	sbx, err := scanSandboxRow(tx.QueryRowContext(ctx, InsertSandboxQuery, sandbox.Pending, specJSON, sandboxID))
 	if err != nil {
-		return nil, Wrap(op, msg, err)
+		return nil, store.Wrap(op, msg, err)
 	}
 
-	if _, err := scanIdempotencyKey(tx.QueryRowContext(ctx, InsertIdempotencyKeyQuery, idempotencyKey, sandbox.SandboxID)); err != nil {
-		return nil, Wrap(op, msg, err)
+	if _, err := scanIdempotencyKey(tx.QueryRowContext(ctx, InsertIdempotencyKeyQuery, idempotencyKey, sbx.SandboxID)); err != nil {
+		return nil, store.Wrap(op, msg, err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, E(op, msg, err)
+		return nil, store.E(op, msg, err)
 	}
 
-	s.logger.InfoContext(ctx, "sandbox record created", "sandboxID", sandbox.SandboxID, "state", sandbox.State)
+	s.logger.InfoContext(ctx, "sandbox record created", "sandboxID", sbx.SandboxID, "state", sbx.State)
 
-	return sandbox, nil
+	return sbx, nil
 }
 
-func (s *SqlliteStore) GetSandbox(ctx context.Context, sandboxID string) (*Sandbox, error) {
+func (s *Store) GetSandbox(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error) {
 	s.logger.DebugContext(ctx, "reading sandbox", "sandboxID", sandboxID)
 
-	sandbox, err := scanSandboxRow(s.db.QueryRowContext(ctx, GetSandboxQuery, sandboxID))
+	sbx, err := scanSandboxRow(s.db.QueryRowContext(ctx, GetSandboxQuery, sandboxID))
 	if err != nil {
-		return nil, Wrap("store.SqlliteStore.GetSandbox",
+		return nil, store.Wrap("sqlite.Store.GetSandbox",
 			fmt.Sprintf("reading sandbox %s", sandboxID), err)
 	}
 
-	return sandbox, nil
+	return sbx, nil
 }
 
-func (s *SqlliteStore) GetSandboxes(ctx context.Context) ([]*Sandbox, error) {
+func (s *Store) GetSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error) {
 	s.logger.DebugContext(ctx, "listing sandboxes")
 
 	rows, err := s.db.QueryContext(ctx, GetSandboxesQuery)
 	if err != nil {
-		return nil, E("store.SqlliteStore.GetSandboxes", "listing sandboxes", err)
+		return nil, store.E("sqlite.Store.GetSandboxes", "listing sandboxes", err)
 	}
 	defer rows.Close()
 
 	sandboxes, err := scanSandboxes(rows)
 	if err != nil {
-		return nil, Wrap("store.SqlliteStore.GetSandboxes", "listing sandboxes", err)
+		return nil, store.Wrap("sqlite.Store.GetSandboxes", "listing sandboxes", err)
 	}
 
 	return sandboxes, nil
 }
 
-func (s *SqlliteStore) Cleanup() error {
+func (s *Store) Cleanup() error {
 	if err := s.db.Close(); err != nil {
-		return E("store.SqlliteStore.Cleanup", "closing database", err)
+		return store.E("sqlite.Store.Cleanup", "closing database", err)
 	}
 
 	s.logger.Info("store closed")

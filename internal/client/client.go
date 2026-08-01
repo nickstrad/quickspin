@@ -1,5 +1,5 @@
 // Package client speaks the control plane's JSON API. It is the same surface a
-// published SDK would expose, which is why it decodes the shared httpapi
+// published SDK would expose, which is why it decodes the shared internal/api
 // envelope rather than defining wire types of its own.
 package client
 
@@ -15,9 +15,9 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/nickstrad/quickspin/internal/httpapi"
+	"github.com/nickstrad/quickspin/internal/api"
 	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/store"
+	"github.com/nickstrad/quickspin/internal/sandbox"
 )
 
 // DefaultBaseURL is where `quickspin serve` listens by default.
@@ -68,8 +68,8 @@ func HasCode(err error, code string) bool {
 	return apiErr.Code == code
 }
 
-func (c *Client) CreateSandbox(ctx context.Context, idempotencyKey string, spec store.SpecFile) (*store.Sandbox, error) {
-	var resp httpapi.SandboxResponse
+func (c *Client) CreateSandbox(ctx context.Context, idempotencyKey string, spec sandbox.SpecFile) (*sandbox.Sandbox, error) {
+	var resp api.SandboxResponse
 	err := c.do(ctx, request{
 		method:         http.MethodPost,
 		path:           "/v1/sandboxes",
@@ -83,12 +83,12 @@ func (c *Client) CreateSandbox(ctx context.Context, idempotencyKey string, spec 
 	return resp.Sandbox(), nil
 }
 
-func (c *Client) ListSandboxes(ctx context.Context) ([]*store.Sandbox, error) {
-	var resp []httpapi.SandboxResponse
+func (c *Client) ListSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error) {
+	var resp []api.SandboxResponse
 	if err := c.do(ctx, request{method: http.MethodGet, path: "/v1/sandboxes", out: &resp}); err != nil {
 		return nil, err
 	}
-	sbxs := make([]*store.Sandbox, len(resp))
+	sbxs := make([]*sandbox.Sandbox, len(resp))
 	for i, r := range resp {
 		sbxs[i] = r.Sandbox()
 	}
@@ -96,7 +96,7 @@ func (c *Client) ListSandboxes(ctx context.Context) ([]*store.Sandbox, error) {
 }
 
 func (c *Client) InspectSandbox(ctx context.Context, sandboxID string) (runtime.Info, error) {
-	var resp httpapi.InfoResponse
+	var resp api.InfoResponse
 	err := c.do(ctx, request{method: http.MethodGet, path: sandboxPath(sandboxID), out: &resp})
 	return resp.Info(), err
 }
@@ -111,11 +111,11 @@ func (c *Client) Exec(
 	cmd []string,
 	opts runtime.ExecOpts,
 ) (runtime.ExecResult, error) {
-	var resp httpapi.ExecResponse
+	var resp api.ExecResponse
 	err := c.do(ctx, request{
 		method: http.MethodPost,
 		path:   sandboxPath(sandboxID) + "/exec",
-		body:   httpapi.ExecRequest{Command: cmd, Options: httpapi.NewExecOptions(opts)},
+		body:   api.ExecRequest{Command: cmd, Options: api.NewExecOptions(opts)},
 		out:    &resp,
 	})
 	if err != nil {
@@ -133,7 +133,7 @@ func (c *Client) WriteFile(
 	return c.do(ctx, request{
 		method: http.MethodPut,
 		path:   sandboxPath(sandboxID) + "/files",
-		body: httpapi.WriteInSandboxRequest{
+		body: api.WriteInSandboxRequest{
 			Path:     path,
 			Content:  content,
 			FileMode: int64(mode),
@@ -155,7 +155,7 @@ func (c *Client) ReadFile(ctx context.Context, sandboxID, path string) ([]byte, 
 }
 
 func (c *Client) ListDir(ctx context.Context, sandboxID, path string) ([]runtime.FileInfo, error) {
-	var resp []httpapi.FileInfoResponse
+	var resp []api.FileInfoResponse
 	err := c.do(ctx, request{
 		method: http.MethodGet,
 		path:   sandboxPath(sandboxID) + "/dir",
@@ -221,7 +221,7 @@ func (c *Client) do(ctx context.Context, req request) error {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
 	if req.idempotencyKey != "" {
-		httpReq.Header.Set(httpapi.IdempotencyKeyHeader, req.idempotencyKey)
+		httpReq.Header.Set(api.IdempotencyKeyHeader, req.idempotencyKey)
 	}
 
 	resp, err := c.http.Do(httpReq)
@@ -252,10 +252,10 @@ func (c *Client) do(ctx context.Context, req request) error {
 func decodeError(resp *http.Response) error {
 	apiErr := &Error{
 		Status: resp.StatusCode,
-		Code:   httpapi.CodeForStatus(resp.StatusCode),
+		Code:   api.CodeForStatus(resp.StatusCode),
 	}
 
-	var envelope httpapi.ErrorResponse
+	var envelope api.ErrorResponse
 	if err := json.NewDecoder(resp.Body).Decode(&envelope); err == nil && envelope.Error.Code != "" {
 		apiErr.Code = envelope.Error.Code
 		apiErr.Message = envelope.Error.Message

@@ -5,7 +5,7 @@
 // Every test here answers a question the pure tests structurally cannot: whether
 // the kernel actually enforces what Spec asked for. TestSpecToHostConfigMapsEveryLimit
 // proves quickspin sent the right numbers; only these prove anything received them.
-package runtime_test
+package docker_test
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
+	"github.com/nickstrad/quickspin/internal/runtime/docker"
 )
 
 const (
@@ -48,7 +49,7 @@ func liveSpec(t *testing.T) runtime.Spec {
 // fresh context rather than t.Context(): the testing package cancels that just
 // before cleanups run, so a cleanup reaching for it would fail exactly when
 // there was something to destroy.
-func newSandbox(t *testing.T, rt *runtime.DockerRuntime, spec runtime.Spec) string {
+func newSandbox(t *testing.T, rt *docker.Runtime, spec runtime.Spec) string {
 	t.Helper()
 
 	info, err := rt.Create(t.Context(), runtime.NewSandboxID(), spec)
@@ -372,7 +373,7 @@ func TestNetworkAllowedWhenRequested(t *testing.T) {
 
 // execOrFatal runs a command whose failure means the test cannot proceed, as
 // distinct from a command whose exit code is the thing under test.
-func execOrFatal(t *testing.T, rt *runtime.DockerRuntime, id string, cmd []string) string {
+func execOrFatal(t *testing.T, rt *docker.Runtime, id string, cmd []string) string {
 	t.Helper()
 
 	result, err := rt.Exec(t.Context(), id, cmd, runtime.ExecOpts{Timeout: execTimeout})

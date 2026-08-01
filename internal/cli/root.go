@@ -10,13 +10,13 @@ import (
 
 	"github.com/nickstrad/quickspin/internal/client"
 	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/store"
+	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/spf13/cobra"
 )
 
 type sandboxAPI interface {
-	CreateSandbox(ctx context.Context, idempotencyKey string, spec store.SpecFile) (*store.Sandbox, error)
-	ListSandboxes(ctx context.Context) ([]*store.Sandbox, error)
+	CreateSandbox(ctx context.Context, idempotencyKey string, spec sandbox.SpecFile) (*sandbox.Sandbox, error)
+	ListSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error)
 	InspectSandbox(ctx context.Context, sandboxID string) (runtime.Info, error)
 	DestroySandbox(ctx context.Context, sandboxID string) error
 	Exec(ctx context.Context, sandboxID string, cmd []string, opts runtime.ExecOpts) (runtime.ExecResult, error)

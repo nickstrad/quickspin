@@ -1,4 +1,4 @@
-package runtime
+package docker
 
 import (
 	"bytes"
@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
 // Entry-level archive properties (parent dirs, modes, content) are pinned in
@@ -50,7 +52,7 @@ func TestWriteFileRejectsInvalidPathBeforeDocker(t *testing.T) {
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
 	err := rt.WriteFile(t.Context(), testSandboxID, "/work/../etc/passwd", []byte("nope"), 0o600)
-	if !errors.Is(err, ErrInvalidPath) {
+	if !errors.Is(err, runtime.ErrInvalidPath) {
 		t.Fatalf("WriteFile error = %v, want ErrInvalidPath", err)
 	}
 	if got := daemon.routes(); len(got) != 0 {
@@ -77,7 +79,7 @@ func TestWriteFilePreservesNotFoundSentinel(t *testing.T) {
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
 	err := rt.WriteFile(t.Context(), testSandboxID, "/work/main.go", []byte("package main"), 0o644)
-	if !errors.Is(err, ErrNotFound) {
+	if !errors.Is(err, runtime.ErrNotFound) {
 		t.Fatalf("WriteFile error = %v, want ErrNotFound", err)
 	}
 }

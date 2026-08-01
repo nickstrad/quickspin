@@ -13,9 +13,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nickstrad/quickspin/internal/api"
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
+	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/nickstrad/quickspin/internal/store"
+	"github.com/nickstrad/quickspin/internal/store/sqlite"
 )
 
 func newTestAPI(t *testing.T) *API {
@@ -23,13 +26,13 @@ func newTestAPI(t *testing.T) *API {
 	return newTestAPIWithStore(t, newTestStore(t))
 }
 
-func newTestStore(t *testing.T) *store.SqlliteStore {
+func newTestStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.NewSqlliteStore(context.Background(), ":memory:", "", logger)
+	st, err := sqlite.New(context.Background(), ":memory:", "", logger)
 	if err != nil {
-		t.Fatalf("NewSqlliteStore(:memory:) error = %v, want nil", err)
+		t.Fatalf("sqlite.New(:memory:) error = %v, want nil", err)
 	}
 	t.Cleanup(func() {
 		if err := st.Cleanup(); err != nil {
@@ -61,9 +64,9 @@ func newTestAPIWithStore(t *testing.T, st store.Store) *API {
 func newTestAPIWithRuntime(t *testing.T, st store.Store, rt runtime.Runtime) *API {
 	t.Helper()
 
-	api := NewAPI("127.0.0.1", 0, slog.New(slog.NewTextHandler(io.Discard, nil)), st, rt)
-	api.Handler()
-	return &api
+	srv := NewAPI("127.0.0.1", 0, slog.New(slog.NewTextHandler(io.Discard, nil)), st, rt)
+	srv.Handler()
+	return &srv
 }
 
 // fakeStore scripts one method at a time. Every unset method is nil, so a
@@ -71,29 +74,29 @@ func newTestAPIWithRuntime(t *testing.T, st store.Store, rt runtime.Runtime) *AP
 // the case did not intend.
 type fakeStore struct {
 	store.Store
-	createSandbox      func(ctx context.Context, key string, spec store.SpecFile) (*store.Sandbox, error)
-	getSandbox         func(ctx context.Context, sandboxID string) (*store.Sandbox, error)
-	getSandboxes       func(ctx context.Context) ([]*store.Sandbox, error)
-	updateSandboxState func(ctx context.Context, sandboxID string, from, to store.TaskState) (*store.Sandbox, error)
+	createSandbox      func(ctx context.Context, key string, spec sandbox.SpecFile) (*sandbox.Sandbox, error)
+	getSandbox         func(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error)
+	getSandboxes       func(ctx context.Context) ([]*sandbox.Sandbox, error)
+	updateSandboxState func(ctx context.Context, sandboxID string, from, to sandbox.TaskState) (*sandbox.Sandbox, error)
 }
 
-func (f *fakeStore) CreateSandbox(ctx context.Context, key string, spec store.SpecFile) (*store.Sandbox, error) {
+func (f *fakeStore) CreateSandbox(ctx context.Context, key string, spec sandbox.SpecFile) (*sandbox.Sandbox, error) {
 	return f.createSandbox(ctx, key, spec)
 }
 
-func (f *fakeStore) GetSandbox(ctx context.Context, sandboxID string) (*store.Sandbox, error) {
+func (f *fakeStore) GetSandbox(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error) {
 	return f.getSandbox(ctx, sandboxID)
 }
 
-func (f *fakeStore) GetSandboxes(ctx context.Context) ([]*store.Sandbox, error) {
+func (f *fakeStore) GetSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error) {
 	return f.getSandboxes(ctx)
 }
 
-func (f *fakeStore) UpdateSandboxState(ctx context.Context, sandboxID string, from, to store.TaskState) (*store.Sandbox, error) {
+func (f *fakeStore) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState) (*sandbox.Sandbox, error) {
 	return f.updateSandboxState(ctx, sandboxID, from, to)
 }
 
-func do(t *testing.T, api *API, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
+func do(t *testing.T, srv *API, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 
 	var reader io.Reader
@@ -106,20 +109,20 @@ func do(t *testing.T, api *API, method, path, body string, headers map[string]st
 	}
 
 	rec := httptest.NewRecorder()
-	api.Router.ServeHTTP(rec, req)
+	srv.Router.ServeHTTP(rec, req)
 	return rec
 }
 
 func withKey(key string) map[string]string {
-	return map[string]string{IdempotencyKeyHeader: key}
+	return map[string]string{api.IdempotencyKeyHeader: key}
 }
 
 // mustCreate returns the decoded record so later requests can address the
 // sandbox by the id the API itself handed out.
-func mustCreate(t *testing.T, api *API, key, body string) map[string]any {
+func mustCreate(t *testing.T, srv *API, key, body string) map[string]any {
 	t.Helper()
 
-	rec := do(t, api, http.MethodPost, "/v1/sandboxes", body, withKey(key))
+	rec := do(t, srv, http.MethodPost, "/v1/sandboxes", body, withKey(key))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("POST /v1/sandboxes = %d, want %d (body %s)", rec.Code, http.StatusCreated, rec.Body.String())
 	}
@@ -136,10 +139,10 @@ func decodeObject(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	return got
 }
 
-func decodeError(t *testing.T, rec *httptest.ResponseRecorder) ErrorResponse {
+func decodeError(t *testing.T, rec *httptest.ResponseRecorder) api.ErrorResponse {
 	t.Helper()
 
-	var got ErrorResponse
+	var got api.ErrorResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decoding error envelope %q error = %v, want nil", rec.Body.String(), err)
 	}
@@ -174,28 +177,28 @@ func TestStartReturnsTheBindError(t *testing.T) {
 	t.Cleanup(func() { held.Close() })
 	port := held.Addr().(*net.TCPAddr).Port
 
-	api := NewAPI("127.0.0.1", port, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	srv := NewAPI("127.0.0.1", port, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
 
 	// Unbuffered and never closed: Start must return without it, so a Start that
 	// still waits for a shutdown signal hangs the test rather than passing.
-	if err := api.Start(make(chan struct{})); err == nil {
+	if err := srv.Start(make(chan struct{})); err == nil {
 		t.Fatal("Start() error = nil, want the address-in-use failure")
 	}
 }
 
 // Stop on an API that never started is the path a failed Start leaves behind.
 func TestStopBeforeStartIsNotAnError(t *testing.T) {
-	api := NewAPI("127.0.0.1", 0, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	srv := NewAPI("127.0.0.1", 0, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
 
-	if err := api.Stop(); err != nil {
+	if err := srv.Stop(); err != nil {
 		t.Errorf("Stop() error = %v, want nil", err)
 	}
 }
 
 func TestCreateSandboxReturnsCreatedRecord(t *testing.T) {
-	api := newTestAPI(t)
+	srv := newTestAPI(t)
 
-	rec := do(t, api, http.MethodPost, "/v1/sandboxes", alpineSpec, withKey("k1"))
+	rec := do(t, srv, http.MethodPost, "/v1/sandboxes", alpineSpec, withKey("k1"))
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusCreated, rec.Body.String())
@@ -210,8 +213,8 @@ func TestCreateSandboxReturnsCreatedRecord(t *testing.T) {
 	}
 	// Pending is the row's initial state, not what the caller sees: the response
 	// is written after the runtime create succeeds and the row transitions.
-	if got["state"] != string(store.Running) {
-		t.Errorf("state = %v, want %q", got["state"], store.Running)
+	if got["state"] != string(sandbox.Running) {
+		t.Errorf("state = %v, want %q", got["state"], sandbox.Running)
 	}
 	spec, ok := got["spec"].(map[string]any)
 	if !ok || spec["image"] != "alpine:3.20" {
@@ -223,16 +226,16 @@ func TestCreateSandboxWithNoFieldsUsesTheDefaultImage(t *testing.T) {
 	st := newTestStore(t)
 
 	var gotSpec runtime.Spec
-	api := newTestAPIWithRuntime(t, st, runtimetest.Fake{
+	srv := newTestAPIWithRuntime(t, st, runtimetest.Fake{
 		CreateFn: func(_ context.Context, _ string, spec runtime.Spec) (runtime.Info, error) {
 			gotSpec = spec
 			return runtime.Info{}, nil
 		},
 	})
 
-	record := mustCreate(t, api, "k1", `{}`)
-	if gotSpec.Image != store.DefaultImage {
-		t.Errorf("runtime image = %q, want %q", gotSpec.Image, store.DefaultImage)
+	record := mustCreate(t, srv, "k1", `{}`)
+	if gotSpec.Image != sandbox.DefaultImage {
+		t.Errorf("runtime image = %q, want %q", gotSpec.Image, sandbox.DefaultImage)
 	}
 
 	// Stored specs remain unresolved so defaults can change independently.
@@ -245,9 +248,9 @@ func TestCreateSandboxWithNoFieldsUsesTheDefaultImage(t *testing.T) {
 // The autoincrement row id is an internal key; a client that learns it can
 // enumerate every sandbox on the host.
 func TestCreateSandboxDoesNotLeakRowID(t *testing.T) {
-	api := newTestAPI(t)
+	srv := newTestAPI(t)
 
-	got := mustCreate(t, api, "k1", alpineSpec)
+	got := mustCreate(t, srv, "k1", alpineSpec)
 
 	if _, ok := got["id"]; ok {
 		t.Errorf("response %#v contains the row id, want it omitted", got)
@@ -267,47 +270,47 @@ func TestCreateSandboxRejectsBadRequests(t *testing.T) {
 			key:    "",
 			body:   alpineSpec,
 			status: http.StatusBadRequest,
-			code:   CodeInvalidRequest,
+			code:   api.CodeInvalidRequest,
 		},
 		{
 			name:   "empty body",
 			key:    "k1",
 			body:   "",
 			status: http.StatusBadRequest,
-			code:   CodeInvalidRequest,
+			code:   api.CodeInvalidRequest,
 		},
 		{
 			name:   "malformed json",
 			key:    "k1",
 			body:   `{"image":`,
 			status: http.StatusBadRequest,
-			code:   CodeInvalidRequest,
+			code:   api.CodeInvalidRequest,
 		},
 		{
 			name:   "unknown field",
 			key:    "k1",
 			body:   `{"image":"alpine:3.20","gpus":4}`,
 			status: http.StatusBadRequest,
-			code:   CodeInvalidRequest,
+			code:   api.CodeInvalidRequest,
 		},
 		{
 			name:   "unrecognized keys only",
 			key:    "k1",
 			body:   `{"gpus":4}`,
 			status: http.StatusBadRequest,
-			code:   CodeInvalidRequest,
+			code:   api.CodeInvalidRequest,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			api := newTestAPI(t)
+			srv := newTestAPI(t)
 
 			headers := map[string]string{}
 			if tt.key != "" {
-				headers[IdempotencyKeyHeader] = tt.key
+				headers[api.IdempotencyKeyHeader] = tt.key
 			}
-			rec := do(t, api, http.MethodPost, "/v1/sandboxes", tt.body, headers)
+			rec := do(t, srv, http.MethodPost, "/v1/sandboxes", tt.body, headers)
 
 			if rec.Code != tt.status {
 				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tt.status, rec.Body.String())
@@ -320,10 +323,10 @@ func TestCreateSandboxRejectsBadRequests(t *testing.T) {
 }
 
 func TestCreateSandboxIsIdempotentAcrossRequests(t *testing.T) {
-	api := newTestAPI(t)
+	srv := newTestAPI(t)
 
-	first := mustCreate(t, api, "same-operation", alpineSpec)
-	second := mustCreate(t, api, "same-operation", `{"image":"debian:12"}`)
+	first := mustCreate(t, srv, "same-operation", alpineSpec)
+	second := mustCreate(t, srv, "same-operation", `{"image":"debian:12"}`)
 
 	if sandboxID(t, second) != sandboxID(t, first) {
 		t.Errorf("retry sandbox_id = %q, want the original %q", sandboxID(t, second), sandboxID(t, first))
@@ -336,7 +339,7 @@ func TestCreateSandboxIsIdempotentAcrossRequests(t *testing.T) {
 		t.Errorf("retry spec.image = %v, want the original alpine:3.20", spec["image"])
 	}
 
-	list := do(t, api, http.MethodGet, "/v1/sandboxes", "", nil)
+	list := do(t, srv, http.MethodGet, "/v1/sandboxes", "", nil)
 	var records []map[string]any
 	if err := json.Unmarshal(list.Body.Bytes(), &records); err != nil {
 		t.Fatalf("decoding list error = %v, want nil", err)
@@ -352,13 +355,13 @@ func TestCreateSandboxIsIdempotentAcrossRequests(t *testing.T) {
 func TestCreateSandboxMarksTheSandboxFailedWhenTheRuntimeFails(t *testing.T) {
 	st := newTestStore(t)
 
-	api := newTestAPIWithRuntime(t, st, runtimetest.Fake{
+	srv := newTestAPIWithRuntime(t, st, runtimetest.Fake{
 		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
 			return runtime.Info{}, errors.New("no such image")
 		},
 	})
 
-	rec := do(t, api, http.MethodPost, "/v1/sandboxes", alpineSpec, withKey("k1"))
+	rec := do(t, srv, http.MethodPost, "/v1/sandboxes", alpineSpec, withKey("k1"))
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusInternalServerError, rec.Body.String())
 	}
@@ -370,27 +373,27 @@ func TestCreateSandboxMarksTheSandboxFailedWhenTheRuntimeFails(t *testing.T) {
 	if len(sandboxes) != 1 {
 		t.Fatalf("GetSandboxes() returned %d sandboxes, want 1", len(sandboxes))
 	}
-	if sandboxes[0].State != store.Failed {
-		t.Errorf("State = %q, want %q", sandboxes[0].State, store.Failed)
+	if sandboxes[0].State != sandbox.Failed {
+		t.Errorf("State = %q, want %q", sandboxes[0].State, sandbox.Failed)
 	}
 }
 
 func TestCreateSandboxMapsStoreFailureTo500(t *testing.T) {
 	boom := errors.New("database is on fire")
-	api := newTestAPIWithStore(t, &fakeStore{
-		createSandbox: func(context.Context, string, store.SpecFile) (*store.Sandbox, error) {
+	srv := newTestAPIWithStore(t, &fakeStore{
+		createSandbox: func(context.Context, string, sandbox.SpecFile) (*sandbox.Sandbox, error) {
 			return nil, boom
 		},
 	})
 
-	rec := do(t, api, http.MethodPost, "/v1/sandboxes", alpineSpec, withKey("k1"))
+	rec := do(t, srv, http.MethodPost, "/v1/sandboxes", alpineSpec, withKey("k1"))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
 	got := decodeError(t, rec)
-	if got.Error.Code != CodeInternal {
-		t.Errorf("error code = %q, want %q", got.Error.Code, CodeInternal)
+	if got.Error.Code != api.CodeInternal {
+		t.Errorf("error code = %q, want %q", got.Error.Code, api.CodeInternal)
 	}
 	// The operator reads the cause in the log; the client reads prose. Leaking
 	// the chain tells an attacker what the backend is.
@@ -400,9 +403,9 @@ func TestCreateSandboxMapsStoreFailureTo500(t *testing.T) {
 }
 
 func TestListSandboxesReturnsEmptyArray(t *testing.T) {
-	api := newTestAPI(t)
+	srv := newTestAPI(t)
 
-	rec := do(t, api, http.MethodGet, "/v1/sandboxes", "", nil)
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes", "", nil)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
@@ -414,12 +417,12 @@ func TestListSandboxesReturnsEmptyArray(t *testing.T) {
 }
 
 func TestListSandboxesReturnsEveryRecord(t *testing.T) {
-	api := newTestAPI(t)
+	srv := newTestAPI(t)
 
-	first := mustCreate(t, api, "k1", alpineSpec)
-	second := mustCreate(t, api, "k2", `{"image":"debian:12"}`)
+	first := mustCreate(t, srv, "k1", alpineSpec)
+	second := mustCreate(t, srv, "k2", `{"image":"debian:12"}`)
 
-	rec := do(t, api, http.MethodGet, "/v1/sandboxes", "", nil)
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes", "", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
 	}
@@ -447,30 +450,30 @@ func TestListSandboxesReturnsEveryRecord(t *testing.T) {
 }
 
 func TestListSandboxesMapsStoreFailureTo500(t *testing.T) {
-	api := newTestAPIWithStore(t, &fakeStore{
-		getSandboxes: func(context.Context) ([]*store.Sandbox, error) {
+	srv := newTestAPIWithStore(t, &fakeStore{
+		getSandboxes: func(context.Context) ([]*sandbox.Sandbox, error) {
 			return nil, errors.New("database is on fire")
 		},
 	})
 
-	rec := do(t, api, http.MethodGet, "/v1/sandboxes", "", nil)
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes", "", nil)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
-	if got := decodeError(t, rec); got.Error.Code != CodeInternal {
-		t.Errorf("error code = %q, want %q", got.Error.Code, CodeInternal)
+	if got := decodeError(t, rec); got.Error.Code != api.CodeInternal {
+		t.Errorf("error code = %q, want %q", got.Error.Code, api.CodeInternal)
 	}
 }
 
 // Inspect reports the runtime's view of a running sandbox, so the body is the
 // container info, not the store row.
 func TestInspectSandboxReturnsRuntimeInfo(t *testing.T) {
-	api := newTestAPI(t)
-	created := mustCreate(t, api, "k1", alpineSpec)
+	srv := newTestAPI(t)
+	created := mustCreate(t, srv, "k1", alpineSpec)
 	id := sandboxID(t, created)
 
-	rec := do(t, api, http.MethodGet, "/v1/sandboxes/"+id, "", nil)
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes/"+id, "", nil)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
@@ -487,42 +490,42 @@ func TestInspectSandboxReturnsRuntimeInfo(t *testing.T) {
 // The id exists but the sandbox has no container yet, so the honest answer is
 // a conflict, not the 404 the runtime would report.
 func TestInspectPendingSandboxReturns409(t *testing.T) {
-	api := newTestAPIWithStore(t, &fakeStore{
-		getSandbox: func(context.Context, string) (*store.Sandbox, error) {
-			return &store.Sandbox{State: store.Pending}, nil
+	srv := newTestAPIWithStore(t, &fakeStore{
+		getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
+			return &sandbox.Sandbox{State: sandbox.Pending}, nil
 		},
 	})
 
-	rec := do(t, api, http.MethodGet, "/v1/sandboxes/sbx_pending", "", nil)
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes/sbx_pending", "", nil)
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusConflict, rec.Body.String())
 	}
-	if got := decodeError(t, rec); got.Error.Code != CodeConflict {
-		t.Errorf("error code = %q, want %q", got.Error.Code, CodeConflict)
+	if got := decodeError(t, rec); got.Error.Code != api.CodeConflict {
+		t.Errorf("error code = %q, want %q", got.Error.Code, api.CodeConflict)
 	}
 }
 
 // store.ErrNotFound is the store's sentinel, not httpapi's; the handler is the
 // one place allowed to translate it into a status.
 func TestInspectUnknownSandboxReturns404(t *testing.T) {
-	api := newTestAPI(t)
+	srv := newTestAPI(t)
 
-	rec := do(t, api, http.MethodGet, "/v1/sandboxes/sbx_00000000-0000-0000-0000-000000000000", "", nil)
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes/sbx_00000000-0000-0000-0000-000000000000", "", nil)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
-	if got := decodeError(t, rec); got.Error.Code != CodeNotFound {
-		t.Errorf("error code = %q, want %q", got.Error.Code, CodeNotFound)
+	if got := decodeError(t, rec); got.Error.Code != api.CodeNotFound {
+		t.Errorf("error code = %q, want %q", got.Error.Code, api.CodeNotFound)
 	}
 }
 
 // A malformed id must not read as a database outage.
 func TestInspectMalformedSandboxIDReturns404(t *testing.T) {
-	api := newTestAPI(t)
+	srv := newTestAPI(t)
 
-	rec := do(t, api, http.MethodGet, "/v1/sandboxes/not-an-id", "", nil)
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes/not-an-id", "", nil)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNotFound, rec.Body.String())
@@ -530,19 +533,19 @@ func TestInspectMalformedSandboxIDReturns404(t *testing.T) {
 }
 
 func TestInspectSandboxMapsStoreFailureTo500(t *testing.T) {
-	api := newTestAPIWithStore(t, &fakeStore{
-		getSandbox: func(context.Context, string) (*store.Sandbox, error) {
+	srv := newTestAPIWithStore(t, &fakeStore{
+		getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
 			return nil, errors.New("database is on fire")
 		},
 	})
 
-	rec := do(t, api, http.MethodGet, "/v1/sandboxes/sbx_whatever", "", nil)
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes/sbx_whatever", "", nil)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
-	if got := decodeError(t, rec); got.Error.Code != CodeInternal {
-		t.Errorf("error code = %q, want %q", got.Error.Code, CodeInternal)
+	if got := decodeError(t, rec); got.Error.Code != api.CodeInternal {
+		t.Errorf("error code = %q, want %q", got.Error.Code, api.CodeInternal)
 	}
 }
 
@@ -551,7 +554,7 @@ func TestInspectSandboxMapsStoreFailureTo500(t *testing.T) {
 // 500 for the same condition.
 func TestInspectSandboxMapsAMissingContainerTo404(t *testing.T) {
 	st := newTestStore(t)
-	api := newTestAPIWithRuntime(t, st, runtimetest.Fake{
+	srv := newTestAPIWithRuntime(t, st, runtimetest.Fake{
 		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
 			return runtime.Info{}, nil
 		},
@@ -559,23 +562,23 @@ func TestInspectSandboxMapsAMissingContainerTo404(t *testing.T) {
 			return runtime.Info{}, runtime.E("runtime.Fake.Inspect", "no such container", runtime.ErrNotFound)
 		},
 	})
-	id := sandboxID(t, mustCreate(t, api, "k1", alpineSpec))
+	id := sandboxID(t, mustCreate(t, srv, "k1", alpineSpec))
 
-	rec := do(t, api, http.MethodGet, "/v1/sandboxes/"+id, "", nil)
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes/"+id, "", nil)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
-	if got := decodeError(t, rec); got.Error.Code != CodeNotFound {
-		t.Errorf("error code = %q, want %q", got.Error.Code, CodeNotFound)
+	if got := decodeError(t, rec); got.Error.Code != api.CodeNotFound {
+		t.Errorf("error code = %q, want %q", got.Error.Code, api.CodeNotFound)
 	}
 }
 
 func TestDestroySandboxReturns204WithNoBody(t *testing.T) {
-	api := newTestAPI(t)
-	id := sandboxID(t, mustCreate(t, api, "k1", alpineSpec))
+	srv := newTestAPI(t)
+	id := sandboxID(t, mustCreate(t, srv, "k1", alpineSpec))
 
-	rec := do(t, api, http.MethodDelete, "/v1/sandboxes/"+id, "", nil)
+	rec := do(t, srv, http.MethodDelete, "/v1/sandboxes/"+id, "", nil)
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNoContent, rec.Body.String())
@@ -588,11 +591,11 @@ func TestDestroySandboxReturns204WithNoBody(t *testing.T) {
 // "Already gone" is the outcome the caller asked for, so it is a success. The
 // second DELETE must not depend on the first having happened in this process.
 func TestDeleteIsIdempotent(t *testing.T) {
-	api := newTestAPI(t)
-	id := sandboxID(t, mustCreate(t, api, "k1", alpineSpec))
+	srv := newTestAPI(t)
+	id := sandboxID(t, mustCreate(t, srv, "k1", alpineSpec))
 
 	for i := range 2 {
-		rec := do(t, api, http.MethodDelete, "/v1/sandboxes/"+id, "", nil)
+		rec := do(t, srv, http.MethodDelete, "/v1/sandboxes/"+id, "", nil)
 		if rec.Code != http.StatusNoContent {
 			t.Fatalf("DELETE #%d status = %d, want %d (body %s)", i+1, rec.Code, http.StatusNoContent, rec.Body.String())
 		}
@@ -600,9 +603,9 @@ func TestDeleteIsIdempotent(t *testing.T) {
 }
 
 func TestDestroyUnknownSandboxReturns204(t *testing.T) {
-	api := newTestAPI(t)
+	srv := newTestAPI(t)
 
-	rec := do(t, api, http.MethodDelete, "/v1/sandboxes/sbx_00000000-0000-0000-0000-000000000000", "", nil)
+	rec := do(t, srv, http.MethodDelete, "/v1/sandboxes/sbx_00000000-0000-0000-0000-000000000000", "", nil)
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNoContent, rec.Body.String())
@@ -613,14 +616,14 @@ func TestDestroyUnknownSandboxReturns204(t *testing.T) {
 // missing one, so billing and plan 06's reconciler can still see it. The list
 // endpoint is the store's view; inspect-by-id needs a running container.
 func TestDestroyedSandboxRemainsListed(t *testing.T) {
-	api := newTestAPI(t)
-	id := sandboxID(t, mustCreate(t, api, "k1", alpineSpec))
+	srv := newTestAPI(t)
+	id := sandboxID(t, mustCreate(t, srv, "k1", alpineSpec))
 
-	if rec := do(t, api, http.MethodDelete, "/v1/sandboxes/"+id, "", nil); rec.Code != http.StatusNoContent {
+	if rec := do(t, srv, http.MethodDelete, "/v1/sandboxes/"+id, "", nil); rec.Code != http.StatusNoContent {
 		t.Fatalf("DELETE status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
 
-	rec := do(t, api, http.MethodGet, "/v1/sandboxes", "", nil)
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes", "", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET after DELETE status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
 	}
@@ -635,8 +638,8 @@ func TestDestroyedSandboxRemainsListed(t *testing.T) {
 	if sandboxID(t, records[0]) != id {
 		t.Errorf("listed sandbox_id = %q, want %q", sandboxID(t, records[0]), id)
 	}
-	if state := records[0]["state"]; state != string(store.Stopped) {
-		t.Errorf("state after DELETE = %v, want %q", state, store.Stopped)
+	if state := records[0]["state"]; state != string(sandbox.Stopped) {
+		t.Errorf("state after DELETE = %v, want %q", state, sandbox.Stopped)
 	}
 }
 
@@ -644,8 +647,8 @@ func TestDestroyedSandboxRemainsListed(t *testing.T) {
 // are about the runtime call behind the gate.
 func runningStore() *fakeStore {
 	return &fakeStore{
-		getSandbox: func(context.Context, string) (*store.Sandbox, error) {
-			return &store.Sandbox{State: store.Running}, nil
+		getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
+			return &sandbox.Sandbox{State: sandbox.Running}, nil
 		},
 	}
 }
@@ -673,7 +676,7 @@ func TestRuntimeSentinelsMapToClientStatuses(t *testing.T) {
 				},
 			},
 			status: http.StatusGatewayTimeout,
-			code:   CodeTimeout,
+			code:   api.CodeTimeout,
 		},
 		{
 			name:   "missing file is 404",
@@ -685,7 +688,7 @@ func TestRuntimeSentinelsMapToClientStatuses(t *testing.T) {
 				},
 			},
 			status: http.StatusNotFound,
-			code:   CodeNotFound,
+			code:   api.CodeNotFound,
 		},
 		{
 			name:   "oversized file is 413",
@@ -698,15 +701,15 @@ func TestRuntimeSentinelsMapToClientStatuses(t *testing.T) {
 				},
 			},
 			status: http.StatusRequestEntityTooLarge,
-			code:   CodeTooLarge,
+			code:   api.CodeTooLarge,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			api := newTestAPIWithRuntime(t, runningStore(), tt.rt)
+			srv := newTestAPIWithRuntime(t, runningStore(), tt.rt)
 
-			rec := do(t, api, tt.method, tt.path, tt.body, nil)
+			rec := do(t, srv, tt.method, tt.path, tt.body, nil)
 
 			if rec.Code != tt.status {
 				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tt.status, rec.Body.String())
@@ -722,7 +725,7 @@ func TestRuntimeSentinelsMapToClientStatuses(t *testing.T) {
 // semantics and proxies may drop them. An absent path fails before the store
 // is consulted — the nil fakeStore methods would panic otherwise.
 func TestFileRoutesRequirePathQueryParam(t *testing.T) {
-	api := newTestAPIWithStore(t, &fakeStore{})
+	srv := newTestAPIWithStore(t, &fakeStore{})
 
 	// DELETE on files carries the path the same way, so it is gated the same way.
 	for _, tt := range []struct{ method, path string }{
@@ -730,13 +733,13 @@ func TestFileRoutesRequirePathQueryParam(t *testing.T) {
 		{http.MethodGet, "/v1/sandboxes/sbx_x/dir"},
 		{http.MethodDelete, "/v1/sandboxes/sbx_x/files"},
 	} {
-		rec := do(t, api, tt.method, tt.path, "", nil)
+		rec := do(t, srv, tt.method, tt.path, "", nil)
 
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s %s = %d, want %d (body %s)", tt.method, tt.path, rec.Code, http.StatusBadRequest, rec.Body.String())
 		}
-		if got := decodeError(t, rec); got.Error.Code != CodeInvalidRequest {
-			t.Errorf("%s %s error code = %q, want %q", tt.method, tt.path, got.Error.Code, CodeInvalidRequest)
+		if got := decodeError(t, rec); got.Error.Code != api.CodeInvalidRequest {
+			t.Errorf("%s %s error code = %q, want %q", tt.method, tt.path, got.Error.Code, api.CodeInvalidRequest)
 		}
 	}
 }
@@ -744,32 +747,32 @@ func TestFileRoutesRequirePathQueryParam(t *testing.T) {
 // Unlike DELETE on a sandbox, removing a path is not idempotent: the caller
 // named one specific file, and the runtime is the thing that knows it is gone.
 func TestRemovePathReportsAMissingPath(t *testing.T) {
-	api := newTestAPIWithRuntime(t, runningStore(), runtimetest.Fake{
+	srv := newTestAPIWithRuntime(t, runningStore(), runtimetest.Fake{
 		RemovePathFn: func(context.Context, string, string) error {
 			return runtime.ErrPathNotFound
 		},
 	})
 
-	rec := do(t, api, http.MethodDelete, "/v1/sandboxes/sbx_x/files?path=/nope", "", nil)
+	rec := do(t, srv, http.MethodDelete, "/v1/sandboxes/sbx_x/files?path=/nope", "", nil)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
-	if got := decodeError(t, rec); got.Error.Code != CodeNotFound {
-		t.Errorf("error code = %q, want %q", got.Error.Code, CodeNotFound)
+	if got := decodeError(t, rec); got.Error.Code != api.CodeNotFound {
+		t.Errorf("error code = %q, want %q", got.Error.Code, api.CodeNotFound)
 	}
 }
 
 func TestRemovePathAnswers204(t *testing.T) {
 	var gotPath string
-	api := newTestAPIWithRuntime(t, runningStore(), runtimetest.Fake{
+	srv := newTestAPIWithRuntime(t, runningStore(), runtimetest.Fake{
 		RemovePathFn: func(_ context.Context, _, path string) error {
 			gotPath = path
 			return nil
 		},
 	})
 
-	rec := do(t, api, http.MethodDelete, "/v1/sandboxes/sbx_x/files?path=/work/build", "", nil)
+	rec := do(t, srv, http.MethodDelete, "/v1/sandboxes/sbx_x/files?path=/work/build", "", nil)
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNoContent, rec.Body.String())
@@ -783,21 +786,21 @@ func TestRemovePathAnswers204(t *testing.T) {
 }
 
 func TestOversizedRequestBodyReturns413(t *testing.T) {
-	api := newTestAPIWithStore(t, &fakeStore{})
+	srv := newTestAPIWithStore(t, &fakeStore{})
 
 	body := `{"path":"/f","content":"` + strings.Repeat("A", maxRequestBytes) + `"}`
-	rec := do(t, api, http.MethodPut, "/v1/sandboxes/sbx_x/files", body, nil)
+	rec := do(t, srv, http.MethodPut, "/v1/sandboxes/sbx_x/files", body, nil)
 
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
 	}
-	if got := decodeError(t, rec); got.Error.Code != CodeTooLarge {
-		t.Errorf("error code = %q, want %q", got.Error.Code, CodeTooLarge)
+	if got := decodeError(t, rec); got.Error.Code != api.CodeTooLarge {
+		t.Errorf("error code = %q, want %q", got.Error.Code, api.CodeTooLarge)
 	}
 }
 
 func TestRoutingRejectsUnknownPathsAndMethods(t *testing.T) {
-	api := newTestAPI(t)
+	srv := newTestAPI(t)
 
 	tests := []struct {
 		name   string
@@ -813,7 +816,7 @@ func TestRoutingRejectsUnknownPathsAndMethods(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if rec := do(t, api, tt.method, tt.path, "", nil); rec.Code != tt.status {
+			if rec := do(t, srv, tt.method, tt.path, "", nil); rec.Code != tt.status {
 				t.Errorf("%s %s = %d, want %d", tt.method, tt.path, rec.Code, tt.status)
 			}
 		})

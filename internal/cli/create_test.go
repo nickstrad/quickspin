@@ -6,19 +6,19 @@ import (
 	"testing"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/store"
+	"github.com/nickstrad/quickspin/internal/sandbox"
 )
 
-func recordingCreate(got *store.SpecFile) fakeAPI {
+func recordingCreate(got *sandbox.SpecFile) fakeAPI {
 	return fakeAPI{
-		CreateFn: func(_ context.Context, _ string, spec store.SpecFile) (*store.Sandbox, error) {
+		CreateFn: func(_ context.Context, _ string, spec sandbox.SpecFile) (*sandbox.Sandbox, error) {
 			*got = spec
-			return sandboxRecord(testID, "alpine:3.20", store.Running), nil
+			return sandboxRecord(testID, "alpine:3.20", sandbox.Running), nil
 		},
 	}
 }
 
-func mustResolve(t *testing.T, spec store.SpecFile) runtime.Spec {
+func mustResolve(t *testing.T, spec sandbox.SpecFile) runtime.Spec {
 	t.Helper()
 
 	resolved, err := spec.Resolve()
@@ -29,7 +29,7 @@ func mustResolve(t *testing.T, spec store.SpecFile) runtime.Spec {
 }
 
 func TestCreatePassesImageAndEnvironmentAndWritesATable(t *testing.T) {
-	var sent store.SpecFile
+	var sent sandbox.SpecFile
 	api := recordingCreate(&sent)
 
 	stdout, _, err := execute(t, api,
@@ -58,7 +58,7 @@ func TestCreatePassesImageAndEnvironmentAndWritesATable(t *testing.T) {
 }
 
 func TestCreateLimitFlagsReachTheSpec(t *testing.T) {
-	var sent store.SpecFile
+	var sent sandbox.SpecFile
 	api := recordingCreate(&sent)
 
 	_, _, err := execute(t, api,
@@ -90,7 +90,7 @@ func TestCreateLimitFlagsReachTheSpec(t *testing.T) {
 }
 
 func TestCreateWithoutFlagsUsesDefaults(t *testing.T) {
-	var sent store.SpecFile
+	var sent sandbox.SpecFile
 	api := recordingCreate(&sent)
 
 	if _, _, err := execute(t, api, "sandbox", "create"); err != nil {
@@ -98,8 +98,8 @@ func TestCreateWithoutFlagsUsesDefaults(t *testing.T) {
 	}
 
 	gotSpec := mustResolve(t, sent)
-	if gotSpec.Image != store.DefaultImage {
-		t.Errorf("Image = %q, want %q", gotSpec.Image, store.DefaultImage)
+	if gotSpec.Image != sandbox.DefaultImage {
+		t.Errorf("Image = %q, want %q", gotSpec.Image, sandbox.DefaultImage)
 	}
 	if err := gotSpec.Validate(); err != nil {
 		t.Errorf("default spec does not validate: %v", err)
@@ -172,9 +172,9 @@ func TestInvalidEnvironmentStopsBeforeCreate(t *testing.T) {
 func TestCreateSendsAFreshIdempotencyKey(t *testing.T) {
 	var keys []string
 	api := fakeAPI{
-		CreateFn: func(_ context.Context, key string, _ store.SpecFile) (*store.Sandbox, error) {
+		CreateFn: func(_ context.Context, key string, _ sandbox.SpecFile) (*sandbox.Sandbox, error) {
 			keys = append(keys, key)
-			return sandboxRecord(testID, "alpine:3.20", store.Running), nil
+			return sandboxRecord(testID, "alpine:3.20", sandbox.Running), nil
 		},
 	}
 

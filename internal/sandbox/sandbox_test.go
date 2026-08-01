@@ -1,4 +1,4 @@
-package store
+package sandbox
 
 import (
 	"encoding/json"
@@ -22,16 +22,16 @@ func TestCanTransitionMatrix(t *testing.T) {
 	for _, from := range states {
 		for _, to := range states {
 			t.Run(string(from)+"_to_"+string(to), func(t *testing.T) {
-				err := canTransition(from, to)
+				err := CanTransition(from, to)
 				if legal[[2]TaskState{from, to}] {
 					if err != nil {
-						t.Errorf("canTransition(%q, %q) error = %v, want nil", from, to, err)
+						t.Errorf("CanTransition(%q, %q) error = %v, want nil", from, to, err)
 					}
 					return
 				}
 				if !errors.Is(err, ErrInvalidStateTransition) {
 					t.Errorf(
-						"canTransition(%q, %q) error = %v, want ErrInvalidStateTransition",
+						"CanTransition(%q, %q) error = %v, want ErrInvalidStateTransition",
 						from,
 						to,
 						err,
@@ -55,9 +55,9 @@ func TestCanTransitionRejectsUnknownStates(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := canTransition(tt.from, tt.to); !errors.Is(err, ErrInvalidState) {
+			if err := CanTransition(tt.from, tt.to); !errors.Is(err, ErrInvalidState) {
 				t.Errorf(
-					"canTransition(%q, %q) error = %v, want ErrInvalidState",
+					"CanTransition(%q, %q) error = %v, want ErrInvalidState",
 					tt.from,
 					tt.to,
 					err,

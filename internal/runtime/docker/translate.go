@@ -1,9 +1,11 @@
-package runtime
+package docker
 
 import (
 	"maps"
 	"slices"
 	"time"
+
+	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
 // Docker reports seven statuses — created, running, paused, restarting,
@@ -21,11 +23,11 @@ var startedStates = []string{dockerRunning, dockerRestarting}
 // stateFromContainerState treats an unrecognized status as stopped: a caller who
 // believes a sandbox is stopped recreates or destroys it, where one who believes
 // a dead sandbox is running waits forever.
-func stateFromContainerState(s string) State {
+func stateFromContainerState(s string) runtime.State {
 	if slices.Contains(startedStates, s) {
-		return StateRunning
+		return runtime.StateRunning
 	}
-	return StateStopped
+	return runtime.StateStopped
 }
 
 // createdAtFromUnix converts Docker's creation timestamp, which arrives as Unix

@@ -23,7 +23,7 @@ var (
 	ErrTotalFilesTooLarge = errors.New("total files exceeds file total cap")
 )
 
-func validatePath(p string) error {
+func ValidatePath(p string) error {
 	if p == "" {
 		return ErrInvalidPath
 	}
@@ -37,9 +37,9 @@ func validatePath(p string) error {
 	return nil
 }
 
-// "/" passes validatePath but is not a readable or writable file target.
-func validateRead(filePath string) error {
-	if err := validatePath(filePath); err != nil {
+// "/" passes ValidatePath but is not a readable or writable file target.
+func ValidateRead(filePath string) error {
+	if err := ValidatePath(filePath); err != nil {
 		return err
 	}
 	if filePath == "/" {
@@ -50,12 +50,12 @@ func validateRead(filePath string) error {
 
 // A remove must never target the sandbox root; the shared not-root check is
 // the guard that enforces it.
-func validateRemove(p string) error {
-	return validateRead(p)
+func ValidateRemove(p string) error {
+	return ValidateRead(p)
 }
 
-func validateWrite(filePath string, content []byte) error {
-	if err := validateRead(filePath); err != nil {
+func ValidateWrite(filePath string, content []byte) error {
+	if err := ValidateRead(filePath); err != nil {
 		return err
 	}
 	if len(content) > MaxFileSize {

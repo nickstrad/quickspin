@@ -11,11 +11,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/nickstrad/quickspin/internal/api"
 	"github.com/nickstrad/quickspin/internal/client"
 	"github.com/nickstrad/quickspin/internal/httpapi"
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
-	"github.com/nickstrad/quickspin/internal/store"
+	"github.com/nickstrad/quickspin/internal/sandbox"
+	"github.com/nickstrad/quickspin/internal/store/sqlite"
 )
 
 // The tests here run against the real API over a real socket, because the thing
@@ -25,9 +27,9 @@ func newTestClient(t *testing.T, rt runtime.Runtime) *client.Client {
 	t.Helper()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.NewSqlliteStore(t.Context(), ":memory:", "", logger)
+	st, err := sqlite.New(t.Context(), ":memory:", "", logger)
 	if err != nil {
-		t.Fatalf("NewSqlliteStore(:memory:) error = %v, want nil", err)
+		t.Fatalf("sqlite.New(:memory:) error = %v, want nil", err)
 	}
 	t.Cleanup(func() {
 		if err := st.Cleanup(); err != nil {
@@ -35,8 +37,8 @@ func newTestClient(t *testing.T, rt runtime.Runtime) *client.Client {
 		}
 	})
 
-	api := httpapi.NewAPI("127.0.0.1", 0, logger, st, rt)
-	server := httptest.NewServer(api.Handler())
+	srv := httpapi.NewAPI("127.0.0.1", 0, logger, st, rt)
+	server := httptest.NewServer(srv.Handler())
 	t.Cleanup(server.Close)
 
 	return client.New(server.URL, server.Client())
@@ -48,12 +50,12 @@ func runningSandbox(t *testing.T, c *client.Client) string {
 	t.Helper()
 
 	image := "alpine:3.20"
-	sbx, err := c.CreateSandbox(t.Context(), "key-1", store.SpecFile{Image: &image})
+	sbx, err := c.CreateSandbox(t.Context(), "key-1", sandbox.SpecFile{Image: &image})
 	if err != nil {
 		t.Fatalf("CreateSandbox error = %v, want nil", err)
 	}
-	if sbx.State != store.Running {
-		t.Fatalf("CreateSandbox state = %q, want %q", sbx.State, store.Running)
+	if sbx.State != sandbox.Running {
+		t.Fatalf("CreateSandbox state = %q, want %q", sbx.State, sandbox.Running)
 	}
 	return sbx.SandboxID
 }
@@ -88,11 +90,11 @@ func TestRepeatedIdempotencyKeyReturnsTheSameSandbox(t *testing.T) {
 	c := newTestClient(t, okRuntime())
 
 	image := "alpine:3.20"
-	first, err := c.CreateSandbox(t.Context(), "key-1", store.SpecFile{Image: &image})
+	first, err := c.CreateSandbox(t.Context(), "key-1", sandbox.SpecFile{Image: &image})
 	if err != nil {
 		t.Fatalf("first CreateSandbox error = %v, want nil", err)
 	}
-	second, err := c.CreateSandbox(t.Context(), "key-1", store.SpecFile{Image: &image})
+	second, err := c.CreateSandbox(t.Context(), "key-1", sandbox.SpecFile{Image: &image})
 	if err != nil {
 		t.Fatalf("second CreateSandbox error = %v, want nil", err)
 	}
@@ -213,7 +215,7 @@ func TestErrorEnvelopeBecomesATypedError(t *testing.T) {
 	c := newTestClient(t, okRuntime())
 
 	_, err := c.InspectSandbox(t.Context(), "sbx_does-not-exist")
-	if !client.HasCode(err, httpapi.CodeNotFound) {
+	if !client.HasCode(err, api.CodeNotFound) {
 		t.Fatalf("InspectSandbox error = %v, want the not_found code", err)
 	}
 

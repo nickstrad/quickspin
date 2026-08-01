@@ -7,15 +7,11 @@ import (
 )
 
 // The public contract of this package: callers test these with errors.Is and
-// must never parse error strings or reach into StoreError's fields. The pure
-// transition check returns a bare sentinel; the database/sql boundary wraps
-// with E. See docs/reference/error-handling-and-logging.mdx.
+// must never parse error strings or reach into StoreError's fields. A lookup
+// miss returns a bare sentinel; the database/sql boundary wraps with E. See
+// docs/reference/error-handling-and-logging.mdx.
 var (
-	ErrNotFound               = errors.New("sandbox not found")
-	ErrInvalidState           = errors.New("invalid state")
-	ErrInvalidStateTransition = errors.New("invalid state transition")
-	ErrInvalidSpec            = errors.New("invalid sandbox spec")
-	ErrSandboxNotRunning      = errors.New("sandbox not in running state")
+	ErrNotFound = errors.New("sandbox not found")
 )
 
 type StoreError struct {

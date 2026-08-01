@@ -1,4 +1,4 @@
-package runtime
+package docker
 
 import (
 	"archive/tar"
@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
 // testBinaryContent holds bytes that are not valid UTF-8, so any stray string
@@ -151,7 +153,7 @@ func TestFileUnarchive(t *testing.T) {
 			name:    "no entry matches",
 			path:    "/work/main.bin",
 			archive: tarEntries(t, testTarEntry{tar.Header{Name: "other.bin", Typeflag: tar.TypeReg, Size: 3}, []byte("abc")}),
-			wantErr: ErrPathNotFound,
+			wantErr: runtime.ErrPathNotFound,
 		},
 		{
 			// A directory carrying the requested name is not the file: without the
@@ -160,7 +162,7 @@ func TestFileUnarchive(t *testing.T) {
 			name:    "a directory sharing the name is not the file",
 			path:    "/work/logs",
 			archive: tarEntries(t, testTarEntry{tar.Header{Name: "logs/", Typeflag: tar.TypeDir, Mode: 0o755}, nil}),
-			wantErr: ErrPathNotFound,
+			wantErr: runtime.ErrPathNotFound,
 		},
 		{
 			// Entry names are relative to the source, so a file source yields
@@ -171,7 +173,7 @@ func TestFileUnarchive(t *testing.T) {
 			name:    "a same-named file in another directory is not the file",
 			path:    "/work/main.go",
 			archive: tarEntries(t, testTarEntry{tar.Header{Name: "vendor/main.go", Typeflag: tar.TypeReg, Size: 5}, []byte("wrong")}),
-			wantErr: ErrPathNotFound,
+			wantErr: runtime.ErrPathNotFound,
 		},
 		{
 			// Reading a directory returns its whole tree, and no entry is the
@@ -182,7 +184,7 @@ func TestFileUnarchive(t *testing.T) {
 				testTarEntry{tar.Header{Name: "a/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
 				testTarEntry{tar.Header{Name: "a/main.go", Typeflag: tar.TypeReg, Size: 5}, []byte("child")},
 			),
-			wantErr: ErrPathNotFound,
+			wantErr: runtime.ErrPathNotFound,
 		},
 		{
 			// Entry names are matched exactly, not by basename: a nested
@@ -194,7 +196,7 @@ func TestFileUnarchive(t *testing.T) {
 				testTarEntry{tar.Header{Name: "config/nested/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
 				testTarEntry{tar.Header{Name: "config/nested/config", Typeflag: tar.TypeReg, Mode: 0o640, Size: int64(len(testBinaryContent))}, testBinaryContent},
 			),
-			wantErr: ErrPathNotFound,
+			wantErr: runtime.ErrPathNotFound,
 		},
 		{
 			// Header-only: the size is a claim, and the point is that the claim
@@ -202,8 +204,8 @@ func TestFileUnarchive(t *testing.T) {
 			// allocate past the cap to prove the cap works.
 			name:    "an oversized header is refused before the body is read",
 			path:    "/work/core.dump",
-			archive: headerOnlyTar(t, tar.Header{Name: "core.dump", Typeflag: tar.TypeReg, Size: MaxFileSize + 1}),
-			wantErr: ErrFileTooLarge,
+			archive: headerOnlyTar(t, tar.Header{Name: "core.dump", Typeflag: tar.TypeReg, Size: runtime.MaxFileSize + 1}),
+			wantErr: runtime.ErrFileTooLarge,
 		},
 		{
 			// A stream that ends mid-body must not report the sentinel a caller
@@ -237,7 +239,7 @@ func TestFileUnarchive(t *testing.T) {
 				}
 				// The sentinels are what callers branch on, so a broken stream
 				// leaking one of them is worse than the bare error.
-				if errors.Is(err, ErrPathNotFound) || errors.Is(err, ErrFileTooLarge) {
+				if errors.Is(err, runtime.ErrPathNotFound) || errors.Is(err, runtime.ErrFileTooLarge) {
 					t.Errorf("fileUnarchive error = %v, want no sentinel for a malformed stream", err)
 				}
 			default:
@@ -269,7 +271,7 @@ func TestListDirectoryFromTarStream(t *testing.T) {
 		name    string
 		dirPath string
 		archive []byte
-		want    []FileInfo
+		want    []runtime.FileInfo
 		// wantPlainErr demands an error carrying no sentinel, for the malformed
 		// streams whose exact wording is not part of the contract.
 		wantPlainErr bool
@@ -282,10 +284,10 @@ func TestListDirectoryFromTarStream(t *testing.T) {
 				testTarEntry{tar.Header{Name: "work/main.go", Typeflag: tar.TypeReg, Mode: 0o640, Size: 13}, []byte("package main\n")},
 				testTarEntry{tar.Header{Name: "work/logs/", Typeflag: tar.TypeDir, Mode: 0o750}, nil},
 			),
-			want: []FileInfo{
+			want: []runtime.FileInfo{
 				// No trailing slash: the slash is tar's way of marking a directory
 				// entry, and IsDir already carries that. A path ending in "/" fails
-				// validatePath, so leaving it on would produce entries that cannot be
+				// runtime.ValidatePath, so leaving it on would produce entries that cannot be
 				// passed back into any other method.
 				{Path: "/work/logs", Mode: fs.ModeDir | 0o750, IsDir: true},
 				{Path: "/work/main.go", Size: 13, Mode: 0o640},
@@ -301,7 +303,7 @@ func TestListDirectoryFromTarStream(t *testing.T) {
 			archive: tarEntries(t,
 				testTarEntry{tar.Header{Name: "empty/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
 			),
-			want: []FileInfo{},
+			want: []runtime.FileInfo{},
 		},
 		{
 			// Every depth, not just one level: the join is the same at any depth, so a
@@ -318,7 +320,7 @@ func TestListDirectoryFromTarStream(t *testing.T) {
 				testTarEntry{tar.Header{Name: "work/a/b/", Typeflag: tar.TypeDir, Mode: 0o750}, nil},
 				testTarEntry{tar.Header{Name: "work/a/b/c.txt", Typeflag: tar.TypeReg, Mode: 0o600, Size: 3}, []byte("abc")},
 			),
-			want: []FileInfo{
+			want: []runtime.FileInfo{
 				{Path: "/work/a", Mode: fs.ModeDir | 0o755, IsDir: true},
 				{Path: "/work/a/b", Mode: fs.ModeDir | 0o750, IsDir: true},
 				{Path: "/work/a/b/c.txt", Size: 3, Mode: 0o600},
@@ -334,7 +336,7 @@ func TestListDirectoryFromTarStream(t *testing.T) {
 			archive: tarEntries(t,
 				testTarEntry{tar.Header{Name: "main.go", Typeflag: tar.TypeReg, Mode: 0o640, Size: 13}, []byte("package main\n")},
 			),
-			want: []FileInfo{
+			want: []runtime.FileInfo{
 				{Path: "/work/main.go", Size: 13, Mode: 0o640},
 			},
 		},
@@ -363,7 +365,7 @@ func TestListDirectoryFromTarStream(t *testing.T) {
 				if err == nil {
 					t.Fatal("listDirectoryFromTarStream error = nil, want an error for a malformed stream")
 				}
-				if errors.Is(err, ErrPathNotFound) || errors.Is(err, ErrTotalFilesTooLarge) {
+				if errors.Is(err, runtime.ErrPathNotFound) || errors.Is(err, runtime.ErrTotalFilesTooLarge) {
 					t.Errorf("listDirectoryFromTarStream error = %v, want no sentinel for a malformed stream", err)
 				}
 				if got != nil {
@@ -400,13 +402,13 @@ func TestListDirectoryFromTarStreamCapsEntries(t *testing.T) {
 	}{
 		{
 			name:      "exactly at the cap",
-			names:     append([]string{"work/"}, generatedNames("work/f%04d.txt", MaxTotalFiles)...),
-			wantCount: MaxTotalFiles,
+			names:     append([]string{"work/"}, generatedNames("work/f%04d.txt", runtime.MaxTotalFiles)...),
+			wantCount: runtime.MaxTotalFiles,
 		},
 		{
 			name:    "one over the cap",
-			names:   append([]string{"work/"}, generatedNames("work/f%04d.txt", MaxTotalFiles+1)...),
-			wantErr: ErrTotalFilesTooLarge,
+			names:   append([]string{"work/"}, generatedNames("work/f%04d.txt", runtime.MaxTotalFiles+1)...),
+			wantErr: runtime.ErrTotalFilesTooLarge,
 		},
 		{
 			// 999 files is comfortably under the cap on its own; the two directories
@@ -415,8 +417,8 @@ func TestListDirectoryFromTarStreamCapsEntries(t *testing.T) {
 			// sufficiently nested tree past.
 			name: "nesting does not exempt entries from the cap",
 			names: append([]string{"work/", "work/a/", "work/a/b/"},
-				generatedNames("work/a/b/f%04d.txt", MaxTotalFiles-1)...),
-			wantErr: ErrTotalFilesTooLarge,
+				generatedNames("work/a/b/f%04d.txt", runtime.MaxTotalFiles-1)...),
+			wantErr: runtime.ErrTotalFilesTooLarge,
 		},
 	}
 
@@ -471,7 +473,7 @@ func tarNamedEntries(t *testing.T, names ...string) []byte {
 // only, so the same cap applied here would make a directory unlistable because
 // of one core dump sitting in it — the entry a caller most needs to see.
 func TestListDirectoryFromTarStreamReportsSizesOverTheFileCap(t *testing.T) {
-	oversized := make([]byte, MaxFileSize+1)
+	oversized := make([]byte, runtime.MaxFileSize+1)
 	archive := tarEntries(t,
 		testTarEntry{tar.Header{Name: "work/", Typeflag: tar.TypeDir, Mode: 0o755}, nil},
 		testTarEntry{tar.Header{Name: "work/core.dump", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(oversized))}, oversized},
@@ -481,17 +483,17 @@ func TestListDirectoryFromTarStreamReportsSizesOverTheFileCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listDirectoryFromTarStream error = %v, want nil", err)
 	}
-	assertFileInfos(t, got, []FileInfo{
+	assertFileInfos(t, got, []runtime.FileInfo{
 		{Path: "/work/core.dump", Size: int64(len(oversized)), Mode: 0o644},
 	})
 }
 
 // Order is not part of the contract — the daemon's traversal order is its own
 // business — so both sides are sorted before comparison.
-func assertFileInfos(t *testing.T, got, want []FileInfo) {
+func assertFileInfos(t *testing.T, got, want []runtime.FileInfo) {
 	t.Helper()
 
-	byPath := func(a, b FileInfo) int { return strings.Compare(a.Path, b.Path) }
+	byPath := func(a, b runtime.FileInfo) int { return strings.Compare(a.Path, b.Path) }
 	got = slices.SortedFunc(slices.Values(got), byPath)
 	want = slices.SortedFunc(slices.Values(want), byPath)
 

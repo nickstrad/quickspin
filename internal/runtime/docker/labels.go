@@ -1,4 +1,6 @@
-package runtime
+package docker
+
+import "github.com/nickstrad/quickspin/internal/runtime"
 
 // A wire format, not an implementation detail: renaming one of these orphans
 // every container already labelled with the old value.
@@ -50,7 +52,7 @@ func managedSandboxID(labels map[string]string) (string, bool) {
 
 func sandboxIDFromLabels(labels map[string]string) (string, error) {
 	id := labels[labelSandboxID]
-	if err := validateSandboxID(id); err != nil {
+	if err := runtime.ValidateSandboxID(id); err != nil {
 		return "", err
 	}
 

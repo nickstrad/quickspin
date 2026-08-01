@@ -1,4 +1,4 @@
-package runtime
+package docker
 
 import (
 	"archive/tar"
@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/moby/moby/api/types/container"
+	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
 // Tar decoding, the size cap, and the absent-entry verdict are pinned in
@@ -54,7 +55,7 @@ func TestReadFileRejectsInvalidPathBeforeDocker(t *testing.T) {
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
 	_, err := rt.ReadFile(t.Context(), testSandboxID, "/work/../etc/passwd")
-	if !errors.Is(err, ErrInvalidPath) {
+	if !errors.Is(err, runtime.ErrInvalidPath) {
 		t.Fatalf("ReadFile error = %v, want ErrInvalidPath", err)
 	}
 	if got := daemon.routes(); len(got) != 0 {
@@ -74,7 +75,7 @@ func TestReadFileRejectsInvalidPathBeforeDocker(t *testing.T) {
 // and an implementation that waits for the stream sees an absence rather than a
 // size.
 func TestReadFileRefusesAnOversizedFileBeforeTransferringIt(t *testing.T) {
-	oversized := container.PathStat{Name: "core.dump", Size: MaxFileSize + 1, Mode: 0o644}
+	oversized := container.PathStat{Name: "core.dump", Size: runtime.MaxFileSize + 1, Mode: 0o644}
 
 	daemon := newFakeDaemon(t)
 	daemon.list = listOKManaged()
@@ -85,7 +86,7 @@ func TestReadFileRefusesAnOversizedFileBeforeTransferringIt(t *testing.T) {
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
 	got, err := rt.ReadFile(t.Context(), testSandboxID, "/work/core.dump")
-	if !errors.Is(err, ErrFileTooLarge) {
+	if !errors.Is(err, runtime.ErrFileTooLarge) {
 		t.Fatalf("ReadFile error = %v, want ErrFileTooLarge", err)
 	}
 	if got != nil {
@@ -105,14 +106,14 @@ func TestReadFileKeepsTheAbsenceSentinelsDistinct(t *testing.T) {
 		{
 			name: "no container carries the label",
 			set:  func(*fakeDaemon) {},
-			want: ErrNotFound,
+			want: runtime.ErrNotFound,
 		},
 		{
 			// The sandbox is there and the archive holds nothing, which is how the
 			// daemon reports a directory with no such child.
 			name: "the archive has no matching entry",
 			set:  func(d *fakeDaemon) { d.list = listOKManaged() },
-			want: ErrPathNotFound,
+			want: runtime.ErrPathNotFound,
 		},
 		{
 			// How a real daemon answers a path that is not there: a 404, before any
@@ -125,7 +126,7 @@ func TestReadFileKeepsTheAbsenceSentinelsDistinct(t *testing.T) {
 				d.copyFrom = dockerError(http.StatusNotFound,
 					"Could not find the file /work/main.go in container "+testContainerID)
 			},
-			want: ErrPathNotFound,
+			want: runtime.ErrPathNotFound,
 		},
 	}
 

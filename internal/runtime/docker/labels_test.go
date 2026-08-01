@@ -1,12 +1,14 @@
-package runtime
+package docker
 
 import (
 	"maps"
 	"testing"
+
+	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
 // Valid ids in the format NewSandboxID produces. Tests use these rather than
-// inventing one, so tightening validateSandboxID cannot leave a hand-written
+// inventing one, so tightening runtime.ValidateSandboxID cannot leave a hand-written
 // fixture behind as a false failure.
 const (
 	testSandboxID      = "sbx_9f8e7d6c-5b4a-4938-8271-60514f3e2d1c"
@@ -169,7 +171,7 @@ func TestSandboxIDFromLabels(t *testing.T) {
 func TestManagedLabelsRoundTripsThroughSandboxIDFromLabels(t *testing.T) {
 	// Pins the key in both directions: renaming it in the writer only would
 	// leave every container unreadable to its own reader.
-	id := NewSandboxID()
+	id := runtime.NewSandboxID()
 
 	got, err := sandboxIDFromLabels(managedLabels(id))
 	if err != nil {
@@ -181,7 +183,7 @@ func TestManagedLabelsRoundTripsThroughSandboxIDFromLabels(t *testing.T) {
 }
 
 func TestManagedSandboxID(t *testing.T) {
-	id := NewSandboxID()
+	id := runtime.NewSandboxID()
 
 	tests := []struct {
 		name   string
@@ -231,7 +233,7 @@ func TestManagedMarkerLabelsMatchesManagedLabels(t *testing.T) {
 	// The filter used by List must agree with what Create writes, or List sees
 	// nothing it created.
 	marker := managedMarkerLabels()
-	written := managedLabels(NewSandboxID())
+	written := managedLabels(runtime.NewSandboxID())
 
 	for k, v := range marker {
 		if written[k] != v {

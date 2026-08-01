@@ -18,7 +18,7 @@ var (
 )
 
 type RuntimeError struct {
-	Op      string // "runtime.dockerRuntime.Create" — package.Type.Method
+	Op      string // "docker.Runtime.Create" — package.Type.Method
 	Message string
 	Err     error
 	Stack   string

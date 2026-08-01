@@ -1,11 +1,7 @@
 package cli
 
 import (
-	"fmt"
-
-	"github.com/nickstrad/quickspin/internal/httpapi"
-	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/store"
+	"github.com/nickstrad/quickspin/internal/daemon"
 	"github.com/spf13/cobra"
 )
 
@@ -30,36 +26,14 @@ func (app *application) newServeCommand() *cobra.Command {
   quickspin --server http://127.0.0.1:9000 sandbox list`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx := cmd.Context()
 			app.logCommand(cmd, "host", host, "port", port, "db", dbPath)
 
-			sandboxRuntime, err := runtime.NewDockerRuntime(nil, app.logger.With(
-				"subcomponent", "runtime",
-				"backend", "docker",
-			))
-			if err != nil {
-				return fmt.Errorf("open the docker runtime: %w", err)
-			}
-
-			sandboxStore, err := store.NewSqlliteStore(ctx, dbPath, "", app.logger.With("subcomponent", "store"))
-			if err != nil {
-				return fmt.Errorf("open the store: %w", err)
-			}
-			defer func() {
-				// Logged rather than returned: the command is already on its way
-				// out, and a close failure must not replace the reason it exited.
-				if err := sandboxStore.Cleanup(); err != nil {
-					app.logger.ErrorContext(ctx, "closing the store failed", "err", err)
-				}
-			}()
-
-			// Start owns the listening log: it is the only place that knows the
-			// bind succeeded and which port the kernel assigned.
-			server := httpapi.NewAPI(host, port, app.logger, sandboxStore, sandboxRuntime)
-			if err := server.Start(ctx.Done()); err != nil {
-				return fmt.Errorf("run the control plane: %w", err)
-			}
-			return nil
+			return daemon.Serve(cmd.Context(), daemon.Config{
+				Host:   host,
+				Port:   port,
+				DBPath: dbPath,
+				Logger: app.logger,
+			})
 		},
 	}
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "address to listen on")

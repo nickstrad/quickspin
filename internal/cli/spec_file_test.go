@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/store"
+	"github.com/nickstrad/quickspin/internal/sandbox"
 )
 
 // writeSpec puts content in a temp file and returns its path, so a test can
@@ -27,7 +27,7 @@ func writeSpec(t *testing.T, name, content string) string {
 func createdSpec(t *testing.T, args ...string) (runtime.Spec, error) {
 	t.Helper()
 
-	var sent store.SpecFile
+	var sent sandbox.SpecFile
 	_, _, err := execute(t, recordingCreate(&sent), args...)
 	if err != nil {
 		return runtime.Spec{}, err
@@ -112,8 +112,8 @@ func TestCreateSpecFileOmissionsFallBackToDefaults(t *testing.T) {
 	if err := spec.Validate(); err != nil {
 		t.Errorf("spec from a minimal file does not validate: %v", err)
 	}
-	if spec.Image != store.DefaultImage {
-		t.Errorf("Image = %q, want %q", spec.Image, store.DefaultImage)
+	if spec.Image != sandbox.DefaultImage {
+		t.Errorf("Image = %q, want %q", spec.Image, sandbox.DefaultImage)
 	}
 	if spec.AllowNetwork {
 		t.Error("AllowNetwork = true, want default-deny when the file is silent")

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/nickstrad/quickspin/internal/cli"
-	"github.com/nickstrad/quickspin/internal/store"
+	"github.com/nickstrad/quickspin/internal/sandbox"
 )
 
 const (
@@ -50,7 +50,7 @@ func executeWithLogs(
 
 func TestLogLevelFlagControlsDebugLogging(t *testing.T) {
 	api := fakeAPI{
-		ListFn: func(context.Context) ([]*store.Sandbox, error) {
+		ListFn: func(context.Context) ([]*sandbox.Sandbox, error) {
 			return nil, nil
 		},
 	}

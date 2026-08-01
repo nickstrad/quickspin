@@ -1,4 +1,4 @@
-package runtime
+package docker
 
 import (
 	"encoding/json"
@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
 func TestRemovePathExecsRmWithThePathAsOneArgument(t *testing.T) {
@@ -49,7 +51,7 @@ func TestRemovePathRejectsInvalidPathBeforeDocker(t *testing.T) {
 			rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
 			err := rt.RemovePath(t.Context(), testSandboxID, tt.path)
-			if !errors.Is(err, ErrInvalidPath) {
+			if !errors.Is(err, runtime.ErrInvalidPath) {
 				t.Fatalf("RemovePath(%q) error = %v, want ErrInvalidPath", tt.path, err)
 			}
 			if got := daemon.routes(); len(got) != 0 {
@@ -80,8 +82,8 @@ func TestRemovePathKeepsTheIdentitySentinelsDistinct(t *testing.T) {
 		id   string
 		want error
 	}{
-		{name: "malformed sandbox id", id: "not-a-sandbox-id", want: ErrInvalidSandboxID},
-		{name: "unknown sandbox id", id: testSandboxID, want: ErrNotFound},
+		{name: "malformed sandbox id", id: "not-a-sandbox-id", want: runtime.ErrInvalidSandboxID},
+		{name: "unknown sandbox id", id: testSandboxID, want: runtime.ErrNotFound},
 	}
 
 	for _, tt := range tests {

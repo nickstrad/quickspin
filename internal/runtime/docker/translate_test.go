@@ -1,4 +1,4 @@
-package runtime
+package docker
 
 import (
 	"maps"
@@ -6,6 +6,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
 func TestStateFromContainerState(t *testing.T) {
@@ -14,19 +16,19 @@ func TestStateFromContainerState(t *testing.T) {
 	tests := []struct {
 		name      string
 		container string
-		want      State
+		want      runtime.State
 	}{
-		{name: "running", container: "running", want: StateRunning},
-		{name: "created but not started", container: "created", want: StateStopped},
-		{name: "exited", container: "exited", want: StateStopped},
-		{name: "dead", container: "dead", want: StateStopped},
-		{name: "removing", container: "removing", want: StateStopped},
-		{name: "paused is not running", container: "paused", want: StateStopped},
+		{name: "running", container: "running", want: runtime.StateRunning},
+		{name: "created but not started", container: "created", want: runtime.StateStopped},
+		{name: "exited", container: "exited", want: runtime.StateStopped},
+		{name: "dead", container: "dead", want: runtime.StateStopped},
+		{name: "removing", container: "removing", want: runtime.StateStopped},
+		{name: "paused is not running", container: "paused", want: runtime.StateStopped},
 		// A restart is transient and self-healing, so reporting it stopped would
 		// have plan 06's reconciler act on a condition that fixes itself.
-		{name: "restarting counts as running", container: "restarting", want: StateRunning},
-		{name: "unknown state falls back to stopped", container: "something-new", want: StateStopped},
-		{name: "empty state falls back to stopped", container: "", want: StateStopped},
+		{name: "restarting counts as running", container: "restarting", want: runtime.StateRunning},
+		{name: "unknown state falls back to stopped", container: "something-new", want: runtime.StateStopped},
+		{name: "empty state falls back to stopped", container: "", want: runtime.StateStopped},
 	}
 
 	for _, tt := range tests {
@@ -42,8 +44,8 @@ func TestEveryStartedStateMapsToRunning(t *testing.T) {
 	// Binds the list to the mapping: adding a status to one without the other
 	// shows up here.
 	for _, status := range startedStates {
-		if got := stateFromContainerState(status); got != StateRunning {
-			t.Errorf("stateFromContainerState(%q) = %q, want %q: it is listed in startedStates", status, got, StateRunning)
+		if got := stateFromContainerState(status); got != runtime.StateRunning {
+			t.Errorf("stateFromContainerState(%q) = %q, want %q: it is listed in startedStates", status, got, runtime.StateRunning)
 		}
 	}
 }

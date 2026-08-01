@@ -1,4 +1,4 @@
-package runtime
+package docker
 
 import (
 	"archive/tar"
@@ -9,13 +9,15 @@ import (
 	"io/fs"
 	"path"
 	"strings"
+
+	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
 // The daemon chmods extracted directories — even pre-existing ones — so dir
 // entries must keep execute bits or the parent becomes untraversable.
 const archiveDirMode = 0o750
 
-// filePath must already have passed validateWrite; a relative, unclean, or
+// filePath must already have passed runtime.ValidateWrite; a relative, unclean, or
 // root path produces a malformed archive rather than an error.
 func fileArchive(filePath string, content []byte, mode fs.FileMode) ([]byte, error) {
 	var archive bytes.Buffer
@@ -73,8 +75,8 @@ func fileUnarchive(filePath string, content io.Reader) ([]byte, error) {
 			continue
 		}
 
-		if header.Size > MaxFileSize {
-			return nil, ErrFileTooLarge
+		if header.Size > runtime.MaxFileSize {
+			return nil, runtime.ErrFileTooLarge
 		}
 		fileBytes := make([]byte, header.Size)
 		if _, err := io.ReadFull(tarReader, fileBytes); err != nil {
@@ -83,15 +85,15 @@ func fileUnarchive(filePath string, content io.Reader) ([]byte, error) {
 		return fileBytes, nil
 	}
 
-	return nil, ErrPathNotFound
+	return nil, runtime.ErrPathNotFound
 }
 
 // The daemon names archive entries relative to the parent of the source, so
 // joining each name onto dirPath's parent rebuilds its absolute path at any
-// depth. dirPath must already have passed validatePath.
-func listDirectoryFromTarStream(dirPath string, content io.Reader) ([]FileInfo, error) {
+// depth. dirPath must already have passed runtime.ValidatePath.
+func listDirectoryFromTarStream(dirPath string, content io.Reader) ([]runtime.FileInfo, error) {
 	tarReader := tar.NewReader(content)
-	fileInfos := []FileInfo{}
+	fileInfos := []runtime.FileInfo{}
 	parent := path.Dir(dirPath)
 
 	for {
@@ -110,15 +112,15 @@ func listDirectoryFromTarStream(dirPath string, content io.Reader) ([]FileInfo, 
 			continue
 		}
 
-		fileInfos = append(fileInfos, FileInfo{
+		fileInfos = append(fileInfos, runtime.FileInfo{
 			Path:  entryPath,
 			Size:  header.Size,
 			Mode:  header.FileInfo().Mode(),
 			IsDir: isDir,
 		})
 
-		if len(fileInfos) > MaxTotalFiles {
-			return nil, ErrTotalFilesTooLarge
+		if len(fileInfos) > runtime.MaxTotalFiles {
+			return nil, runtime.ErrTotalFilesTooLarge
 		}
 	}
 

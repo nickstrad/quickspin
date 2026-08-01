@@ -1,4 +1,4 @@
-package runtime
+package docker
 
 import (
 	"archive/tar"
@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
 // Entry selection, recursion, path joining, and the entry cap are pinned in
@@ -31,7 +33,7 @@ func TestListDirAsksForTheDirectoryPathAndReturnsItsEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListDir error = %v, want nil", err)
 	}
-	assertFileInfos(t, got, []FileInfo{
+	assertFileInfos(t, got, []runtime.FileInfo{
 		{Path: "/work/logs", Mode: fs.ModeDir | 0o750, IsDir: true},
 		{Path: "/work/logs/app.log", Size: 8, Mode: 0o600},
 		{Path: "/work/main.go", Size: 13, Mode: 0o640},
@@ -53,7 +55,7 @@ func TestListDirRejectsInvalidPathBeforeDocker(t *testing.T) {
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
 	got, err := rt.ListDir(t.Context(), testSandboxID, "/work/../etc")
-	if !errors.Is(err, ErrInvalidPath) {
+	if !errors.Is(err, runtime.ErrInvalidPath) {
 		t.Fatalf("ListDir error = %v, want ErrInvalidPath", err)
 	}
 	if got != nil {
@@ -70,7 +72,7 @@ func TestListDirRejectsInvalidPathBeforeDocker(t *testing.T) {
 }
 
 // Unlike ReadFile, "/" is a legitimate target here: it is a directory, and
-// validateRead's extra rejection of it would make the sandbox root unlistable.
+// runtime.ValidateRead's extra rejection of it would make the sandbox root unlistable.
 // Only the rejection is asserted — what the daemon returns for a root source is
 // not this test's subject.
 func TestListDirAcceptsTheSandboxRoot(t *testing.T) {
@@ -79,7 +81,7 @@ func TestListDirAcceptsTheSandboxRoot(t *testing.T) {
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
 	_, err := rt.ListDir(t.Context(), testSandboxID, "/")
-	if errors.Is(err, ErrInvalidPath) {
+	if errors.Is(err, runtime.ErrInvalidPath) {
 		t.Fatalf("ListDir(%q) error = %v, want the root to be a valid target", "/", err)
 	}
 
@@ -104,7 +106,7 @@ func TestListDirKeepsTheAbsenceSentinelsDistinct(t *testing.T) {
 		{
 			name: "no container carries the label",
 			set:  func(*fakeDaemon) {},
-			want: ErrNotFound,
+			want: runtime.ErrNotFound,
 		},
 		{
 			name: "the daemon reports no such directory",
@@ -113,7 +115,7 @@ func TestListDirKeepsTheAbsenceSentinelsDistinct(t *testing.T) {
 				d.copyFrom = dockerError(http.StatusNotFound,
 					"Could not find the file /work/nope in container "+testContainerID)
 			},
-			want: ErrPathNotFound,
+			want: runtime.ErrPathNotFound,
 		},
 	}
 

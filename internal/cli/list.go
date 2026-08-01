@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/nickstrad/quickspin/internal/store"
+	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/spf13/cobra"
 )
 
@@ -32,8 +32,8 @@ func (app *application) newListCommand() *cobra.Command {
 	}
 }
 
-func sortedSandboxes(sandboxes []*store.Sandbox) []*store.Sandbox {
-	return sortedCopy(sandboxes, func(a, b *store.Sandbox) int {
+func sortedSandboxes(sandboxes []*sandbox.Sandbox) []*sandbox.Sandbox {
+	return sortedCopy(sandboxes, func(a, b *sandbox.Sandbox) int {
 		if created := a.CreatedAt.Compare(b.CreatedAt); created != 0 {
 			return created
 		}

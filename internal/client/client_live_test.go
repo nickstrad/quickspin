@@ -9,10 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nickstrad/quickspin/internal/api"
 	"github.com/nickstrad/quickspin/internal/client"
 	"github.com/nickstrad/quickspin/internal/httpapi"
 	"github.com/nickstrad/quickspin/internal/runtime"
-	"github.com/nickstrad/quickspin/internal/store"
+	"github.com/nickstrad/quickspin/internal/runtime/docker"
+	"github.com/nickstrad/quickspin/internal/sandbox"
+	"github.com/nickstrad/quickspin/internal/store/sqlite"
 )
 
 // The one place client, httpapi, the SQLite store, and a real Docker daemon meet.
@@ -56,14 +59,14 @@ func newLiveClient(t *testing.T) *client.Client {
 
 	// A nil client, so the SDK reads DOCKER_HOST — the same construction
 	// internal/cli/serve.go performs.
-	rt, err := runtime.NewDockerRuntime(nil, logger)
+	rt, err := docker.New(nil, logger)
 	if err != nil {
-		t.Fatalf("NewDockerRuntime from the environment: %v", err)
+		t.Fatalf("docker.New from the environment: %v", err)
 	}
 
-	st, err := store.NewSqlliteStore(t.Context(), filepath.Join(t.TempDir(), "quickspin.db"), "", logger)
+	st, err := sqlite.New(t.Context(), filepath.Join(t.TempDir(), "quickspin.db"), "", logger)
 	if err != nil {
-		t.Fatalf("NewSqlliteStore error = %v, want nil", err)
+		t.Fatalf("sqlite.New error = %v, want nil", err)
 	}
 	t.Cleanup(func() {
 		if err := st.Cleanup(); err != nil {
@@ -71,8 +74,8 @@ func newLiveClient(t *testing.T) *client.Client {
 		}
 	})
 
-	api := httpapi.NewAPI("127.0.0.1", 0, logger, st, rt)
-	server := httptest.NewServer(api.Handler())
+	srv := httpapi.NewAPI("127.0.0.1", 0, logger, st, rt)
+	server := httptest.NewServer(srv.Handler())
 	t.Cleanup(server.Close)
 
 	return client.New(server.URL, server.Client())
@@ -92,7 +95,7 @@ func TestLiveSandboxLifecycle(t *testing.T) {
 	defer cancel()
 
 	image := liveImage()
-	created, err := c.CreateSandbox(ctx, "live-lifecycle", store.SpecFile{Image: &image})
+	created, err := c.CreateSandbox(ctx, "live-lifecycle", sandbox.SpecFile{Image: &image})
 	if err != nil {
 		t.Fatalf("CreateSandbox(%s) error = %v, want nil", image, err)
 	}
@@ -107,8 +110,8 @@ func TestLiveSandboxLifecycle(t *testing.T) {
 		}
 	})
 
-	if created.State != store.Running {
-		t.Fatalf("CreateSandbox state = %q, want %q", created.State, store.Running)
+	if created.State != sandbox.Running {
+		t.Fatalf("CreateSandbox state = %q, want %q", created.State, sandbox.Running)
 	}
 
 	// Inspect answers a runtime.Info keyed on ID, while create and list answer
@@ -125,8 +128,8 @@ func TestLiveSandboxLifecycle(t *testing.T) {
 		t.Errorf("InspectSandbox state = %q, want %q", info.State, runtime.StateRunning)
 	}
 
-	if state := listedState(t, c, ctx, created.SandboxID); state != store.Running {
-		t.Errorf("ListSandboxes reports %q, want %q", state, store.Running)
+	if state := listedState(t, c, ctx, created.SandboxID); state != sandbox.Running {
+		t.Errorf("ListSandboxes reports %q, want %q", state, sandbox.Running)
 	}
 
 	if err := c.DestroySandbox(ctx, created.SandboxID); err != nil {
@@ -141,21 +144,21 @@ func TestLiveSandboxLifecycle(t *testing.T) {
 	// A conflict rather than a not-found: the row still exists and says stopped,
 	// and inspect is only defined for a running sandbox.
 	_, err = c.InspectSandbox(ctx, created.SandboxID)
-	if !client.HasCode(err, httpapi.CodeConflict) {
-		t.Errorf("InspectSandbox after destroy error = %v, want code %q", err, httpapi.CodeConflict)
+	if !client.HasCode(err, api.CodeConflict) {
+		t.Errorf("InspectSandbox after destroy error = %v, want code %q", err, api.CodeConflict)
 	}
 
 	// The surviving row is the deliverable, not a leak: the store records what
 	// should exist, and a destroyed sandbox is a fact worth keeping. A reconciler
 	// (plan 06) reads exactly this.
-	if state := listedState(t, c, ctx, created.SandboxID); state != store.Stopped {
-		t.Errorf("ListSandboxes reports %q after destroy, want %q", state, store.Stopped)
+	if state := listedState(t, c, ctx, created.SandboxID); state != sandbox.Stopped {
+		t.Errorf("ListSandboxes reports %q after destroy, want %q", state, sandbox.Stopped)
 	}
 }
 
 // listedState reports membership as well as state: "absent" distinguishes a row
 // the store dropped from one whose state is merely unexpected.
-func listedState(t *testing.T, c *client.Client, ctx context.Context, sandboxID string) store.TaskState {
+func listedState(t *testing.T, c *client.Client, ctx context.Context, sandboxID string) sandbox.TaskState {
 	t.Helper()
 
 	sbxs, err := c.ListSandboxes(ctx)

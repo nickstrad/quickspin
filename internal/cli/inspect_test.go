@@ -5,14 +5,14 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/nickstrad/quickspin/internal/api"
 	"github.com/nickstrad/quickspin/internal/client"
-	"github.com/nickstrad/quickspin/internal/httpapi"
 	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
 func TestInspectWritesYAML(t *testing.T) {
 	var gotID string
-	api := fakeAPI{
+	fake := fakeAPI{
 		InspectFn: func(_ context.Context, id string) (runtime.Info, error) {
 			gotID = id
 			return runtime.Info{
@@ -23,7 +23,7 @@ func TestInspectWritesYAML(t *testing.T) {
 		},
 	}
 
-	stdout, _, err := execute(t, api, "sandbox", "inspect", testID, "--output=yaml")
+	stdout, _, err := execute(t, fake, "sandbox", "inspect", testID, "--output=yaml")
 	if err != nil {
 		t.Fatalf("execute inspect error = %v, want nil", err)
 	}
@@ -44,18 +44,18 @@ func TestInspectWritesYAML(t *testing.T) {
 // code, and wrapping with %w is what keeps it reachable through the command's
 // own "inspect sandbox ..." message.
 func TestCommandPreservesTheAPIErrorCode(t *testing.T) {
-	api := fakeAPI{
+	fake := fakeAPI{
 		InspectFn: func(context.Context, string) (runtime.Info, error) {
 			return runtime.Info{}, &client.Error{
 				Status:  http.StatusNotFound,
-				Code:    httpapi.CodeNotFound,
+				Code:    api.CodeNotFound,
 				Message: "sandbox not found",
 			}
 		},
 	}
 
-	_, _, err := execute(t, api, "sandbox", "inspect", testID)
-	if !client.HasCode(err, httpapi.CodeNotFound) {
+	_, _, err := execute(t, fake, "sandbox", "inspect", testID)
+	if !client.HasCode(err, api.CodeNotFound) {
 		t.Fatalf("execute inspect error = %v, want the not_found code to survive wrapping", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/nickstrad/quickspin/internal/store"
 )
 
@@ -21,8 +22,8 @@ func Run(t *testing.T, factory Factory) {
 		if created.SandboxID == "" {
 			t.Error("CreateSandbox SandboxID = \"\", want a minted id")
 		}
-		if created.State != store.Pending {
-			t.Errorf("CreateSandbox State = %q, want %q", created.State, store.Pending)
+		if created.State != sandbox.Pending {
+			t.Errorf("CreateSandbox State = %q, want %q", created.State, sandbox.Pending)
 		}
 		if created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
 			t.Errorf(
@@ -49,7 +50,7 @@ func Run(t *testing.T, factory Factory) {
 		ctx := context.Background()
 		st := factory(t)
 
-		created := createSandbox(t, ctx, st, "empty-spec", store.SpecFile{})
+		created := createSandbox(t, ctx, st, "empty-spec", sandbox.SpecFile{})
 
 		got, err := st.GetSandbox(ctx, created.SandboxID)
 		if err != nil {
@@ -95,17 +96,17 @@ func Run(t *testing.T, factory Factory) {
 
 		type expectedSandbox struct {
 			image string
-			state store.TaskState
+			state sandbox.TaskState
 		}
 
 		want := map[string]expectedSandbox{}
 		for _, image := range []string{"alpine:3.20", "debian:12", "ubuntu:24.04"} {
 			created := createSandbox(t, ctx, st, "list-"+image, specFor(image))
-			want[created.SandboxID] = expectedSandbox{image: image, state: store.Pending}
+			want[created.SandboxID] = expectedSandbox{image: image, state: sandbox.Pending}
 		}
 		transitioned := createSandbox(t, ctx, st, "list-running", specFor("alpine:3.20"))
-		transition(t, ctx, st, transitioned.SandboxID, store.Pending, store.Running)
-		want[transitioned.SandboxID] = expectedSandbox{image: "alpine:3.20", state: store.Running}
+		transition(t, ctx, st, transitioned.SandboxID, sandbox.Pending, sandbox.Running)
+		want[transitioned.SandboxID] = expectedSandbox{image: "alpine:3.20", state: sandbox.Running}
 
 		got, err := st.GetSandboxes(ctx)
 		if err != nil {
@@ -115,24 +116,24 @@ func Run(t *testing.T, factory Factory) {
 			t.Fatalf("GetSandboxes() returned %d sandboxes, want %d", len(got), len(want))
 		}
 
-		for _, sandbox := range got {
-			expected, ok := want[sandbox.SandboxID]
+		for _, sbx := range got {
+			expected, ok := want[sbx.SandboxID]
 			if !ok {
-				t.Errorf("GetSandboxes() returned unexpected sandbox %q", sandbox.SandboxID)
+				t.Errorf("GetSandboxes() returned unexpected sandbox %q", sbx.SandboxID)
 				continue
 			}
-			delete(want, sandbox.SandboxID)
+			delete(want, sbx.SandboxID)
 
-			if sandbox.Spec.Image == nil || *sandbox.Spec.Image != expected.image {
-				t.Errorf("sandbox %q Spec.Image = %v, want %s", sandbox.SandboxID, sandbox.Spec.Image, expected.image)
+			if sbx.Spec.Image == nil || *sbx.Spec.Image != expected.image {
+				t.Errorf("sandbox %q Spec.Image = %v, want %s", sbx.SandboxID, sbx.Spec.Image, expected.image)
 			}
-			if sandbox.State != expected.state {
-				t.Errorf("sandbox %q State = %q, want %q", sandbox.SandboxID, sandbox.State, expected.state)
+			if sbx.State != expected.state {
+				t.Errorf("sandbox %q State = %q, want %q", sbx.SandboxID, sbx.State, expected.state)
 			}
-			if sandbox.CreatedAt.IsZero() || sandbox.UpdatedAt.IsZero() {
+			if sbx.CreatedAt.IsZero() || sbx.UpdatedAt.IsZero() {
 				t.Errorf(
 					"sandbox %q timestamps = (%v, %v), want both populated",
-					sandbox.SandboxID, sandbox.CreatedAt, sandbox.UpdatedAt,
+					sbx.SandboxID, sbx.CreatedAt, sbx.UpdatedAt,
 				)
 			}
 		}
@@ -169,19 +170,19 @@ func Run(t *testing.T, factory Factory) {
 		st := factory(t)
 
 		image := "alpine:3.20"
-		first := createSandbox(t, ctx, st, "copy-semantics", store.SpecFile{
+		first := createSandbox(t, ctx, st, "copy-semantics", sandbox.SpecFile{
 			Image: &image,
 			Env:   map[string]string{"MODE": "test"},
 		})
-		first.State = store.Failed
+		first.State = sandbox.Failed
 		first.Spec.Env["MODE"] = "mutated"
 
 		got, err := st.GetSandbox(ctx, first.SandboxID)
 		if err != nil {
 			t.Fatalf("GetSandbox(%s) error = %v, want nil", first.SandboxID, err)
 		}
-		if got.State != store.Pending {
-			t.Errorf("re-read State = %q, want %q", got.State, store.Pending)
+		if got.State != sandbox.Pending {
+			t.Errorf("re-read State = %q, want %q", got.State, sandbox.Pending)
 		}
 		if got.Spec.Env["MODE"] != "test" {
 			t.Errorf("re-read Env[MODE] = %q, want test", got.Spec.Env["MODE"])
@@ -191,14 +192,14 @@ func Run(t *testing.T, factory Factory) {
 	t.Run("IllegalTransitionRejected", func(t *testing.T) {
 		ctx := context.Background()
 		st := factory(t)
-		sandbox := createSandbox(t, ctx, st, "illegal-transition", specFor("alpine:3.20"))
-		id := sandbox.SandboxID
+		sbx := createSandbox(t, ctx, st, "illegal-transition", specFor("alpine:3.20"))
+		id := sbx.SandboxID
 
-		transition(t, ctx, st, id, store.Pending, store.Running)
-		transition(t, ctx, st, id, store.Running, store.Stopping)
-		transition(t, ctx, st, id, store.Stopping, store.Stopped)
+		transition(t, ctx, st, id, sandbox.Pending, sandbox.Running)
+		transition(t, ctx, st, id, sandbox.Running, sandbox.Stopping)
+		transition(t, ctx, st, id, sandbox.Stopping, sandbox.Stopped)
 
-		if _, err := st.UpdateSandboxState(ctx, id, store.Stopped, store.Running); !errors.Is(err, store.ErrInvalidStateTransition) {
+		if _, err := st.UpdateSandboxState(ctx, id, sandbox.Stopped, sandbox.Running); !errors.Is(err, sandbox.ErrInvalidStateTransition) {
 			t.Fatalf("UpdateSandboxState(stopped, running) error = %v, want ErrInvalidStateTransition", err)
 		}
 
@@ -206,18 +207,18 @@ func Run(t *testing.T, factory Factory) {
 		if err != nil {
 			t.Fatalf("GetSandbox(%s) error = %v, want nil", id, err)
 		}
-		if got.State != store.Stopped {
-			t.Errorf("State after rejected transition = %q, want %q", got.State, store.Stopped)
+		if got.State != sandbox.Stopped {
+			t.Errorf("State after rejected transition = %q, want %q", got.State, sandbox.Stopped)
 		}
 	})
 
 	t.Run("TransitionRequiresCurrentFromState", func(t *testing.T) {
 		ctx := context.Background()
 		st := factory(t)
-		sandbox := createSandbox(t, ctx, st, "stale-transition", specFor("alpine:3.20"))
-		id := sandbox.SandboxID
+		sbx := createSandbox(t, ctx, st, "stale-transition", specFor("alpine:3.20"))
+		id := sbx.SandboxID
 
-		if _, err := st.UpdateSandboxState(ctx, id, store.Running, store.Stopping); !errors.Is(err, store.ErrInvalidStateTransition) {
+		if _, err := st.UpdateSandboxState(ctx, id, sandbox.Running, sandbox.Stopping); !errors.Is(err, sandbox.ErrInvalidStateTransition) {
 			t.Fatalf(
 				"UpdateSandboxState(running, stopping) for a pending row error = %v, want ErrInvalidStateTransition",
 				err,
@@ -228,14 +229,14 @@ func Run(t *testing.T, factory Factory) {
 		if err != nil {
 			t.Fatalf("GetSandbox(%s) error = %v, want nil", id, err)
 		}
-		if got.State != store.Pending {
-			t.Errorf("State after stale transition = %q, want %q", got.State, store.Pending)
+		if got.State != sandbox.Pending {
+			t.Errorf("State after stale transition = %q, want %q", got.State, sandbox.Pending)
 		}
 	})
 }
 
-func specFor(image string) store.SpecFile {
-	return store.SpecFile{Image: &image}
+func specFor(image string) sandbox.SpecFile {
+	return sandbox.SpecFile{Image: &image}
 }
 
 func createSandbox(
@@ -243,15 +244,15 @@ func createSandbox(
 	ctx context.Context,
 	st store.Store,
 	key string,
-	spec store.SpecFile,
-) *store.Sandbox {
+	spec sandbox.SpecFile,
+) *sandbox.Sandbox {
 	t.Helper()
 
-	sandbox, err := st.CreateSandbox(ctx, key, spec)
+	sbx, err := st.CreateSandbox(ctx, key, spec)
 	if err != nil {
 		t.Fatalf("CreateSandbox(%q) error = %v, want nil", key, err)
 	}
-	return sandbox
+	return sbx
 }
 
 func transition(
@@ -259,17 +260,17 @@ func transition(
 	ctx context.Context,
 	st store.Store,
 	id string,
-	from store.TaskState,
-	to store.TaskState,
-) *store.Sandbox {
+	from sandbox.TaskState,
+	to sandbox.TaskState,
+) *sandbox.Sandbox {
 	t.Helper()
 
-	sandbox, err := st.UpdateSandboxState(ctx, id, from, to)
+	sbx, err := st.UpdateSandboxState(ctx, id, from, to)
 	if err != nil {
 		t.Fatalf("UpdateSandboxState(%q, %q, %q) error = %v, want nil", from, to, id, err)
 	}
-	if sandbox.State != to {
-		t.Fatalf("UpdateSandboxState(%q, %q, %q) State = %q, want %q", from, to, id, sandbox.State, to)
+	if sbx.State != to {
+		t.Fatalf("UpdateSandboxState(%q, %q, %q) State = %q, want %q", from, to, id, sbx.State, to)
 	}
-	return sandbox
+	return sbx
 }

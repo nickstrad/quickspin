@@ -1,4 +1,4 @@
-package runtime
+package docker
 
 import (
 	"bytes"
@@ -22,6 +22,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
+	"github.com/nickstrad/quickspin/internal/runtime"
 )
 
 // The sandbox ids live in labels_test.go; these are what the fake daemon
@@ -40,14 +41,14 @@ const (
 
 // testSpec is the valid baseline every Docker test that is not about validation
 // starts from, so adding a required Spec field breaks one line rather than ten.
-func testSpec(image string, env map[string]string) Spec {
-	return NewSpec(image, env, testCPULimit, testMemoryLimit, testPidsLimit, false)
+func testSpec(image string, env map[string]string) runtime.Spec {
+	return runtime.NewSpec(image, env, testCPULimit, testMemoryLimit, testPidsLimit, false)
 }
 
-func TestNewDockerRuntimeRequiresLogger(t *testing.T) {
-	_, err := NewDockerRuntime(&client.Client{}, nil)
+func TestNewRequiresLogger(t *testing.T) {
+	_, err := New(&client.Client{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "logger is required") {
-		t.Fatalf("NewDockerRuntime error = %v, want required logger error", err)
+		t.Fatalf("New error = %v, want required logger error", err)
 	}
 }
 
@@ -128,7 +129,7 @@ func TestNewContainerConfigsMapsAllowNetworkToNetworkMode(t *testing.T) {
 		{allow: false, want: "none"},
 		{allow: true, want: "bridge"},
 	} {
-		spec := NewSpec(testImage, nil, testCPULimit, testMemoryLimit, testPidsLimit, tt.allow)
+		spec := runtime.NewSpec(testImage, nil, testCPULimit, testMemoryLimit, testPidsLimit, tt.allow)
 
 		_, host, err := newContainerConfigs(spec, testSandboxID)
 		if err != nil {
@@ -144,10 +145,10 @@ func TestNewContainerConfigsRefusesAnInvalidSpec(t *testing.T) {
 	// newContainerConfigs is the last place a Spec can be rejected before its
 	// limits become kernel state, so it must not hand back a usable config for a
 	// spec Validate rejects.
-	spec := NewSpec(testImage, nil, testCPULimit, testMemoryLimit, 0, false)
+	spec := runtime.NewSpec(testImage, nil, testCPULimit, testMemoryLimit, 0, false)
 
 	cfg, host, err := newContainerConfigs(spec, testSandboxID)
-	if !errors.Is(err, ErrInvalidSpec) {
+	if !errors.Is(err, runtime.ErrInvalidSpec) {
 		t.Fatalf("newContainerConfigs error = %v, want errors.Is(..., ErrInvalidSpec)", err)
 	}
 	if cfg.Image != "" || host.PidsLimit != nil {
@@ -179,7 +180,7 @@ func TestClassifyNotFoundSubstitutesTheSentinelAndKeepsTheCauseText(t *testing.T
 		{
 			name:        "not found becomes the sentinel",
 			err:         fmt.Errorf("no such image: %w", errdefs.ErrNotFound),
-			wantErr:     ErrImageMissing,
+			wantErr:     runtime.ErrImageMissing,
 			wantMessage: "no such image",
 		},
 		{
@@ -191,7 +192,7 @@ func TestClassifyNotFoundSubstitutesTheSentinelAndKeepsTheCauseText(t *testing.T
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := classifyNotFound("op", "pulling", ErrImageMissing, tt.err)
+			err := classifyNotFound("op", "pulling", runtime.ErrImageMissing, tt.err)
 
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("classifyNotFound = %v, want errors.Is(..., %v)", err, tt.wantErr)
@@ -223,7 +224,7 @@ func TestClassifyExecDoneDistinguishesADeadlineFromACancel(t *testing.T) {
 			name:      "the exec timeout expired",
 			parentErr: nil,
 			derived:   context.DeadlineExceeded,
-			wantErr:   ErrExecTimeout,
+			wantErr:   runtime.ErrExecTimeout,
 			wantMsg:   "timed out",
 		},
 		{
@@ -273,7 +274,7 @@ func TestClassifyExecDoneAgainstRealContexts(t *testing.T) {
 		<-derived.Done()
 
 		err := classifyExecDone("op", "timed out", "cancelled", parent.Err(), derived.Err())
-		if !errors.Is(err, ErrExecTimeout) {
+		if !errors.Is(err, runtime.ErrExecTimeout) {
 			t.Fatalf("classifyExecDone = %v, want errors.Is(..., ErrExecTimeout)", err)
 		}
 	})
@@ -289,7 +290,7 @@ func TestClassifyExecDoneAgainstRealContexts(t *testing.T) {
 		<-derived.Done()
 
 		err := classifyExecDone("op", "timed out", "cancelled", parent.Err(), derived.Err())
-		if errors.Is(err, ErrExecTimeout) {
+		if errors.Is(err, runtime.ErrExecTimeout) {
 			t.Fatalf("classifyExecDone = %v, want a cancel, not a deadline", err)
 		}
 		if !errors.Is(err, context.Canceled) {
@@ -502,8 +503,8 @@ func TestCreateRejectsAnInvalidSpecBeforeTouchingTheDaemon(t *testing.T) {
 	daemon := newFakeDaemon(t)
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-	_, err := rt.Create(t.Context(), testSandboxID, NewSpec(testImage, nil, testCPULimit, 0, testPidsLimit, false))
-	if !errors.Is(err, ErrInvalidSpec) {
+	_, err := rt.Create(t.Context(), testSandboxID, runtime.NewSpec(testImage, nil, testCPULimit, 0, testPidsLimit, false))
+	if !errors.Is(err, runtime.ErrInvalidSpec) {
 		t.Fatalf("Create error = %v, want errors.Is(..., ErrInvalidSpec)", err)
 	}
 	if got := daemon.routes(); len(got) != 0 {
@@ -535,7 +536,7 @@ func TestCreateMapsADaemonNotFoundToErrImageMissing(t *testing.T) {
 			rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
 			_, err := rt.Create(t.Context(), testSandboxID, testSpec("nope:latest", nil))
-			if !errors.Is(err, ErrImageMissing) {
+			if !errors.Is(err, runtime.ErrImageMissing) {
 				t.Fatalf("Create error = %v, want errors.Is(..., ErrImageMissing)", err)
 			}
 		})
@@ -635,25 +636,25 @@ func TestOperationsRejectAMalformedIDBeforeReachingTheDaemon(t *testing.T) {
 
 	tests := []struct {
 		name string
-		call func(*testing.T, *DockerRuntime) error
+		call func(*testing.T, *Runtime) error
 	}{
 		{
 			name: "Create",
-			call: func(t *testing.T, rt *DockerRuntime) error {
+			call: func(t *testing.T, rt *Runtime) error {
 				_, err := rt.Create(t.Context(), malformed, testSpec(testImage, nil))
 				return err
 			},
 		},
 		{
 			name: "Inspect",
-			call: func(t *testing.T, rt *DockerRuntime) error {
+			call: func(t *testing.T, rt *Runtime) error {
 				_, err := rt.Inspect(t.Context(), malformed)
 				return err
 			},
 		},
 		{
 			name: "Destroy",
-			call: func(t *testing.T, rt *DockerRuntime) error {
+			call: func(t *testing.T, rt *Runtime) error {
 				return rt.Destroy(t.Context(), malformed)
 			},
 		},
@@ -664,7 +665,7 @@ func TestOperationsRejectAMalformedIDBeforeReachingTheDaemon(t *testing.T) {
 			daemon := newFakeDaemon(t)
 			rt, _ := newDockerTestRuntime(t, slog.LevelInfo, daemon)
 
-			if err := tt.call(t, rt); !errors.Is(err, ErrInvalidSandboxID) {
+			if err := tt.call(t, rt); !errors.Is(err, runtime.ErrInvalidSandboxID) {
 				t.Fatalf("%s error = %v, want ErrInvalidSandboxID", tt.name, err)
 			}
 			if got := daemon.routes(); len(got) != 0 {
@@ -707,7 +708,7 @@ func TestLookupFiltersOnBothLabelsAndIncludesStoppedContainers(t *testing.T) {
 func TestInspectReportsErrNotFoundWhenNoContainerCarriesTheLabel(t *testing.T) {
 	rt, _ := newDockerTestRuntime(t, slog.LevelInfo, newFakeDaemon(t))
 
-	if _, err := rt.Inspect(t.Context(), testSandboxID); !errors.Is(err, ErrNotFound) {
+	if _, err := rt.Inspect(t.Context(), testSandboxID); !errors.Is(err, runtime.ErrNotFound) {
 		t.Fatalf("Inspect error = %v, want ErrNotFound", err)
 	}
 }
@@ -728,11 +729,11 @@ func TestListRoutesTheSummaryThroughTheTranslators(t *testing.T) {
 		name          string
 		state         container.ContainerState
 		created       int64
-		wantState     State
+		wantState     runtime.State
 		wantCreatedAt time.Time
 	}{
-		{name: "running", state: container.StateRunning, created: created, wantState: StateRunning, wantCreatedAt: createdAt},
-		{name: "exited", state: container.StateExited, created: created, wantState: StateStopped, wantCreatedAt: createdAt},
+		{name: "running", state: container.StateRunning, created: created, wantState: runtime.StateRunning, wantCreatedAt: createdAt},
+		{name: "exited", state: container.StateExited, created: created, wantState: runtime.StateStopped, wantCreatedAt: createdAt},
 	}
 
 	for _, tt := range tests {
@@ -819,7 +820,7 @@ func TestListRetainsTheDaemonsCause(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "daemon is shutting down") {
 		t.Fatalf("List error = %v, want the daemon's cause", err)
 	}
-	if errors.Is(err, ErrNotFound) {
+	if errors.Is(err, runtime.ErrNotFound) {
 		t.Error("List error matched ErrNotFound, want a plain failure")
 	}
 }
@@ -1180,7 +1181,7 @@ func newDockerTestRuntime(
 	t *testing.T,
 	level slog.Level,
 	handler http.Handler,
-) (*DockerRuntime, *bytes.Buffer) {
+) (*Runtime, *bytes.Buffer) {
 	t.Helper()
 
 	server := httptest.NewServer(handler)
@@ -1203,9 +1204,9 @@ func newDockerTestRuntime(
 
 	logs := new(bytes.Buffer)
 	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: level}))
-	rt, err := NewDockerRuntime(dockerClient, logger)
+	rt, err := New(dockerClient, logger)
 	if err != nil {
-		t.Fatalf("NewDockerRuntime error = %v, want nil", err)
+		t.Fatalf("New error = %v, want nil", err)
 	}
 
 	return rt, logs

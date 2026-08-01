@@ -29,8 +29,8 @@ func TestValidatePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := validatePath(tt.path); !errors.Is(err, tt.wantErr) {
-				t.Errorf("validatePath(%q) error = %v, want %v", tt.path, err, tt.wantErr)
+			if err := ValidatePath(tt.path); !errors.Is(err, tt.wantErr) {
+				t.Errorf("ValidatePath(%q) error = %v, want %v", tt.path, err, tt.wantErr)
 			}
 		})
 	}
@@ -51,8 +51,8 @@ func TestValidateWrite(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := validateWrite(tt.path, tt.content); !errors.Is(err, tt.wantErr) {
-				t.Errorf("validateWrite(%q, %d bytes) error = %v, want %v", tt.path, len(tt.content), err, tt.wantErr)
+			if err := ValidateWrite(tt.path, tt.content); !errors.Is(err, tt.wantErr) {
+				t.Errorf("ValidateWrite(%q, %d bytes) error = %v, want %v", tt.path, len(tt.content), err, tt.wantErr)
 			}
 		})
 	}

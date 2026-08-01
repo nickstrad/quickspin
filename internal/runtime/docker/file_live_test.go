@@ -7,7 +7,7 @@
 // full path from the container root, the read side gets names relative to the
 // source's parent — so the two do not compose in memory. The daemon is the
 // thing that joins them, and only a live round trip proves the join is right.
-package runtime_test
+package docker_test
 
 import (
 	"bytes"
@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
+	"github.com/nickstrad/quickspin/internal/runtime/docker"
 )
 
 // One sandbox for the whole round-trip suite, with a distinct path per subtest.
@@ -284,7 +285,7 @@ func TestRemovePath(t *testing.T) {
 	})
 }
 
-func writeOrFatal(t *testing.T, rt *runtime.DockerRuntime, id, path string, content []byte, mode fs.FileMode) {
+func writeOrFatal(t *testing.T, rt *docker.Runtime, id, path string, content []byte, mode fs.FileMode) {
 	t.Helper()
 
 	if err := rt.WriteFile(t.Context(), id, path, content, mode); err != nil {
