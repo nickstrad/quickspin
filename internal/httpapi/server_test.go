@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -162,6 +163,34 @@ func sandboxID(t *testing.T, record map[string]any) string {
 }
 
 const alpineSpec = `{"image":"alpine:3.20"}`
+
+// A bind failure used to be discarded inside a goroutine: the process logged
+// that it was listening and then blocked forever on a port it never held.
+func TestStartReturnsTheBindError(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving a port error = %v, want nil", err)
+	}
+	t.Cleanup(func() { held.Close() })
+	port := held.Addr().(*net.TCPAddr).Port
+
+	api := NewAPI("127.0.0.1", port, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+
+	// Unbuffered and never closed: Start must return without it, so a Start that
+	// still waits for a shutdown signal hangs the test rather than passing.
+	if err := api.Start(make(chan struct{})); err == nil {
+		t.Fatal("Start() error = nil, want the address-in-use failure")
+	}
+}
+
+// Stop on an API that never started is the path a failed Start leaves behind.
+func TestStopBeforeStartIsNotAnError(t *testing.T) {
+	api := NewAPI("127.0.0.1", 0, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+
+	if err := api.Stop(); err != nil {
+		t.Errorf("Stop() error = %v, want nil", err)
+	}
+}
 
 func TestCreateSandboxReturnsCreatedRecord(t *testing.T) {
 	api := newTestAPI(t)
@@ -514,6 +543,31 @@ func TestInspectSandboxMapsStoreFailureTo500(t *testing.T) {
 	}
 	if got := decodeError(t, rec); got.Error.Code != CodeInternal {
 		t.Errorf("error code = %q, want %q", got.Error.Code, CodeInternal)
+	}
+}
+
+// The row can say running while the container is gone — routine until the
+// reconciler exists. Exec already answered 404 for it; Inspect used to answer
+// 500 for the same condition.
+func TestInspectSandboxMapsAMissingContainerTo404(t *testing.T) {
+	st := newTestStore(t)
+	api := newTestAPIWithRuntime(t, st, runtimetest.Fake{
+		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
+			return runtime.Info{}, nil
+		},
+		InspectFn: func(context.Context, string) (runtime.Info, error) {
+			return runtime.Info{}, runtime.E("runtime.Fake.Inspect", "no such container", runtime.ErrNotFound)
+		},
+	})
+	id := sandboxID(t, mustCreate(t, api, "k1", alpineSpec))
+
+	rec := do(t, api, http.MethodGet, "/v1/sandboxes/"+id, "", nil)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	if got := decodeError(t, rec); got.Error.Code != CodeNotFound {
+		t.Errorf("error code = %q, want %q", got.Error.Code, CodeNotFound)
 	}
 }
 

@@ -262,17 +262,17 @@ func (s *SqlliteStore) CreateSandbox(ctx context.Context, idempotencyKey string,
 	s.logger.DebugContext(ctx, "creating sandbox", "idempotencyKey", idempotencyKey)
 
 	if err := spec.Validate(); err != nil {
-		return nil, Wrap(op, "", err)
+		return nil, Wrap(op, msg, err)
 	}
 
 	key, err := s.GetIdempotencyKey(ctx, idempotencyKey)
 	if err != nil {
-		return nil, Wrap(op, "", err)
+		return nil, Wrap(op, msg, err)
 	}
 	if key != nil {
 		sandbox, err := s.GetSandbox(ctx, key.SandboxID)
 		if err != nil {
-			return nil, Wrap(op, "", err)
+			return nil, Wrap(op, msg, err)
 		}
 		s.logger.InfoContext(ctx, "returning existing sandbox for idempotency key",
 			"idempotencyKey", idempotencyKey, "sandboxID", sandbox.SandboxID, "state", sandbox.State)
@@ -281,7 +281,7 @@ func (s *SqlliteStore) CreateSandbox(ctx context.Context, idempotencyKey string,
 
 	specJSON, err := spec.ToJSON()
 	if err != nil {
-		return nil, Wrap(op, "", err)
+		return nil, Wrap(op, msg, err)
 	}
 
 	sandboxID := runtime.NewSandboxID()
@@ -330,7 +330,7 @@ func (s *SqlliteStore) GetSandboxes(ctx context.Context) ([]*Sandbox, error) {
 
 	rows, err := s.db.QueryContext(ctx, GetSandboxesQuery)
 	if err != nil {
-		return nil, E("store.sqllite.GetSandboxes", "listing sandboxes", err)
+		return nil, E("store.SqlliteStore.GetSandboxes", "listing sandboxes", err)
 	}
 	defer rows.Close()
 

@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/store"
 )
@@ -52,11 +54,23 @@ func NewAPI(host string, port int, logger *slog.Logger, store store.Store, runti
 }
 
 // fail is where an error stops being a Go value. It logs the whole chain once —
-// nothing below a handler logs, and nothing above one exists — then writes the
-// public envelope. message is what the client reads; err is what the operator
-// reads, and the two are deliberately not the same string.
+// the layers below report their own successful state changes but never their
+// failures, so a handler is the only place a failure is recorded — then writes
+// the public envelope. message is what the client reads; err is what the
+// operator reads, and the two are deliberately not the same string.
 func (a *API) fail(w http.ResponseWriter, r *http.Request, status int, code, message string, err error) {
-	logger := a.logger.With("url", r.URL.Path, "code", status, "err", err)
+	logger := a.logger.With(
+		"method", r.Method,
+		"url", r.URL.Path,
+		"code", status,
+		"requestID", middleware.GetReqID(r.Context()),
+		"err", err,
+	)
+	// Recoverable from url, but only a structured field is greppable across the
+	// several routes a single sandbox appears on.
+	if sandboxID := chi.URLParam(r, sandboxIDParam); sandboxID != "" {
+		logger = logger.With("sandboxID", sandboxID)
+	}
 	if op := OpOf(err); op != "" {
 		logger = logger.With("op", op)
 	}
@@ -278,7 +292,9 @@ func (a *API) markFailed(ctx context.Context, sandboxID string) {
 	if _, err := a.store.UpdateSandboxState(ctx, sandboxID, store.Pending, store.Failed); err != nil {
 		a.logger.ErrorContext(ctx, "marking the sandbox failed after the runtime refused it",
 			"sandboxID", sandboxID, "err", err)
+		return
 	}
+	a.logger.WarnContext(ctx, "sandbox marked failed after the runtime refused it", "sandboxID", sandboxID)
 }
 
 func (a *API) respond(w http.ResponseWriter, r *http.Request, status int, v any) {
@@ -339,9 +355,13 @@ func (a *API) InspectSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// failWith, not failInternal: a container the runtime cannot find is a 404
+	// like it is everywhere else. Until the reconciler exists, a row that still
+	// says running with no container behind it is an ordinary state, not a
+	// server fault.
 	infoObjs, err := a.runtime.Inspect(ctx, sandboxID)
 	if err != nil {
-		a.failInternal(w, r, op, fmt.Sprintf("inspecting sandbox %s", sandboxID), err)
+		a.failWith(w, r, Wrap(op, fmt.Sprintf("inspecting sandbox %s", sandboxID), err))
 		return
 	}
 
@@ -362,6 +382,8 @@ func (a *API) DestroySandbox(w http.ResponseWriter, r *http.Request) {
 		// running, which is the outcome the caller asked for — DELETE is
 		// idempotent, so that is a success, not an error.
 		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidStateTransition) {
+			a.logger.InfoContext(ctx, "destroy found nothing to stop",
+				"sandboxID", sandboxID, "err", err)
 			a.respond(w, r, http.StatusNoContent, nil)
 			return
 		}
@@ -655,6 +677,9 @@ func (a *API) Handler() http.Handler {
 
 func (a *API) initRouter() {
 	a.Router = chi.NewRouter()
+	// RequestID first so both the access log and any failure below carry the
+	// same id; concurrent requests are otherwise impossible to separate.
+	a.Router.Use(middleware.RequestID, a.logRequests)
 	a.Router.Route("/v1/sandboxes", func(r chi.Router) {
 		r.Post("/", a.CreateSandbox)
 		r.Get("/", a.ListSandboxes)
@@ -670,26 +695,59 @@ func (a *API) initRouter() {
 	})
 }
 
-func (a *API) Start(done <-chan struct{}) {
+// Start binds the socket before serving so a port already in use is returned to
+// the caller rather than lost in a goroutine. It also means the listening log
+// below is a fact: it is written after the bind, and it names the address the
+// kernel actually assigned, which is the only way to learn the port when Port
+// is 0.
+func (a *API) Start(done <-chan struct{}) error {
+	const op = "httpapi.API.Start"
+	addr := fmt.Sprintf("%s:%d", a.Address, a.Port)
+
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return E(op, fmt.Sprintf("listening on %s", addr), err)
+	}
+
 	// No ReadTimeout or WriteTimeout: exec can legitimately run long, and the
 	// header and idle timeouts already bound what an idle client can hold open.
 	a.Server = &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", a.Address, a.Port),
 		Handler:           a.Handler(),
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 	}
-	go a.Server.ListenAndServe()
-	<-done
-	a.Stop()
+
+	a.logger.Info("control plane listening", "addr", listener.Addr().String())
+
+	// Buffered so the goroutine can exit even when done fires first and nobody
+	// is left reading.
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- a.Server.Serve(listener) }()
+
+	select {
+	case err := <-serveErr:
+		// Serve only returns ErrServerClosed once Stop has run, and Stop is not
+		// what got us here, so every error on this path is a real one.
+		return E(op, "serving requests", err)
+	case <-done:
+		return a.Stop()
+	}
 }
 
 // Stop drains in-flight requests but gives up after shutdownTimeout: a
-// long-running exec must not hold the process open forever on exit.
-func (a *API) Stop() {
-	if a.Server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		a.Server.Shutdown(ctx)
+// long-running exec must not hold the process open forever on exit. A timeout
+// is returned rather than swallowed — it means a request was still running when
+// the process gave up on it.
+func (a *API) Stop() error {
+	if a.Server == nil {
+		return nil
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	if err := a.Server.Shutdown(ctx); err != nil {
+		return E("httpapi.API.Stop", "shutting down the server", err)
+	}
+	return nil
 }

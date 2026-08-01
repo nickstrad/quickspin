@@ -29,19 +29,24 @@ build-linux: ## Build the linux binary into bin/
 run: ## Run the app (pass args with ARGS="...")
 	go run $(PKG) $(ARGS)
 
+# Development servers run verbose: debug is where the per-request access log
+# lives, so an unexplained response has a matching line without a restart.
+# Override with `make serve LOG_LEVEL=info`.
+LOG_LEVEL ?= debug
+
 # The Docker SDK reads DOCKER_HOST and ignores the docker CLI's context, so the
 # server needs the socket named even when $(DOCKER_CONTEXT) is already active.
 # `?=` yields to an environment that already names a daemon.
 .PHONY: serve
 serve: export DOCKER_HOST ?= $(LIMA_DOCKER_HOST)
 serve: ## Run the control plane on the host against the VM's Docker daemon (flags via ARGS="...")
-	go run $(PKG) serve $(ARGS)
+	go run $(PKG) serve --log-level $(LOG_LEVEL) $(ARGS)
 
 # --host 0.0.0.0 because Lima only forwards guest ports bound to all interfaces,
 # and --db under the guest's home because the repo mount is read-only in the guest.
 .PHONY: serve-lima
 serve-lima: build-linux ## Run the control plane inside the Lima VM, reachable on the host at 127.0.0.1:8080
-	limactl shell $(VM_NAME) -- sh -c 'exec "$(CURDIR)/$(LINUX_BIN)" serve --host 0.0.0.0 --db "$$HOME/quickspin-control-plane.db" $(ARGS)'
+	limactl shell $(VM_NAME) -- sh -c 'exec "$(CURDIR)/$(LINUX_BIN)" serve --host 0.0.0.0 --log-level $(LOG_LEVEL) --db "$$HOME/quickspin-control-plane.db" $(ARGS)'
 
 # The dedicated live-test VM. It is a different instance from VM_NAME on
 # purpose: the live suite sweeps Quickspin containers, and the development VM

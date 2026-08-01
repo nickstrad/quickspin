@@ -45,12 +45,20 @@ func (app *application) newServeCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("open the store: %w", err)
 			}
-			defer sandboxStore.Cleanup()
+			defer func() {
+				// Logged rather than returned: the command is already on its way
+				// out, and a close failure must not replace the reason it exited.
+				if err := sandboxStore.Cleanup(); err != nil {
+					app.logger.ErrorContext(ctx, "closing the store failed", "err", err)
+				}
+			}()
 
+			// Start owns the listening log: it is the only place that knows the
+			// bind succeeded and which port the kernel assigned.
 			server := httpapi.NewAPI(host, port, app.logger, sandboxStore, sandboxRuntime)
-			app.logger.InfoContext(ctx, "control plane listening", "host", host, "port", port)
-
-			server.Start(ctx.Done())
+			if err := server.Start(ctx.Done()); err != nil {
+				return fmt.Errorf("run the control plane: %w", err)
+			}
 			return nil
 		},
 	}
