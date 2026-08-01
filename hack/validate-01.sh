@@ -142,16 +142,56 @@ run_or_fail "make build-linux failed." \
 
 [[ -x "$LINUX_BIN" ]] || fail "Expected ${LINUX_BIN} after make build-linux, but it is missing."
 
+# `sandbox list` needs a control plane in the guest to answer it, and starting
+# one there is the only check that runs docker.New where the DOCKER_HOST lookup
+# and the runsc registration check live. Its own port and database keep
+# validation clear of anything `make serve-lima` left behind.
+VALIDATE_PORT="${VALIDATE_PORT:-18080}"
+SERVER_READY_TIMEOUT="${SERVER_READY_TIMEOUT:-30}"
+serve_log="$(mktemp -t quickspin-validate-serve)"
+
 # `--` separates limactl's own flags from the guest command. The binary lives
 # under $HOME, which Lima mounts into the guest, so no copy step is needed.
-# `sandbox list` proves both that the binary runs and that the guest session can
-# reach the rootful daemon — DOCKER_HOST via /etc/environment, which PAM applies
-# even to this non-interactive SSH command, and the socket's docker group.
-# `fail` inside a command substitution can only exit that subshell, so the
-# explicit `|| exit 1` is what stops the script here.
-guest_output="$(run_or_fail "The linux/${LINUX_ARCH} binary could not list sandboxes inside '${VM_NAME}'. Is DOCKER_HOST set in the guest's /etc/environment?" \
-    limactl shell "$VM_NAME" -- "$LINUX_BIN" sandbox list --output json)" || exit 1
+# The guest writes its own pidfile because killing $serve_pid only closes the
+# ssh session, and a session that died on its own leaves the port held.
+limactl shell "$VM_NAME" -- sh -c \
+    "echo \$\$ >\"\$HOME/quickspin-validate.pid\" && exec '${LINUX_BIN}' serve --host 127.0.0.1 --port ${VALIDATE_PORT} --db \"\$HOME/quickspin-validate.db\"" \
+    >"$serve_log" 2>&1 &
+serve_pid=$!
 
-pass "Cross-compiled binary reaches the guest Docker daemon (sandbox list: ${guest_output})."
+cleanup_serve() {
+    kill "$serve_pid" 2>/dev/null || true
+    # Reaped here so bash does not report the killed job on its own, which
+    # would print "Terminated" after the script's own closing line.
+    wait "$serve_pid" 2>/dev/null || true
+    # sh -c so $HOME expands in the guest; limactl shell escapes bare arguments,
+    # which would make rm look for a file literally named "$HOME/...".
+    limactl shell "$VM_NAME" -- sh -c \
+        'kill "$(cat "$HOME/quickspin-validate.pid" 2>/dev/null)" 2>/dev/null; rm -f "$HOME/quickspin-validate.pid" "$HOME/quickspin-validate.db"' \
+        >/dev/null 2>&1 || true
+    rm -f "$serve_log"
+}
+trap cleanup_serve EXIT
+
+# Polled rather than a fixed sleep: the first start pays for schema creation, and
+# a sleep long enough for that would be dead time on every later run.
+serve_ready=0
+for ((attempt = 0; attempt < SERVER_READY_TIMEOUT; attempt++)); do
+    if guest_output="$(limactl shell "$VM_NAME" -- "$LINUX_BIN" \
+        --server "http://127.0.0.1:${VALIDATE_PORT}" sandbox list --output json 2>/dev/null)"; then
+        serve_ready=1
+        break
+    fi
+    kill -0 "$serve_pid" 2>/dev/null || break
+    sleep 1
+done
+
+if (( ! serve_ready )); then
+    printf -- '--- guest control plane log ---\n' >&2
+    cat "$serve_log" >&2
+    fail "The linux/${LINUX_ARCH} control plane never answered inside '${VM_NAME}' within ${SERVER_READY_TIMEOUT}s. Is DOCKER_HOST set in the guest's /etc/environment, and is runsc registered with its daemon?"
+fi
+
+pass "The cross-compiled control plane runs in the VM and serves its API (sandbox list: ${guest_output})."
 
 printf '\nAll checks passed.\n'

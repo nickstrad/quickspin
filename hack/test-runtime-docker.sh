@@ -144,13 +144,8 @@ if [[ "$MODE" == "setup" ]]; then
 fi
 
 if [[ "$MODE" == "teardown" ]]; then
-    # Only a running instance needs stopping, and teardown no longer starts one:
-    # an unconditional stop would spawn limactl to print an error on the common
-    # path.
-    if [[ "$vm_status" == "Running" ]]; then
-        limactl stop "$TEST_VM_NAME" || true
-    fi
-    limactl delete "$TEST_VM_NAME"
+    # --force also stops a running instance, so no separate stop step is needed.
+    limactl delete --force "$TEST_VM_NAME"
     pass "Deleted the Lima instance '${TEST_VM_NAME}'."
     exit 0
 fi

@@ -116,25 +116,31 @@ docs-build: $(DOCS_DEPS) ## Type-check and build the documentation reader
 clean: ## Remove build artifacts
 	rm -rf $(BIN_DIR)
 
-# The VM runs rootful Docker, so this is the daemon's default path already;
-# injecting it keeps the guest's DOCKER_HOST explicit rather than relying on the
-# SDK's built-in fallback.
+# Deletes any existing instance rather than reusing it, so a VM provisioned
+# against an older lima/quickspin.yaml cannot survive a rerun.
+#
+# The VM runs rootful Docker, so DOCKER_HOST below is the daemon's default path
+# already; injecting it keeps the guest's value explicit rather than relying on
+# the SDK's built-in fallback.
 .PHONY: lima-vm-create
-lima-vm-create:
-	limactl start lima/quickspin.yaml --name=$(VM_NAME) \
+lima-vm-create: lima-vm-delete
+	limactl start lima/quickspin.yaml --name=$(VM_NAME) --tty=false \
 		--set '.env.DOCKER_HOST = "unix:///var/run/docker.sock"'
 
+# --force covers both states a plain delete rejects: an instance that is still
+# running, and one that is not there at all.
 .PHONY: lima-vm-delete
 lima-vm-delete:
-	limactl stop $(VM_NAME)
-	limactl delete $(VM_NAME)
+	limactl delete --force $(VM_NAME)
 
 .PHONY: lima-vm-shell
 lima-vm-shell:
 	limactl shell $(VM_NAME)
 
+# `docker context create` refuses an existing name, so the stale one goes first;
+# it also has to, since a recreated VM gets a new socket path.
 .PHONY: host-docker-context-create
-host-docker-context-create:
+host-docker-context-create: host-docker-context-delete
 	docker context create $(DOCKER_CONTEXT) --docker "host=$(LIMA_DOCKER_HOST)"
 
 .PHONY: host-docker-context-use
