@@ -113,10 +113,10 @@ stateDiagram-v2
 Inside one Go process, `errors.Is` walks a chain of wrapped values. Between the guest
 and the plane there is no chain — only bytes on a wire. This roadmap applies the error
 reference's process-boundary rule for the first time: the guest serializes the shared
-`httpapi.ErrorResponse` DTO, and `guest.Client` reads it, logs what it said, and mints
+`api.ErrorResponse` DTO, and `guest.Client` reads it, logs what it said, and mints
 a *fresh* error of its own package's type. Wrapping is a lie here — the client never
 had the guest's error value, so pretending to wrap it fabricates a provenance that
-debugging will later trust and be misled by. The DTO lives in `internal/httpapi`
+debugging will later trust and be misled by. The DTO lives in `internal/api`
 precisely because it is wire format owned by neither side.
 
 ### Concept: someone must reap the zombies
@@ -191,10 +191,10 @@ Committed decisions:
 - The control plane talks to guests through a `guest.Client` Go interface mirroring the
   surface above; handlers depend on that interface, not on `Runtime`, for workload ops.
 - First application of the error reference's process-boundary rule: a guest-side Go
-  error never crosses the wire. The guest serializes the shared `httpapi.ErrorResponse`
+  error never crosses the wire. The guest serializes the shared `api.ErrorResponse`
   DTO; `guest.Client` logs what the DTO said and mints a fresh error of its own package
   type rather than pretending to wrap an error it does not have. Guest and plane both
-  reuse `internal/httpapi` — the DTO is wire format owned by neither side.
+  reuse `internal/api` — the DTO is wire format owned by neither side.
 - Public API change: `POST /v1/sandboxes/{id}/exec` gains `?stream=true` returning the
   ndjson stream; the buffered mode remains for SDK simplicity.
 - `/healthz` reports the guest's version; the control plane logs a warning on skew with
@@ -299,7 +299,7 @@ Committed decisions:
   >
     Define the interface next to its consumer (`internal/guest` or similar) with
     methods mirroring the five endpoints; the HTTP implementation decodes
-    `httpapi.ErrorResponse` on non-2xx, logs its fields, and returns its own error
+    `api.ErrorResponse` on non-2xx, logs its fields, and returns its own error
     values that handlers can map to status codes. Swap handlers over one at a time,
     keeping roadmap 05's tests green after each swap — the public contract is the
     regression suite for this refactor.

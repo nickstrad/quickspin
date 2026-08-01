@@ -44,7 +44,7 @@ from snapshots — exactly why roadmap 11 exists).
   capacity inside the insert's transaction (`FOR UPDATE` on the host row), the same
   fold-the-check-into-the-reserve rule as roadmap 08's quota, one layer down.
 - Both process boundaries follow the error reference: workerd serves the shared
-  `httpapi.ErrorResponse`; the plane's worker client logs the DTO and mints a
+  `api.ErrorResponse`; the plane's worker client logs the DTO and mints a
   `ControlPlaneError` (never a fake wrap), and `internal/worker` gets its own
   `WorkerError` type with the standard 30 lines.
 - The reconciler generalized across two layers: converging sandboxes *and* hosts.
@@ -267,7 +267,7 @@ is exercised daily, not only in prod.
   >
     The first question is what workerd *doesn't* contain: no store, no reconciler, no
     business rules — just `net/http` handlers that decode a request DTO, call the
-    existing `Runtime`, and encode `Info` or the shared `httpapi.ErrorResponse`. Add
+    existing `Runtime`, and encode `Info` or the shared `api.ErrorResponse`. Add
     a `cmd/quickspin-workerd/main.go` and reuse the runtime packages untouched. Auth
     is one middleware doing a constant-time compare
     (`crypto/subtle.ConstantTimeCompare`) of the `Authorization: Bearer` value
