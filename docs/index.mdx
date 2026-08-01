@@ -127,6 +127,10 @@ Current reference documents:
   test lanes — table tests, the fake daemon, `runtimetest.Fake`, conformance, and the
   Lima live harness — with diagrams, the reasoning behind each decision, and how the
   shape extends to future runtimes.
+- [`reference/package-boundaries.mdx`](reference/package-boundaries.mdx) proposes the
+  package layout rules: dependency direction, the contract / implementation /
+  conformance-suite triple for pluggable seams, where new code goes, and the
+  anti-patterns to refuse in review.
 - [`reference/concurrency-and-state.mdx`](reference/concurrency-and-state.mdx) proposes how
   the future control plane and workers should guard shared state around slow Docker I/O —
   the four helper categories, the upsert pattern for read-modify-write with I/O between,
