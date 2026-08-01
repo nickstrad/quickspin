@@ -178,7 +178,7 @@ const Sidebar = memo(function Sidebar({
           </button>
           <div>
             <p>Quickspin</p>
-            <span>Learning roadmap</span>
+            <span>Platform roadmap</span>
           </div>
           <button className="sidebar__close" onClick={onClose} aria-label="Close navigation">
             <CloseIcon />

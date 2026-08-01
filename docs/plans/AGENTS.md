@@ -13,9 +13,9 @@ Every roadmap in this directory must contain these sections, in this order:
 2. **Industry context** — how commercial platforms (E2B, Daytona, Modal, Vercel Sandbox,
    Fly Machines, etc.) solve the same problem, and how this roadmap's piece integrates with
    the platform being built here.
-3. **What you'll learn** — the concrete Linux, Go, distributed-systems, or API-design
-   concepts the roadmap is designed to teach. This is a learning project; a roadmap that
-   builds something without teaching something is mis-scoped.
+3. **Key concepts** — the concrete Linux, Go, distributed-systems, or API-design
+   concepts the roadmap explains. A platform roadmap that names work without explaining
+   the relevant systems concepts is mis-scoped.
 4. **Design and interfaces** — the Go interfaces, types, HTTP contracts, or schemas the
    roadmap commits to. Interfaces may be fully specified in the roadmap (the user implements
    them); implementations must not be.
@@ -34,10 +34,10 @@ Every roadmap in this directory must contain these sections, in this order:
    trustworthy URL is listed by title/author/venue without a link. Each entry needs a
    one-line note saying what specifically it adds beyond the roadmap.
 
-## Use MDX to teach, not merely to decorate
+## Use MDX to explain the platform, not merely to decorate
 
 Roadmaps use MDX so they can be more useful than static task lists. Make each roadmap a
-self-contained study guide that explains the concepts needed to implement it:
+self-contained technical guide that explains the concepts needed to implement it:
 
 - Include concise conceptual writeups near the task that uses the concept. Explain why
   the mechanism exists, how it behaves, and which failure mode makes it relevant.
@@ -45,9 +45,10 @@ self-contained study guide that explains the concepts needed to implement it:
   boundary, or event sequence is easier to understand visually than as prose.
 - Use tables for exact comparisons, mappings, invariants, and tradeoffs.
 - Use callouts for warnings, design commitments, Linux-specific behavior, and places
-  where the learning implementation deliberately differs from a commercial system.
-- Use interactive study components when they help the user test their understanding or
-  progressively reveal help. The components available to roadmaps are documented in
+  where the roadmap implementation deliberately differs from a commercial system.
+- Use interactive explainer components when they help validate understanding or
+  progressively reveal operational detail. The components available to roadmaps are
+  documented in
   [`docs/reader-guide.mdx`](../reader-guide.mdx).
 - Keep the prose technically substantial. Visual treatment should clarify useful
   information, not pad the document or turn every paragraph into a component.

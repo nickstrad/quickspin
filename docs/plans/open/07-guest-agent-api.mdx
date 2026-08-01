@@ -29,7 +29,7 @@ is a real design constraint from here on.
   workload code path.
 </KeyPoint>
 
-## What you'll learn
+## Key concepts
 
 - Designing a minimal internal API and owning both sides of it.
 - Streaming HTTP in Go: chunked responses, `http.Flusher`, framing stdout/stderr/exit
@@ -352,7 +352,7 @@ file watching; you ship one ndjson-over-HTTP binary because it is debuggable wit
 and has zero codegen overhead. The plane→guest link is unauthenticated plaintext on a
 local interface — acceptable on a single trusted host, indefensible multi-tenant; roadmap
 08 records this in the threat model rather than fixing it, which is itself the
-commercial-vs-learning tradeoff made explicit.
+commercial-vs-single-host tradeoff made explicit.
 
 ## Go deeper
 
@@ -396,7 +396,7 @@ commercial-vs-learning tradeoff made explicit.
     href="https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/"
   >
     How Kubernetes formalizes this roadmap's "running vs answering" distinction into
-    separate probes with separate consequences — the vocabulary interviews use.
+    separate probes with separate consequences — the vocabulary platform operators use.
   </Resource>
   <Resource
     kind="docs"

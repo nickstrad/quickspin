@@ -38,7 +38,7 @@ else here (TLS termination in front of the plane, secrets
 in an env file with tight permissions, deploy-by-artifact) is standard practice scaled
 down to one machine.
 
-## What you'll learn
+## Key concepts
 
 - Linux server operation for real: systemd units (`Restart=`, `After=`, journal
   logging), ufw firewalling (443 + SSH only — guest ports and the plane's plaintext
@@ -334,11 +334,13 @@ concurrent deploys.
 
 No Kubernetes, no Terraform, no CI/CD pipeline, no blue-green: for one host, each of
 those adds more failure modes than it removes, and cloud-init + a deploy script keeps
-the whole prod story readable in two files — itself a resume-legible judgment call.
-The real risks accepted and written down: single point of failure (fine for a demo),
-brief deploy downtime, and secrets managed by file permissions rather than a vault.
+the whole production story readable in two files — itself an operator-legible judgment
+call. The real risks accepted and written down: single point of failure (acceptable for
+an initial single-host deployment), brief deploy downtime, and secrets managed by file
+permissions rather than a vault.
 What is *not* compromised: TLS-only exposure, a firewalled plane, hashed keys, and
-rollback-capable deploys — the floor below which "demo" becomes "liability."
+rollback-capable deploys — the floor below which an initial deployment becomes a
+liability.
 
 ## Go deeper
 

@@ -27,7 +27,7 @@ survive), but a different promise than E2B's, and the roadmap requires naming th
 difference in your API docs rather than blurring it. Filesystem-vs-memory snapshotting
 is precisely the boundary where microVMs earn their keep, which sets up roadmap 14.
 
-## What you'll learn
+## Key concepts
 
 - Docker image mechanics for real: layers, commit, what balloons image size, why
   writable-layer growth matters.
@@ -177,7 +177,7 @@ quota; guest binary is re-injected on restore so snapshots never bake in a stale
     The `snapshots` table, the three endpoints, tenant scoping, and the admission-time
     byte quota in the style of roadmap 08.
   </Task>
-  <Task title="Teach the reconciler snapshot GC">
+  <Task title="Add snapshot GC to the reconciler">
     Unreferenced or over-quota snapshot images get garbage-collected by the roadmap 06
     loop.
   </Task>
@@ -306,9 +306,9 @@ E2B's pause/resume snapshots RAM in hundreds of milliseconds via Firecracker; th
 a company-scale feature sitting on a custom hypervisor stack. `docker commit` gives you
 80% of the agent-workflow value (durable environments, warm dependency caches) with one
 API call, and — more importantly for your goals — forces you to articulate the
-filesystem/memory distinction that makes the microVM pitch legible in interviews. The
-byte quota exists because snapshots are the first thing in this system that silently
-consumes disk forever; commercial platforms meter and bill it, you cap it.
+filesystem/memory distinction that makes the microVM architecture legible in design
+reviews. The byte quota exists because snapshots are the first thing in this system
+that silently consumes disk forever; commercial platforms meter and bill it, you cap it.
 
 ## Go deeper
 

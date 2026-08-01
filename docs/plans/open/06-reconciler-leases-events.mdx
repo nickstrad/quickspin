@@ -27,7 +27,7 @@ default timeout) because agents crash and forget to clean up, and orphaned compu
 the fastest way to burn money. Event logs are how platforms answer "what happened to my
 sandbox?" — and later become billing and audit records.
 
-## What you'll learn
+## Key concepts
 
 - The reconcile loop pattern: level-triggered ("observe full state, fix it") vs
   edge-triggered ("react to events"), and why level-triggered survives crashes.
@@ -133,7 +133,7 @@ mercy-kills it. `go test -race` is silent here because nothing races on memory; 
 interleaving is entirely between valid SQL statements. The fix is optimistic
 concurrency in miniature: the write restates its assumption
 (`... WHERE id=? AND state='pending'`) so a vanished assumption makes the write match
-zero rows, and the reconciler checks `RowsAffected` to learn it lost the race and must
+zero rows, and the reconciler checks `RowsAffected` to detect that it lost the race and must
 clean up the container it just made.
 
 <Figure caption="The lost-update interleaving: the API's delete lands inside the reconciler's read–write gap. The guarded write matches zero rows instead of resurrecting the sandbox.">

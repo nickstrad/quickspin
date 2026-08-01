@@ -6,9 +6,9 @@ Depends on: 09.
 
 Create `sdk/python/` (`quickspin` package): the same client surface as the TypeScript
 SDK, in idiomatic Python (sync-first, context managers, `httpx`). As with roadmap 09,
-**Claude generates it; you review and gate on contract tests**. The learning payload
-for you is smaller and different: watching whether your API survives a second language
-untouched — every place the Python SDK needs a workaround is an API bug to fix in Go.
+generate it behind contract tests and review the resulting public surface. The second
+SDK validates whether the API survives another language untouched — every place the
+Python client needs a workaround is an API bug to fix in Go.
 
 ## Industry context
 
@@ -20,7 +20,7 @@ equivalent contract suites, which is the only scalable answer to N languages. Wh
 TypeScript is async-native, Python platforms typically ship sync-first with an async
 variant later; this roadmap follows that.
 
-## What you'll learn
+## Key concepts
 
 - Reading your API through a second language's eyes: naming (`ttlSeconds` vs
   `ttl_seconds`), error-code stability, streaming ergonomics (`for ev in
@@ -273,8 +273,8 @@ Deliberately untested: asyncio variant, Python versions below 3.11, Windows.
 
 Commercial platforms generate both SDKs from the spec in CI and publish to npm/PyPI on
 tags with semver guarantees. You keep the packages in-repo and unpublished until the
-roadmap 12 demo needs to import them (a git or path dependency is fine for a learning
-platform and avoids premature registry ceremony). Skipping asyncio-first is deliberate:
+roadmap 12 demo needs to import them (a git or path dependency is appropriate during
+local platform development and avoids premature registry ceremony). Skipping asyncio-first is deliberate:
 sync code keeps the demo harness readable, and the API's streaming already proves the
 hard part works.
 

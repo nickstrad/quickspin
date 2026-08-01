@@ -1,7 +1,8 @@
 # quickspin
 
-Quickspin is a **learning project**. The user is building it to learn, not to ship
-production software as fast as possible.
+Quickspin is an **agent sandbox platform** developed deliberately and incrementally.
+The user values understanding the infrastructure as deeply as shipping it, so do not
+optimize for speed at the expense of comprehension.
 
 ## Working guidelines
 
@@ -10,8 +11,8 @@ production software as fast as possible.
 - Default to analysis first. When you find a bug, incomplete stub, questionable design,
   or missing feature, explain it and wait for direction before editing unless the user
   directly asked you to implement or fix it.
-- Incomplete functions, TODOs, and rough experiments may be intentional learning steps.
-  Do not finish, refactor, or polish them on your own initiative.
+- Incomplete functions, TODOs, and rough experiments may be intentional implementation
+  steps. Do not finish, refactor, or polish them on your own initiative.
 - When proposing a design, distinguish current behavior from possible future
   architecture. Do not describe a proposal as though it already exists.
 - Explain unfamiliar Go or TypeScript conventions when they materially affect a change.
@@ -107,7 +108,7 @@ the current reference material.
   implement a plan merely because it exists; wait for the user to ask.
 - `docs/plans/closed/` contains completed MDX plans retained as historical context. They may
   explain why something changed, but the current code remains authoritative.
-- `docs/reference/` contains forward-looking learning and architecture material. It is
+- `docs/reference/` contains forward-looking technical and architecture material. It is
   not a specification for current behavior and should not be implemented unless asked.
 
 Keep `docs/index.mdx` current when adding, moving, or removing documentation.

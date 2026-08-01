@@ -29,7 +29,7 @@ harnesses (roadmap 06), and typed SDK errors decide whether the agent can recove
 dies (roadmaps 09/10). Dogfooding the platform through a real agent is how every platform
 team finds its actual API gaps.
 
-## What you'll learn
+## Key concepts
 
 - The consumer's view of your own API: what's awkward, what's missing, what's slow.
 - A minimal agent tool loop with the Anthropic API: tool definitions
@@ -140,13 +140,13 @@ flowchart TD
   When the model emits several tool_use blocks in one turn, return every tool_result
   in a single user message. Splitting them across messages (or dropping a failed one)
   malforms the transcript — the API rejects unmatched tool_use ids, and partial
-  results teach the model to stop parallelizing.
+  results signal the model to stop parallelizing.
 </Callout>
 
 ## Design and interfaces
 
 Demo repo shape (TypeScript, matching your strongest language; the harness is ~200
-lines and not the learning focus):
+lines and not this roadmap's integration focus):
 
 ```text
 quickspin-demo/
@@ -298,12 +298,13 @@ non-Anthropic model providers.
 
 ## Solo-developer tradeoffs
 
-A commercial demo would be a hosted playground with streaming UI; yours is a CLI that
-prints a transcript — right-sized, and closer to how platform engineers actually smoke-
-test. Using your own harness rather than adopting a framework (LangChain etc.) keeps
-the dependency surface tiny and makes the demo legible in an interview: every line
-between "LLM decided" and "sandbox executed" is code you can explain. This roadmap is also
-the natural stopping point for the résumé artifact — 13 and 14 are depth, not breadth.
+A hosted playground with streaming UI would add product surface without improving this
+integration milestone. The CLI transcript is right-sized and closer to how platform
+engineers actually smoke-test. Using the purpose-built harness rather than adopting a
+framework (LangChain etc.) keeps the dependency surface tiny and makes the integration
+legible in an architecture
+review: every line between "LLM decided" and "sandbox executed" is code you can explain.
+This roadmap is also a natural product milestone — 13 and 14 add depth, not breadth.
 
 ## Go deeper
 

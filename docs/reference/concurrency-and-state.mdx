@@ -4,7 +4,7 @@ Forward-looking reference material, not a description of current code. `internal
 as first built (roadmap 02) is single-goroutine and needs none of this. It becomes load-
 bearing at roadmaps 05–06 (a control plane with a reconcile loop and an HTTP API touching
 shared records) and roadmap 17 (workers). Read it before writing either. Adapted from a
-sibling learning project that guarded exactly this shape of state — "read a record, do
+earlier codebase that guarded exactly this shape of state — "read a record, do
 slow Docker I/O, write the result" — in real code.
 
 One framing correction against the roadmaps: the sibling project held its records in

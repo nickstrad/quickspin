@@ -42,7 +42,7 @@ implementation detail of DO's platform rather than a documented guarantee.
   </CompareItem>
 </Compare>
 
-## What you'll learn
+## Key concepts
 
 - Two more cloud SDKs from Go (`aws-sdk-go-v2/service/ec2`, `godo`) and how their
   vocabularies map onto one interface: tags vs labels, base64 user-data vs plain,
@@ -332,8 +332,8 @@ industry runs high-density fleets on metal rather than one microVM per small
 instance — density is the economic argument for Firecracker, and your latency table
 from roadmap 14 plus this roadmap's per-hour prices are the two numbers that argument
 needs. DigitalOcean's undocumented nested virt is the opposite tradeoff: cheap and
-real, but a platform dependency no SLA backs — fine for a learning fleet, named as
-unacceptable for the hypothetical v2.
+real, but a platform dependency no SLA backs — acceptable for a development fleet,
+explicitly unacceptable for a production provider.
 
 ## Go deeper
 

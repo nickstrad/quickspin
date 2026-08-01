@@ -24,7 +24,7 @@ The porting exercise itself is an industry rite: the bugs live exactly where SQL
 forgiving (type affinity, `datetime` as text, implicit transaction behavior) and
 Postgres is not.
 
-## What you'll learn
+## Key concepts
 
 - Writing Go SQL against two engines: `pgx` vs `database/sql`+sqlite, placeholder
   styles (`?` vs `$1`), and where to stop abstracting (two small store
@@ -222,7 +222,7 @@ Committed decisions:
     Roadmap 05's portability rules should make this small; every divergence found goes
     in the closing notes.
   </Task>
-  <Task title="Teach the migrator the advisory-lock dance">
+  <Task title="Add advisory locking to the migrator">
     Acquire `pg_advisory_lock` on the migration connection before applying, release
     after; SQLite path unchanged.
   </Task>

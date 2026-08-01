@@ -1,14 +1,14 @@
-# Sandbox Infrastructure Learning Path
+# Sandbox Platform Evolution
 
-This document suggests one route for learning how scalable agent sandbox infrastructure
-works. It is forward-looking reference material, not a specification or an approved
-implementation roadmap.
+This document maps one route from a local sandbox runtime to scalable agent sandbox
+infrastructure. It is forward-looking reference material, not a specification or an
+approved implementation roadmap.
 
 The path begins with a single local sandbox and progressively exposes lifecycle,
 control-plane, scheduling, performance, and isolation concerns. Each stage should answer
 its own questions before the next stage adds complexity.
 
-The stages are now instantiated as concrete roadmaps under `docs/plans/`; where the
+The stages are now instantiated as concrete platform roadmaps under `docs/plans/`; where the
 two disagree, the roadmaps are authoritative. Rough mapping: stage 1 → roadmaps 01–04, stage 2
 → roadmaps 05–08, stage 3 → roadmaps 09–10 (plus Python), stage 4 → roadmap 17 (which deliberately
 defers this stage's ownership leases — see that roadmap's known-gaps note), stage 5 → roadmap
@@ -50,7 +50,7 @@ Expose the lifecycle through a Go HTTP service while keeping the runtime behind 
 internal boundary. The control plane should allocate stable sandbox IDs instead of
 returning backend-specific container IDs.
 
-Add only enough state to learn control-plane behavior:
+Add only enough state to establish control-plane behavior:
 
 - Stable sandbox records and lifecycle states
 - Idempotency keys for retried requests
@@ -148,7 +148,7 @@ memory must not cross sandbox boundaries unintentionally.
 ## 6. Deepen isolation and security
 
 Once lifecycle and scheduling behavior are understood, replace or augment the initial
-Docker backend to learn lower-level isolation:
+Docker backend to strengthen lower-level isolation:
 
 - containerd and OCI runtimes
 - Rootless containers and user namespaces

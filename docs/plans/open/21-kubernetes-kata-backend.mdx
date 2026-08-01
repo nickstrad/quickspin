@@ -53,7 +53,7 @@ roadmap's pool kind *delegates* instead of pretending to manage.
   </CompareItem>
 </Compare>
 
-## What you'll learn
+## Key concepts
 
 - client-go fundamentals: kubeconfig loading, typed clientsets, creating and
   deleting Pods, label selectors as the list mechanism — roadmap 02's label discipline
@@ -342,7 +342,7 @@ traffic is not sufficient.
     static linking means no base image, which also means no shell inside, so debug
     via pod logs, not exec. Push to any registry the cluster can pull from
     (Docker Hub or GHCR are fine); imagePullSecrets if private. Pin by tag or
-    digest in pool config — `:latest` on a learning cluster is how a week-old bug
+    digest in pool config — `:latest` on a non-production cluster is how a week-old bug
     resurrects after a node re-pull.
   </Hint>
   <Hint

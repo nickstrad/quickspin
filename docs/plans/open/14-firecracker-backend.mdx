@@ -15,8 +15,8 @@ exec-via-guest / files / destroy through the same control plane and SDKs. The ba
 also carries roadmap 03's binary egress contract across the VM boundary: every guest keeps
 its network device so the plane can reach it, while host firewall policy decides
 whether workload-initiated traffic may leave. Snapshots, warm pools, and production
-hardening are explicitly out of scope — this roadmap buys the mental model and the resume
-line, not parity with Docker.
+hardening are explicitly out of scope — this roadmap establishes the runtime model and
+proves the backend seam, not parity with Docker.
 
 The roadmap ends with the **prod cutover**: the roadmap 16 host (chosen for its `/dev/kvm`
 precisely for this moment) gains the Firecracker backend beside Docker, and new prod
@@ -50,7 +50,7 @@ boundary moves from "syscall filtering" to "virtual hardware."
   </CompareItem>
 </Compare>
 
-## What you'll learn
+## Key concepts
 
 - KVM at arm's length: `/dev/kvm`, why nested virt works in Lima (Apple Silicon
   exposes it via Virtualization.framework), and checking for it.
@@ -507,12 +507,11 @@ and CoW storage — multi-engineer territory. The jailer is worth understanding 
 unused: it wraps each firecracker process in a chroot, its own namespaces, cgroups,
 and a dropped-privilege uid — roadmap 13's exact toolkit, applied to the VMM itself,
 because a compromised device emulator is the remaining attack surface once guests
-have their own kernels. One unjailed VM with a copied rootfs is weekend territory and
-still crosses the line that matters: your platform demonstrably runs the same
+have their own kernels. One unjailed VM with a copied rootfs is a bounded initial scope
+and still crosses the line that matters: your platform demonstrably runs the same
 workload API on shared-kernel *and* separate-kernel isolation, chosen per sandbox by
 a field in the spec. That sentence — with the latency table to back it — is the
-strongest artifact this whole roadmap set produces for platform-infrastructure
-interviews.
+strongest architecture proof this roadmap set produces for platform infrastructure.
 
 ## Go deeper
 

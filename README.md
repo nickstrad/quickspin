@@ -17,7 +17,7 @@ pass, so container and microVM isolation sit behind the same API.
 > CPU/memory/pids limits and network off by default; file operations enforce
 > absolute-path validation and bounded transfers. The guest agent, SDKs, and the
 > Firecracker/Kata backends are future roadmap work. See the
-> [learning roadmaps](docs/plans/) for the intended sequence.
+> [platform roadmap](docs/plans/) for the intended sequence.
 
 ## Architecture
 
@@ -336,8 +336,8 @@ make clean              # remove bin/
 
 ### Documentation
 
-The human-facing docs are the learning roadmaps in [`docs/plans/`](docs/plans/). A local
-reader renders the open and completed roadmaps with search and navigation:
+The human-facing docs are the platform roadmap in [`docs/plans/`](docs/plans/). A local
+reader renders open and delivered milestones with search and navigation:
 
 ```sh
 make docs         # dev server

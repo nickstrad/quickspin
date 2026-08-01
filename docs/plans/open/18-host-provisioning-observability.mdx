@@ -30,7 +30,7 @@ The metrics stack is the industry-standard shape at minimum size: instrument wit
 provider's server list as one more "actual state" to reconcile — orphan cloud servers
 are the fleet-scale version of roadmap 02's orphan containers, except these cost money.
 
-## What you'll learn
+## Key concepts
 
 - Driving a cloud provider API from Go (`hcloud-go`): create/list/delete servers,
   labels as ownership markers, user-data injection — and writing it behind an
@@ -340,8 +340,8 @@ revoked on delete.
     spanning your real latencies (`prometheus.NewHistogram` with explicit buckets —
     the defaults top out around 10s), and gauges for running sandboxes, host
     headroom, and heartbeat age (a `GaugeFunc` reading the store works). Workerd
-    gets its own smaller set. Resist adding more series — the learning here
-    includes the restraint.
+    gets its own smaller set. Resist adding more series — the production discipline
+    here includes the restraint.
   </Hint>
   <Hint
     title="Expose metrics to Grafana Cloud without exposing them to the internet"

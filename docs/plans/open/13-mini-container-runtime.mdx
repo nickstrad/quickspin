@@ -27,7 +27,7 @@ ancestry (Liz Rice's "containers from scratch"); the twist here is tying each sy
 back to behavior you already observed through Docker in roadmaps 02–03 (e.g. the
 `PidsLimit` fork-bomb test becomes *your* `pids.max` write).
 
-## What you'll learn
+## Key concepts
 
 - Namespaces concretely: `CLONE_NEWPID/NEWNS/NEWUTS/NEWIPC/NEWNET`, and what each one
   actually hides (PID 1 illusion, mount table privacy, hostname, no network).
@@ -341,12 +341,11 @@ Each is one more rung on the same ladder; note in the closing which you attempte
 ## Solo-developer tradeoffs
 
 runc handles dozens of edge cases per syscall (mount propagation, console handling,
-checkpoint hooks); your mini-runtime handles the happy path of five features and that
-is the point — it's a flashlight, not a product, and it is deliberately never plugged
-into the control plane (Docker/Firecracker remain the real backends). The payoff is
-disproportionate for interviews at E2B/Daytona/Modal-type companies: "walk me through
-what happens when a container starts" answered from personal syscalls beats any amount
-of Docker-flag fluency.
+checkpoint hooks); the mini-runtime handles the happy path of five features and is
+deliberately a diagnostic implementation rather than a production backend. It is never
+plugged into the control plane (Docker/Firecracker remain the real backends). Its value
+is a concrete, inspectable explanation of what happens when a container starts, grounded in
+the same syscalls and isolation primitives used by production runtimes.
 
 ## Go deeper
 

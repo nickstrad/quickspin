@@ -1,6 +1,6 @@
 # Documentation index
 
-The human-facing reader indexes only the learning roadmaps in `plans/open/` and
+The human-facing reader indexes only the platform roadmaps in `plans/open/` and
 `plans/closed/`. This index, [`reader-guide.mdx`](reader-guide.mdx),
 [`plans/AGENTS.md`](plans/AGENTS.md), and [`reference/`](reference/) are supporting
 material for agents that author or update those roadmaps.
@@ -8,7 +8,7 @@ material for agents that author or update those roadmaps.
 ## Roadmaps
 
 The roadmap outlines Quickspin's intended future state as a sequence of independently
-verifiable learning milestones. It complements the codebase; it does not describe current
+verifiable platform milestones. It complements the codebase; it does not describe current
 behavior or authorize implementation by itself.
 
 - [`plans/open/`](plans/open/) contains future or in-progress milestones.
@@ -16,7 +16,7 @@ behavior or authorize implementation by itself.
 - [`plans/AGENTS.md`](plans/AGENTS.md) defines the required structure for every roadmap,
   including the verifiable definition-of-done requirement.
 
-### The platform learning roadmap
+### Platform roadmap
 
 Milestones 01–05 are complete. Roadmaps 06–23 describe intended future states rather
 than current behavior; the codebase remains authoritative.
@@ -106,13 +106,13 @@ where this summary is coarse.
 
 ## Reference
 
-[`reference/`](reference/) contains forward-looking learning notes, architectural options,
+[`reference/`](reference/) contains forward-looking technical notes, architectural options,
 and technical background. Reference documents are not specifications for current code.
 
 Current reference documents:
 
-- [`reference/sandbox-infrastructure-learning-path.mdx`](reference/sandbox-infrastructure-learning-path.mdx)
-  suggests a staged path from one local sandbox to scalable sandbox infrastructure.
+- [`reference/sandbox-platform-evolution.mdx`](reference/sandbox-platform-evolution.mdx)
+  maps the platform's evolution from one local sandbox to scalable infrastructure.
 - [`reference/error-handling-and-logging.mdx`](reference/error-handling-and-logging.mdx)
   proposes per-package error types (`E` at the boundary / `Wrap` above it), one log per
   error, and `slog` child loggers threaded through constructors.

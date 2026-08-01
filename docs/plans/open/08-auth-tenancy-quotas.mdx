@@ -20,7 +20,7 @@ identification (`qs_live_...`), and quota checks that admission-control creates 
 any resource is spent. Commercial platforms layer OAuth, orgs, RBAC, and rate limiting
 on top; the tenant-scoping core underneath is what you're building.
 
-## What you'll learn
+## Key concepts
 
 - Credential handling: generate with `crypto/rand`, store SHA-256 hashes, compare in
   constant time, never log secrets.
@@ -324,9 +324,9 @@ per-key rate limiting, key rotation UX, audit of admin actions.
 
 No OAuth, no web console, no RBAC, no billing — one bearer-key scheme done correctly.
 That is the right floor: hashing, scoping, and transactional admission are the parts
-that are hard to retrofit, while console/OAuth are additive later. The threat-model doc
-is the resume artifact here: interviewers at platform companies probe "what does your
-sandbox *not* defend against?" and a written honest answer is rarer than the code.
+that are hard to retrofit, while console/OAuth are additive later. The threat-model
+document is the durable security artifact here: reviewers and operators need a precise
+answer to "what does your sandbox *not* defend against?" before they can trust the code.
 
 ## Go deeper
 
