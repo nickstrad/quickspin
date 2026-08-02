@@ -9,17 +9,20 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/nickstrad/quickspin/internal/httpapi"
+	"github.com/nickstrad/quickspin/internal/reconciler"
 	"github.com/nickstrad/quickspin/internal/runtime/docker"
 	"github.com/nickstrad/quickspin/internal/store/sqlite"
 )
 
 type Config struct {
-	Host   string
-	Port   int
-	DBPath string
-	Logger *slog.Logger
+	Host               string
+	Port               int
+	DBPath             string
+	Logger             *slog.Logger
+	ReconcilerInterval time.Duration
 }
 
 // Serve blocks until ctx is done or the server stops.
@@ -43,6 +46,10 @@ func Serve(ctx context.Context, cfg Config) error {
 			cfg.Logger.ErrorContext(ctx, "closing the store failed", "err", err)
 		}
 	}()
+
+	// Start returns immediately; it must be called before the blocking
+	// server.Start below or the loop would only begin once serving had ended.
+	reconciler.NewReconciler(cfg.Logger, sandboxStore, sandboxRuntime).Start(ctx, cfg.ReconcilerInterval)
 
 	// Start owns the listening log: it is the only place that knows the bind
 	// succeeded and which port the kernel assigned.

@@ -22,6 +22,7 @@ import (
 	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/nickstrad/quickspin/internal/store"
 	"github.com/nickstrad/quickspin/internal/store/sqlite"
+	"github.com/nickstrad/quickspin/internal/store/storetest"
 )
 
 func newTestAPI(t *testing.T) *API {
@@ -67,38 +68,6 @@ func newTestAPIWithRuntime(t *testing.T, st store.Store, rt runtime.Runtime) *AP
 	srv := NewAPI("127.0.0.1", 0, slog.New(slog.NewTextHandler(io.Discard, nil)), st, rt)
 	srv.Handler()
 	return &srv
-}
-
-// fakeStore scripts one method at a time. Every unset method is nil, so a
-// handler reaching for one panics the test rather than silently taking a path
-// the case did not intend.
-type fakeStore struct {
-	store.Store
-	createSandbox      func(ctx context.Context, key string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error)
-	getSandbox         func(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error)
-	getSandboxes       func(ctx context.Context) ([]*sandbox.Sandbox, error)
-	getSandboxEvents   func(ctx context.Context, sandboxID string) ([]*events.Event, error)
-	updateSandboxState func(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error)
-}
-
-func (f *fakeStore) CreateSandbox(ctx context.Context, key string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error) {
-	return f.createSandbox(ctx, key, spec, expiresAt)
-}
-
-func (f *fakeStore) GetSandbox(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error) {
-	return f.getSandbox(ctx, sandboxID)
-}
-
-func (f *fakeStore) GetSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error) {
-	return f.getSandboxes(ctx)
-}
-
-func (f *fakeStore) GetSandboxEvents(ctx context.Context, sandboxID string) ([]*events.Event, error) {
-	return f.getSandboxEvents(ctx, sandboxID)
-}
-
-func (f *fakeStore) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error) {
-	return f.updateSandboxState(ctx, sandboxID, from, to, reason)
 }
 
 func do(t *testing.T, srv *API, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -416,8 +385,8 @@ func TestCreateSandboxIsIdempotentAcrossRequests(t *testing.T) {
 
 func TestCreateSandboxMapsStoreFailureTo500(t *testing.T) {
 	boom := errors.New("database is on fire")
-	srv := newTestAPIWithStore(t, &fakeStore{
-		createSandbox: func(context.Context, string, sandbox.SpecFile, time.Time) (*sandbox.Sandbox, error) {
+	srv := newTestAPIWithStore(t, storetest.Fake{
+		CreateSandboxFn: func(context.Context, string, sandbox.SpecFile, time.Time) (*sandbox.Sandbox, error) {
 			return nil, boom
 		},
 	})
@@ -486,8 +455,8 @@ func TestListSandboxesReturnsEveryRecord(t *testing.T) {
 }
 
 func TestListSandboxesMapsStoreFailureTo500(t *testing.T) {
-	srv := newTestAPIWithStore(t, &fakeStore{
-		getSandboxes: func(context.Context) ([]*sandbox.Sandbox, error) {
+	srv := newTestAPIWithStore(t, storetest.Fake{
+		GetSandboxesFn: func(context.Context) ([]*sandbox.Sandbox, error) {
 			return nil, errors.New("database is on fire")
 		},
 	})
@@ -546,11 +515,11 @@ func TestGetSandboxEventsReturnsOrderedWireEvents(t *testing.T) {
 }
 
 func TestGetSandboxEventsReturnsEmptyArray(t *testing.T) {
-	srv := newTestAPIWithStore(t, &fakeStore{
-		getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
+	srv := newTestAPIWithStore(t, storetest.Fake{
+		GetSandboxFn: func(context.Context, string) (*sandbox.Sandbox, error) {
 			return &sandbox.Sandbox{SandboxID: "sbx_known"}, nil
 		},
-		getSandboxEvents: func(context.Context, string) ([]*events.Event, error) {
+		GetSandboxEventsFn: func(context.Context, string) ([]*events.Event, error) {
 			return nil, nil
 		},
 	})
@@ -566,8 +535,8 @@ func TestGetSandboxEventsReturnsEmptyArray(t *testing.T) {
 }
 
 func TestGetSandboxEventsUnknownSandboxReturns404(t *testing.T) {
-	srv := newTestAPIWithStore(t, &fakeStore{
-		getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
+	srv := newTestAPIWithStore(t, storetest.Fake{
+		GetSandboxFn: func(context.Context, string) (*sandbox.Sandbox, error) {
 			return nil, store.ErrNotFound
 		},
 	})
@@ -583,11 +552,11 @@ func TestGetSandboxEventsUnknownSandboxReturns404(t *testing.T) {
 }
 
 func TestGetSandboxEventsMapsStoreFailureTo500(t *testing.T) {
-	srv := newTestAPIWithStore(t, &fakeStore{
-		getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
+	srv := newTestAPIWithStore(t, storetest.Fake{
+		GetSandboxFn: func(context.Context, string) (*sandbox.Sandbox, error) {
 			return &sandbox.Sandbox{SandboxID: "sbx_known"}, nil
 		},
-		getSandboxEvents: func(context.Context, string) ([]*events.Event, error) {
+		GetSandboxEventsFn: func(context.Context, string) ([]*events.Event, error) {
 			return nil, errors.New("database is on fire")
 		},
 	})
@@ -626,8 +595,8 @@ func TestInspectSandboxReturnsRuntimeInfo(t *testing.T) {
 // The id exists but the sandbox has no container yet, so the honest answer is
 // a conflict, not the 404 the runtime would report.
 func TestInspectPendingSandboxReturns409(t *testing.T) {
-	srv := newTestAPIWithStore(t, &fakeStore{
-		getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
+	srv := newTestAPIWithStore(t, storetest.Fake{
+		GetSandboxFn: func(context.Context, string) (*sandbox.Sandbox, error) {
 			return &sandbox.Sandbox{State: sandbox.Pending}, nil
 		},
 	})
@@ -669,8 +638,8 @@ func TestInspectMalformedSandboxIDReturns404(t *testing.T) {
 }
 
 func TestInspectSandboxMapsStoreFailureTo500(t *testing.T) {
-	srv := newTestAPIWithStore(t, &fakeStore{
-		getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
+	srv := newTestAPIWithStore(t, storetest.Fake{
+		GetSandboxFn: func(context.Context, string) (*sandbox.Sandbox, error) {
 			return nil, errors.New("database is on fire")
 		},
 	})
@@ -707,17 +676,19 @@ func TestInspectSandboxMapsAMissingContainerTo404(t *testing.T) {
 	}
 }
 
-func TestDestroySandboxReturns204WithNoBody(t *testing.T) {
+// 202: the handler records the stop intent, and the reconciler is what removes
+// the container, so the response cannot claim the sandbox is already gone.
+func TestDestroySandboxReturns202WithNoBody(t *testing.T) {
 	srv := newTestAPI(t)
 	id := sandboxID(t, mustCreate(t, srv, "k1", alpineSpec))
 
 	rec := do(t, srv, http.MethodDelete, "/v1/sandboxes/"+id, "", nil)
 
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNoContent, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 	if body := rec.Body.String(); body != "" {
-		t.Errorf("body = %q, want empty: 204 forbids one", body)
+		t.Errorf("body = %q, want empty", body)
 	}
 }
 
@@ -729,32 +700,33 @@ func TestDeleteIsIdempotent(t *testing.T) {
 
 	for i := range 2 {
 		rec := do(t, srv, http.MethodDelete, "/v1/sandboxes/"+id, "", nil)
-		if rec.Code != http.StatusNoContent {
-			t.Fatalf("DELETE #%d status = %d, want %d (body %s)", i+1, rec.Code, http.StatusNoContent, rec.Body.String())
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("DELETE #%d status = %d, want %d (body %s)", i+1, rec.Code, http.StatusAccepted, rec.Body.String())
 		}
 	}
 }
 
-func TestDestroyUnknownSandboxReturns204(t *testing.T) {
+func TestDestroyUnknownSandboxReturns202(t *testing.T) {
 	srv := newTestAPI(t)
 
 	rec := do(t, srv, http.MethodDelete, "/v1/sandboxes/sbx_00000000-0000-0000-0000-000000000000", "", nil)
 
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNoContent, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 }
 
-// The record survives the destroy: a deleted sandbox is a terminal row, not a
-// missing one, so billing and plan 06's reconciler can still see it. The list
-// endpoint is the store's view; inspect-by-id needs a running container.
+// The record survives the destroy: a deleted sandbox is a stopping row on its
+// way to a terminal one, not a missing row, so billing and the reconciler can
+// still see it. The list endpoint is the store's view; inspect-by-id needs a
+// running container.
 func TestDestroyedSandboxRemainsListed(t *testing.T) {
 	srv := newTestAPI(t)
 	id := sandboxID(t, mustCreate(t, srv, "k1", alpineSpec))
 	markRunning(t, srv, id)
 
-	if rec := do(t, srv, http.MethodDelete, "/v1/sandboxes/"+id, "", nil); rec.Code != http.StatusNoContent {
-		t.Fatalf("DELETE status = %d, want %d", rec.Code, http.StatusNoContent)
+	if rec := do(t, srv, http.MethodDelete, "/v1/sandboxes/"+id, "", nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("DELETE status = %d, want %d", rec.Code, http.StatusAccepted)
 	}
 
 	rec := do(t, srv, http.MethodGet, "/v1/sandboxes", "", nil)
@@ -772,16 +744,16 @@ func TestDestroyedSandboxRemainsListed(t *testing.T) {
 	if sandboxID(t, records[0]) != id {
 		t.Errorf("listed sandbox_id = %q, want %q", sandboxID(t, records[0]), id)
 	}
-	if state := records[0]["state"]; state != string(sandbox.Stopped) {
-		t.Errorf("state after DELETE = %v, want %q", state, sandbox.Stopped)
+	if state := records[0]["state"]; state != string(sandbox.Stopping) {
+		t.Errorf("state after DELETE = %v, want %q", state, sandbox.Stopping)
 	}
 }
 
 // runningStore answers every GetSandbox with a running sandbox, for cases that
 // are about the runtime call behind the gate.
-func runningStore() *fakeStore {
-	return &fakeStore{
-		getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
+func runningStore() storetest.Fake {
+	return storetest.Fake{
+		GetSandboxFn: func(context.Context, string) (*sandbox.Sandbox, error) {
 			return &sandbox.Sandbox{State: sandbox.Running}, nil
 		},
 	}
@@ -857,9 +829,9 @@ func TestRuntimeSentinelsMapToClientStatuses(t *testing.T) {
 
 // path travels as a query parameter because GET bodies have undefined
 // semantics and proxies may drop them. An absent path fails before the store
-// is consulted — the nil fakeStore methods would panic otherwise.
+// is consulted — the Fake's unset methods would panic otherwise.
 func TestFileRoutesRequirePathQueryParam(t *testing.T) {
-	srv := newTestAPIWithStore(t, &fakeStore{})
+	srv := newTestAPIWithStore(t, storetest.Fake{})
 
 	// DELETE on files carries the path the same way, so it is gated the same way.
 	for _, tt := range []struct{ method, path string }{
@@ -920,7 +892,7 @@ func TestRemovePathAnswers204(t *testing.T) {
 }
 
 func TestOversizedRequestBodyReturns413(t *testing.T) {
-	srv := newTestAPIWithStore(t, &fakeStore{})
+	srv := newTestAPIWithStore(t, storetest.Fake{})
 
 	body := `{"path":"/f","content":"` + strings.Repeat("A", maxRequestBytes) + `"}`
 	rec := do(t, srv, http.MethodPut, "/v1/sandboxes/sbx_x/files", body, nil)

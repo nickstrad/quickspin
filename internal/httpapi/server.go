@@ -310,7 +310,9 @@ func (a *API) DestroySandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.respond(w, r, http.StatusNoContent, nil)
+	// 202, not 204: the row says stopping but the container may still be up, and
+	// the reconciler is what closes that gap.
+	a.respond(w, r, http.StatusAccepted, nil)
 }
 
 func (a *API) KeepaliveSandbox(w http.ResponseWriter, r *http.Request) {

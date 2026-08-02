@@ -24,7 +24,7 @@ func TestDestroyWritesMachineReadableConfirmation(t *testing.T) {
 
 	want := "{\n" +
 		"  \"id\": \"" + testID + "\",\n" +
-		"  \"status\": \"destroyed\"\n" +
+		"  \"status\": \"stopping\"\n" +
 		"}\n"
 	if stdout != want {
 		t.Errorf("destroy output =\n%s\nwant\n%s", stdout, want)

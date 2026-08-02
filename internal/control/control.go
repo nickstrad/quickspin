@@ -1,5 +1,5 @@
-// Package control holds the sandbox operations that make decisions: the create
-// saga and its compensation, the destroy transition dance, and the running
+// Package control holds the sandbox operations that make decisions: recording
+// create and destroy intent for the reconciler to converge, and the running
 // check every filesystem and exec route gates on. Pass-through reads stay with
 // their callers — see docs/reference/package-boundaries.mdx.
 package control
@@ -32,23 +32,19 @@ func New(logger *slog.Logger, store store.Store, runtime runtime.Runtime) *Contr
 	}
 }
 
-// CreateSandbox records the sandbox, starts it, and reports it running. A
-// repeated idempotency key returns the original record untouched. A zero ttl
-// takes sandbox.DefaultTTL.
+// CreateSandbox records the sandbox as pending and returns; the reconciler is
+// what starts it and moves it to running. A repeated idempotency key returns
+// the original record untouched. A zero ttl takes sandbox.DefaultTTL.
 func (c *Control) CreateSandbox(ctx context.Context, idempotencyKey string, spec sandbox.SpecFile, ttl time.Duration) (*sandbox.Sandbox, error) {
 	const op = "control.Control.CreateSandbox"
 
 	// Resolved before the store write so an unenforceable limit is a 422 with no
 	// row behind it, rather than a pending sandbox that can never start.
-	resolved, err := spec.Resolve()
-	if err == nil {
-		err = resolved.Validate()
-	}
-	if err != nil {
+	if _, err := spec.ResolveValidated(); err != nil {
 		return nil, Wrap(op, "resolving the submitted spec", err)
 	}
 
-	ttl, err = sandbox.ResolveTTL(ttl)
+	ttl, err := sandbox.ResolveTTL(ttl)
 	if err != nil {
 		return nil, Wrap(op, "resolving the requested ttl", err)
 	}
@@ -86,8 +82,10 @@ func (c *Control) KeepaliveSandbox(ctx context.Context, sandboxID string, ttl ti
 	return sbx, nil
 }
 
-// DestroySandbox is idempotent: a sandbox that is absent or already past
-// running is the outcome the caller asked for, so it reports success.
+// DestroySandbox records the sandbox as stopping and returns; the reconciler is
+// what removes the container and moves it to stopped. It is idempotent: a
+// sandbox that is absent or already past running is the outcome the caller
+// asked for, so it reports success.
 func (c *Control) DestroySandbox(ctx context.Context, sandboxID string) error {
 	const op = "control.Control.DestroySandbox"
 
@@ -105,16 +103,6 @@ func (c *Control) DestroySandbox(ctx context.Context, sandboxID string) error {
 			return nil
 		}
 		return Wrap(op, "marking the sandbox stopping", err)
-	}
-
-	if err := c.runtime.Destroy(ctx, sandboxID); err != nil {
-		return Wrap(op, "destroying the sandbox", err)
-	}
-
-	// The container is gone by now, so a row still in stopping is our
-	// inconsistency rather than anything the client did wrong.
-	if _, err := c.store.UpdateSandboxState(ctx, sandboxID, sandbox.Stopping, sandbox.Stopped, "runtime destroyed the sandbox"); err != nil {
-		return Wrap(op, "recording the sandbox as stopped", errors.Join(ErrInternal, err))
 	}
 
 	return nil

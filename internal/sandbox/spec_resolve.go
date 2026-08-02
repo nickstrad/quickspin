@@ -39,6 +39,20 @@ func (s *SpecFile) Resolve() (runtime.Spec, error) {
 	), nil
 }
 
+// ResolveValidated is the form callers want: a spec that both resolves and
+// carries enforceable limits. Resolve failures carry sandbox.ErrInvalidSpec,
+// validate failures runtime.ErrInvalidSpec — two sentinels, not one.
+func (s *SpecFile) ResolveValidated() (runtime.Spec, error) {
+	resolved, err := s.Resolve()
+	if err != nil {
+		return runtime.Spec{}, err
+	}
+	if err := resolved.Validate(); err != nil {
+		return runtime.Spec{}, err
+	}
+	return resolved, nil
+}
+
 func orDefault[T any](value *T, fallback T) T {
 	if value != nil {
 		return *value

@@ -49,11 +49,7 @@ func resolveCreateSpec(
 	}
 
 	// Validate the resolved values while keeping defaults out of the wire form.
-	resolved, err := file.Resolve()
-	if err != nil {
-		return sandbox.SpecFile{}, err
-	}
-	if err := resolved.Validate(); err != nil {
+	if _, err := file.ResolveValidated(); err != nil {
 		return sandbox.SpecFile{}, fmt.Errorf("invalid limits: %w", err)
 	}
 

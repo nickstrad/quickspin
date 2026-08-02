@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 
+	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/spf13/cobra"
 )
 
@@ -29,9 +30,11 @@ func (app *application) newDestroyCommand() *cobra.Command {
 				return fmt.Errorf("destroy sandbox %q: %w", args[0], err)
 			}
 
+			// "stopping", not "destroyed": the request only records the intent,
+			// and the reconciler is what removes the container.
 			return app.renderer.writeDestroyResult(cmd.OutOrStdout(), destroyResult{
 				ID:     args[0],
-				Status: "destroyed",
+				Status: string(sandbox.Stopping),
 			})
 		},
 	}

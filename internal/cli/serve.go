@@ -1,15 +1,18 @@
 package cli
 
 import (
+	"time"
+
 	"github.com/nickstrad/quickspin/internal/daemon"
 	"github.com/spf13/cobra"
 )
 
 func (app *application) newServeCommand() *cobra.Command {
 	var (
-		host   string
-		port   int
-		dbPath string
+		host              string
+		port              int
+		dbPath            string
+		reconcileInterval time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -26,19 +29,27 @@ func (app *application) newServeCommand() *cobra.Command {
   quickspin --server http://127.0.0.1:9000 sandbox list`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			app.logCommand(cmd, "host", host, "port", port, "db", dbPath)
+			app.logCommand(cmd, "host", host, "port", port, "db", dbPath,
+				"reconcileInterval", reconcileInterval)
 
 			return daemon.Serve(cmd.Context(), daemon.Config{
-				Host:   host,
-				Port:   port,
-				DBPath: dbPath,
-				Logger: app.logger,
+				Host:               host,
+				Port:               port,
+				DBPath:             dbPath,
+				Logger:             app.logger,
+				ReconcilerInterval: reconcileInterval,
 			})
 		},
 	}
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "address to listen on")
 	cmd.Flags().IntVar(&port, "port", 8080, "port to listen on")
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to the SQLite database file")
+	cmd.Flags().DurationVar(
+		&reconcileInterval,
+		"reconcile-interval",
+		0,
+		"how often the reconciler sweeps sandboxes (default: the daemon's own 15s)",
+	)
 	cmd.MarkFlagFilename("db")
 
 	return cmd

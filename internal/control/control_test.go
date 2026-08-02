@@ -12,6 +12,7 @@ import (
 	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/nickstrad/quickspin/internal/store"
 	"github.com/nickstrad/quickspin/internal/store/sqlite"
+	"github.com/nickstrad/quickspin/internal/store/storetest"
 )
 
 func discardLogger() *slog.Logger {
@@ -31,32 +32,6 @@ func newTestStore(t *testing.T) *sqlite.Store {
 		}
 	})
 	return st
-}
-
-// fakeStore scripts one method at a time. Every unset method is nil, so a call
-// the case did not intend panics the test rather than silently succeeding.
-type fakeStore struct {
-	store.Store
-	createSandbox       func(ctx context.Context, key string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error)
-	getSandbox          func(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error)
-	updateSandboxExpiry func(ctx context.Context, sandboxID string, expiresAt time.Time) (*sandbox.Sandbox, error)
-	updateSandboxState  func(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error)
-}
-
-func (f *fakeStore) CreateSandbox(ctx context.Context, key string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error) {
-	return f.createSandbox(ctx, key, spec, expiresAt)
-}
-
-func (f *fakeStore) GetSandbox(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error) {
-	return f.getSandbox(ctx, sandboxID)
-}
-
-func (f *fakeStore) UpdateSandboxExpiry(ctx context.Context, sandboxID string, expiresAt time.Time) (*sandbox.Sandbox, error) {
-	return f.updateSandboxExpiry(ctx, sandboxID, expiresAt)
-}
-
-func (f *fakeStore) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error) {
-	return f.updateSandboxState(ctx, sandboxID, from, to, reason)
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -130,8 +105,8 @@ func TestCreateSandboxTurnsTheTTLIntoAnAbsoluteExpiry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got time.Time
-			c := New(discardLogger(), &fakeStore{
-				createSandbox: func(_ context.Context, _ string, _ sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error) {
+			c := New(discardLogger(), storetest.Fake{
+				CreateSandboxFn: func(_ context.Context, _ string, _ sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error) {
 					got = expiresAt
 					return &sandbox.Sandbox{SandboxID: "sbx_1", State: sandbox.Pending, ExpiresAt: expiresAt}, nil
 				},
@@ -150,7 +125,7 @@ func TestCreateSandboxTurnsTheTTLIntoAnAbsoluteExpiry(t *testing.T) {
 
 // The fake store panics on any call, so reaching the write fails the test.
 func TestCreateSandboxRejectsAnOverCapTTLBeforeTheStoreWrite(t *testing.T) {
-	c := New(discardLogger(), &fakeStore{}, runtimetest.Fake{})
+	c := New(discardLogger(), storetest.Fake{}, runtimetest.Fake{})
 
 	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, sandbox.MaxTTL+time.Second)
 	if !errors.Is(err, sandbox.ErrInvalidSpec) {
@@ -164,7 +139,7 @@ func TestCreateSandboxRejectsAnOverCapTTLBeforeTheStoreWrite(t *testing.T) {
 // A spec that cannot be resolved must not leave a row behind: the fake store
 // panics on any call, so reaching the write fails the test.
 func TestCreateSandboxRejectsAnUnresolvableSpecBeforeTheStoreWrite(t *testing.T) {
-	c := New(discardLogger(), &fakeStore{}, runtimetest.Fake{})
+	c := New(discardLogger(), storetest.Fake{}, runtimetest.Fake{})
 
 	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{Memory: ptr("12x")}, 0)
 	if !errors.Is(err, sandbox.ErrInvalidSpec) {
@@ -178,8 +153,8 @@ func TestCreateSandboxRejectsAnUnresolvableSpecBeforeTheStoreWrite(t *testing.T)
 // An idempotency key pointing at a row that no longer exists is our
 // inconsistency, so the store's not-found sentinel must not read as a 404.
 func TestCreateSandboxMarksAStoreFailureInternal(t *testing.T) {
-	c := New(discardLogger(), &fakeStore{
-		createSandbox: func(context.Context, string, sandbox.SpecFile, time.Time) (*sandbox.Sandbox, error) {
+	c := New(discardLogger(), storetest.Fake{
+		CreateSandboxFn: func(context.Context, string, sandbox.SpecFile, time.Time) (*sandbox.Sandbox, error) {
 			return nil, store.ErrNotFound
 		},
 	}, runtimetest.Fake{})
@@ -195,8 +170,8 @@ func TestCreateSandboxMarksAStoreFailureInternal(t *testing.T) {
 
 // An invalid spec rejected by the store stays the caller's mistake.
 func TestCreateSandboxLeavesAnInvalidSpecFromTheStoreAsTheCallersFault(t *testing.T) {
-	c := New(discardLogger(), &fakeStore{
-		createSandbox: func(context.Context, string, sandbox.SpecFile, time.Time) (*sandbox.Sandbox, error) {
+	c := New(discardLogger(), storetest.Fake{
+		CreateSandboxFn: func(context.Context, string, sandbox.SpecFile, time.Time) (*sandbox.Sandbox, error) {
 			return nil, sandbox.ErrInvalidSpec
 		},
 	}, runtimetest.Fake{})
@@ -222,8 +197,8 @@ func TestKeepaliveExtendsTTLUpToCap(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var storedExpiry time.Time
-			c := New(discardLogger(), &fakeStore{
-				updateSandboxExpiry: func(_ context.Context, sandboxID string, expiresAt time.Time) (*sandbox.Sandbox, error) {
+			c := New(discardLogger(), storetest.Fake{
+				UpdateSandboxExpiryFn: func(_ context.Context, sandboxID string, expiresAt time.Time) (*sandbox.Sandbox, error) {
 					storedExpiry = expiresAt
 					return &sandbox.Sandbox{SandboxID: sandboxID, State: sandbox.Running, ExpiresAt: expiresAt}, nil
 				},
@@ -248,7 +223,7 @@ func TestKeepaliveExtendsTTLUpToCap(t *testing.T) {
 
 // The fake store panics on any call, so reaching the write fails the test.
 func TestKeepaliveRejectsANegativeTTLBeforeTheStoreWrite(t *testing.T) {
-	c := New(discardLogger(), &fakeStore{}, runtimetest.Fake{})
+	c := New(discardLogger(), storetest.Fake{}, runtimetest.Fake{})
 
 	_, err := c.KeepaliveSandbox(context.Background(), "sbx_1", -time.Second)
 	if !errors.Is(err, sandbox.ErrInvalidSpec) {
@@ -271,8 +246,8 @@ func TestKeepalivePreservesStoreErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := New(discardLogger(), &fakeStore{
-				updateSandboxExpiry: func(context.Context, string, time.Time) (*sandbox.Sandbox, error) {
+			c := New(discardLogger(), storetest.Fake{
+				UpdateSandboxExpiryFn: func(context.Context, string, time.Time) (*sandbox.Sandbox, error) {
 					return nil, tt.want
 				},
 			}, runtimetest.Fake{})
@@ -285,11 +260,13 @@ func TestKeepalivePreservesStoreErrors(t *testing.T) {
 	}
 }
 
-func TestDestroySandboxWalksRunningToStopped(t *testing.T) {
+// Destroy records intent and stops, mirroring create. Removing the container
+// and finishing the walk to stopped is the reconciler's, which is what keeps a
+// single writer on that transition. The Fake panics on an unset DestroyFn, so a
+// destroy that reaches the runtime fails here.
+func TestDestroySandboxMarksStoppingAndStartsNoRuntime(t *testing.T) {
 	st := newTestStore(t)
-	c := New(discardLogger(), st, runtimetest.Fake{
-		DestroyFn: func(context.Context, string) error { return nil },
-	})
+	c := New(discardLogger(), st, runtimetest.Fake{})
 
 	sbx, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, 0)
 	if err != nil {
@@ -304,12 +281,38 @@ func TestDestroySandboxWalksRunningToStopped(t *testing.T) {
 		t.Fatalf("DestroySandbox() error = %v, want nil", err)
 	}
 
-	stopped, err := st.GetSandbox(context.Background(), sbx.SandboxID)
+	stopping, err := st.GetSandbox(context.Background(), sbx.SandboxID)
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v, want nil", err)
 	}
-	if stopped.State != sandbox.Stopped {
-		t.Errorf("State = %q, want %q", stopped.State, sandbox.Stopped)
+	if stopping.State != sandbox.Stopping {
+		t.Errorf("State = %q, want %q", stopping.State, sandbox.Stopping)
+	}
+}
+
+// One write, and only the running -> stopping one: a second write here would be
+// the reconciler's stopping -> stopped transition raced from the request path.
+func TestDestroySandboxWritesOnlyTheStoppingTransition(t *testing.T) {
+	type write struct {
+		from, to sandbox.TaskState
+		reason   string
+	}
+	var writes []write
+
+	c := New(discardLogger(), storetest.Fake{
+		UpdateSandboxStateFn: func(_ context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error) {
+			writes = append(writes, write{from: from, to: to, reason: reason})
+			return &sandbox.Sandbox{SandboxID: sandboxID, State: to}, nil
+		},
+	}, runtimetest.Fake{})
+
+	if err := c.DestroySandbox(context.Background(), "sbx_1"); err != nil {
+		t.Fatalf("DestroySandbox() error = %v, want nil", err)
+	}
+
+	want := []write{{from: sandbox.Running, to: sandbox.Stopping, reason: "destroy requested"}}
+	if len(writes) != len(want) || writes[0] != want[0] {
+		t.Errorf("store writes = %+v, want %+v", writes, want)
 	}
 }
 
@@ -328,8 +331,8 @@ func TestDestroySandboxIsASuccessWhenNothingIsRunning(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := New(discardLogger(), &fakeStore{
-				updateSandboxState: func(context.Context, string, sandbox.TaskState, sandbox.TaskState, string) (*sandbox.Sandbox, error) {
+			c := New(discardLogger(), storetest.Fake{
+				UpdateSandboxStateFn: func(context.Context, string, sandbox.TaskState, sandbox.TaskState, string) (*sandbox.Sandbox, error) {
 					return nil, tt.storeErr
 				},
 			}, runtimetest.Fake{})
@@ -360,8 +363,8 @@ func TestRequireRunning(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := New(discardLogger(), &fakeStore{
-				getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
+			c := New(discardLogger(), storetest.Fake{
+				GetSandboxFn: func(context.Context, string) (*sandbox.Sandbox, error) {
 					return tt.sbx, tt.storeErr
 				},
 			}, runtimetest.Fake{})
