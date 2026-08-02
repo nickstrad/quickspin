@@ -176,6 +176,17 @@ quickspin sandbox list
 Stop the server with Ctrl-C. Only the server machine needs Docker; a client targeting a
 remote server does not.
 
+### Database migrations
+
+`quickspin serve` applies embedded SQLite migrations before opening the control plane.
+The same migrations can be managed during development with `make migrate-up`,
+`make migrate-down`, `make migrate-version`, and the destructive `make db-reset`.
+Override their default database with `DB_PATH=path/to/database.db`.
+
+`DB_PATH` is a filesystem path that the Make targets convert to a `sqlite://` URL. Keep
+that path URL-safe: do not use spaces or reserved URL characters such as `#`, `?`, or
+`%`. Pass a path rather than a prebuilt SQLite URL.
+
 To run everything inside Lima, cross-compile first and open two VM shells. Lima mounts
 the host home directory, so the checkout and built binary are available at the same
 absolute path. Run `serve` in the first shell and client commands in the second:

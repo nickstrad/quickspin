@@ -94,6 +94,42 @@ vet: ## Report suspicious constructs
 tidy: ## Sync go.mod/go.sum
 	go mod tidy
 
+# The CLI resolves through go.mod, keeping its version aligned with the library.
+# DB_PATH is a filesystem path; the recipes add the SQLite URL scheme.
+MIGRATE := go run -tags sqlite github.com/golang-migrate/migrate/v4/cmd/migrate
+MIGRATIONS_DIR ?= internal/store/sqlite/migrations
+DB_PATH ?= control-plane.db
+STEPS ?= 1
+MIGRATE_SQLITE = $(MIGRATE) -path "$(MIGRATIONS_DIR)" -database "sqlite://$(DB_PATH)"
+
+.PHONY: migrate-create migrate-up migrate-down migrate-version db-reset
+migrate-create: ## Create a sequential migration pair (requires NAME=add_field)
+	@test -n "$(strip $(NAME))" || { echo 'NAME is required (for example: make migrate-create NAME=add_field)' >&2; exit 2; }
+	$(MIGRATE) create -ext sql -dir "$(MIGRATIONS_DIR)" -seq -digits 6 "$(NAME)"
+
+migrate-up: ## Apply all pending SQLite migrations (override DB_PATH=...)
+	$(MIGRATE_SQLITE) up
+
+migrate-down: ## Roll back SQLite migrations (default STEPS=1)
+	@case "$(STEPS)" in ''|*[!0-9]*) false;; *) [ "$(STEPS)" -ge 1 ];; esac || \
+		{ echo 'STEPS must be a positive integer' >&2; exit 2; }
+	$(MIGRATE_SQLITE) down "$(STEPS)"
+
+migrate-version: ## Show the current SQLite migration version and dirty state
+	$(MIGRATE_SQLITE) version
+
+# Development only: deleting the database is intentional while the schema is
+# still disposable. Refuse every directory (including aliases for . and /), not
+# just their literal spellings, before removing the database and SQLite sidecars.
+db-reset: ## DEVELOPMENT ONLY: delete the SQLite database and migrate from scratch
+	@db_path="$(DB_PATH)"; \
+		if [ -z "$$db_path" ] || [ -d "$$db_path" ]; then \
+			echo "refusing to reset unsafe DB_PATH '$$db_path'" >&2; \
+			exit 2; \
+		fi; \
+		rm -f -- "$$db_path" "$$db_path-wal" "$$db_path-shm"; \
+		$(MIGRATE_SQLITE) up
+
 NPM_DOCS := npm --prefix docs
 DOCS_DEPS := docs/node_modules/.package-lock.json
 

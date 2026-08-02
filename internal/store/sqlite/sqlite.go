@@ -28,17 +28,6 @@ type Store struct {
 
 var _ store.Store = (*Store)(nil)
 
-// platform_id is the persisted name of Sandbox.SandboxID.
-const SandboxSchema = `CREATE TABLE IF NOT EXISTS sandboxes (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		platform_id TEXT NOT NULL UNIQUE,
-		state TEXT NOT NULL,
-		spec TEXT NOT NULL CHECK(json_valid(spec)),
-		expires_at DATETIME NOT NULL,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);`
-
 // The `state = ?` predicate is the transition gate: matching the expected
 // current state and writing the new one in a single statement is atomic, so
 // two writers cannot both observe `running` and both move out of it.
@@ -68,17 +57,6 @@ const GetSandboxesQuery = `
 SELECT id, platform_id, state, spec, created_at, updated_at, expires_at
 FROM sandboxes;`
 
-// Idempotency keys reference public sandbox IDs rather than internal row IDs.
-const IdempotencyKeySchema = `
-CREATE TABLE IF NOT EXISTS idempotency_keys (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	sandbox_id TEXT NOT NULL,
-	idempotency_key TEXT NOT NULL UNIQUE,
-	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-	FOREIGN KEY(sandbox_id) REFERENCES sandboxes(platform_id) ON DELETE CASCADE
-);`
-
 const InsertIdempotencyKeyQuery = `INSERT INTO idempotency_keys
 (idempotency_key, sandbox_id)
  VALUES (?, ?)
@@ -88,22 +66,6 @@ const GetIdempotencyKeyQuery = `SELECT
 	id, sandbox_id, idempotency_key, created_at, updated_at
 FROM idempotency_keys
 WHERE idempotency_key = ?;`
-
-const EventsSchema = `
-CREATE TABLE IF NOT EXISTS events (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	sandbox_id TEXT NOT NULL,
-	from_state TEXT NOT NULL,
-	to_state TEXT NOT NULL,
-	at DATETIME NOT NULL,
-	reason TEXT NOT NULL,
-	FOREIGN KEY(sandbox_id) REFERENCES sandboxes(platform_id)
-);`
-
-// SQLite does not index foreign key columns automatically, and the log only
-// ever grows, so without this a per-sandbox read scans the whole table.
-const EventsSandboxIDIndexSchema = `
-CREATE INDEX IF NOT EXISTS events_sandbox_id ON events(sandbox_id);`
 
 // `at` is written rather than defaulted so an event carries the same instant as
 // the row it describes.
@@ -118,8 +80,6 @@ const GetSandboxEventsQuery = `SELECT
 FROM events
 WHERE sandbox_id = ?
 ORDER BY id;`
-
-var schemas = []string{SandboxSchema, IdempotencyKeySchema, EventsSchema, EventsSandboxIDIndexSchema}
 
 // DSN builds the connection string New opens. foreign_keys is off by default
 // in SQLite, so without it the FKs on idempotency_keys.sandbox_id and
@@ -152,11 +112,9 @@ func New(ctx context.Context, dbFilePath string, dbDriverType string, logger *sl
 	db.SetMaxIdleConns(1)    // Keep that connection open
 	db.SetConnMaxLifetime(0) // Reuse connections indefinitely
 
-	for _, schema := range schemas {
-		if _, err := db.ExecContext(ctx, schema); err != nil {
-			_ = db.Close()
-			return nil, store.E("sqlite.New", "executing schema", err)
-		}
+	if err := migrateUp(ctx, db, dbFilePath); err != nil {
+		_ = db.Close()
+		return nil, store.E("sqlite.New", "migrating schema", err)
 	}
 
 	logger.InfoContext(ctx, "store opened", "path", dbFilePath, "driver", dbDriverType)
