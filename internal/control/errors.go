@@ -2,8 +2,8 @@ package control
 
 import (
 	"errors"
-	"runtime/debug"
-	"strings"
+
+	"github.com/nickstrad/quickspin/internal/errs"
 )
 
 // ErrInternal marks a failure that is the server's, not the caller's, even
@@ -13,40 +13,18 @@ import (
 // docs/reference/error-handling-and-logging.mdx.
 var ErrInternal = errors.New("internal failure")
 
-type ControlError struct {
-	Op      string // "control.Control.CreateSandbox" — package.Type.Method
-	Message string
-	Err     error
-	Stack   string
-}
+type controlTag struct{}
+
+// ControlError carries Op ("control.Control.CreateSandbox" —
+// package.Type.Method), Message, Err and Stack.
+type ControlError = errs.Error[controlTag]
 
 // E builds an error at an origin and captures a stack. Wrap adds an operation
 // above an error that already carries one, so the stack is captured once.
 func E(op, message string, err error) *ControlError {
-	return &ControlError{
-		Op:      op,
-		Message: message,
-		Err:     err,
-		Stack:   string(debug.Stack()),
-	}
+	return errs.E[controlTag](op, message, err)
 }
 
 func Wrap(op, message string, err error) *ControlError {
-	return &ControlError{Op: op, Message: message, Err: err}
+	return errs.Wrap[controlTag](op, message, err)
 }
-
-func (e *ControlError) Error() string {
-	parts := make([]string, 0, 3)
-	if e.Op != "" {
-		parts = append(parts, e.Op)
-	}
-	if e.Message != "" {
-		parts = append(parts, e.Message)
-	}
-	if e.Err != nil {
-		parts = append(parts, e.Err.Error())
-	}
-	return strings.Join(parts, ": ")
-}
-
-func (e *ControlError) Unwrap() error { return e.Err }

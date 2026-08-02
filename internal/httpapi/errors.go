@@ -2,8 +2,8 @@ package httpapi
 
 import (
 	"errors"
-	"runtime/debug"
-	"strings"
+
+	"github.com/nickstrad/quickspin/internal/errs"
 )
 
 // Failures the handler itself originates, before any call to the store or the
@@ -14,43 +14,21 @@ var (
 	ErrNotFound       = errors.New("not found")
 )
 
-type APIError struct {
-	Op      string // "httpapi.API.CreateSandbox" — package.Type.Method
-	Message string
-	Err     error
-	Stack   string
-}
+type apiTag struct{}
+
+// APIError carries Op ("httpapi.API.CreateSandbox" — package.Type.Method),
+// Message, Err and Stack.
+type APIError = errs.Error[apiTag]
 
 // E builds an error at an origin and captures a stack. Wrap adds an operation
 // above an error that already carries one, so the stack is captured once.
 func E(op, message string, err error) *APIError {
-	return &APIError{
-		Op:      op,
-		Message: message,
-		Err:     err,
-		Stack:   string(debug.Stack()),
-	}
+	return errs.E[apiTag](op, message, err)
 }
 
 func Wrap(op, message string, err error) *APIError {
-	return &APIError{Op: op, Message: message, Err: err}
+	return errs.Wrap[apiTag](op, message, err)
 }
-
-func (e *APIError) Error() string {
-	parts := make([]string, 0, 3)
-	if e.Op != "" {
-		parts = append(parts, e.Op)
-	}
-	if e.Message != "" {
-		parts = append(parts, e.Message)
-	}
-	if e.Err != nil {
-		parts = append(parts, e.Err.Error())
-	}
-	return strings.Join(parts, ": ")
-}
-
-func (e *APIError) Unwrap() error { return e.Err }
 
 // OpOf reports the outermost Op in the chain so a log line can name the
 // operation that failed without the handler restating it.

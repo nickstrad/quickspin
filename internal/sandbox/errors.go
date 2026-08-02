@@ -2,8 +2,8 @@ package sandbox
 
 import (
 	"errors"
-	"runtime/debug"
-	"strings"
+
+	"github.com/nickstrad/quickspin/internal/errs"
 )
 
 // The public contract of this package: callers test these with errors.Is and
@@ -17,40 +17,18 @@ var (
 	ErrSandboxNotRunning      = errors.New("sandbox not in running state")
 )
 
-type SandboxError struct {
-	Op      string // "sandbox.SpecFile.Resolve" — package.Type.Method
-	Message string
-	Err     error
-	Stack   string
-}
+type sandboxTag struct{}
+
+// SandboxError carries Op ("sandbox.SpecFile.Resolve" — package.Type.Method),
+// Message, Err and Stack.
+type SandboxError = errs.Error[sandboxTag]
 
 // E builds an error at an origin and captures a stack. Wrap adds an operation
 // above an error that already carries one, so the stack is captured once.
 func E(op, message string, err error) *SandboxError {
-	return &SandboxError{
-		Op:      op,
-		Message: message,
-		Err:     err,
-		Stack:   string(debug.Stack()),
-	}
+	return errs.E[sandboxTag](op, message, err)
 }
 
 func Wrap(op, message string, err error) *SandboxError {
-	return &SandboxError{Op: op, Message: message, Err: err}
+	return errs.Wrap[sandboxTag](op, message, err)
 }
-
-func (e *SandboxError) Error() string {
-	parts := make([]string, 0, 3)
-	if e.Op != "" {
-		parts = append(parts, e.Op)
-	}
-	if e.Message != "" {
-		parts = append(parts, e.Message)
-	}
-	if e.Err != nil {
-		parts = append(parts, e.Err.Error())
-	}
-	return strings.Join(parts, ": ")
-}
-
-func (e *SandboxError) Unwrap() error { return e.Err }

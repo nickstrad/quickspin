@@ -24,12 +24,11 @@ Each package owns its error type, named after the package, in that package's `er
 | `internal/controlplane`  | `ControlPlaneError` | future (roadmap 05) |
 | `internal/worker`        | `WorkerError`       | future (roadmap 17) |
 
-They are deliberately near-identical — about 30 lines each, differing only in the name.
-A shared `errkit` package would exist for one line (`debug.Stack()`), and the duplication
-keeps each package self-contained and its errors self-identifying.
+The envelope itself is defined once, in `internal/errs`, as a generic struct whose type
+parameter is a phantom tag naming the owning package:
 
 ```go
-type RuntimeError struct {
+type Error[T any] struct {
     Op      string // e.g. "runtime.dockerRuntime.Create" — package.Type.Method
     Message string // user-friendly, no %v of the cause and no trailing newline
     Err     error  // wrapped cause (nil at an origin with no cause)
@@ -38,7 +37,38 @@ type RuntimeError struct {
 ```
 
 `Error()` renders `op: message: cause`, and `Unwrap()` makes `errors.Is` / `errors.As`
-work through the whole chain.
+work through the whole chain. `internal/errs` imports nothing from `internal/`, since
+every package that owns an envelope imports it.
+
+Each package's `errors.go` then declares a tag, aliases the instantiation, and re-exports
+`E` and `Wrap` so its call sites and its callers are unchanged:
+
+```go
+type runtimeTag struct{}
+
+type RuntimeError = errs.Error[runtimeTag]
+
+func E(op, message string, err error) *RuntimeError {
+    return errs.E[runtimeTag](op, message, err)
+}
+
+func Wrap(op, message string, err error) *RuntimeError {
+    return errs.Wrap[runtimeTag](op, message, err)
+}
+```
+
+The tag is what keeps the errors self-identifying: `errs.Error[runtimeTag]` and
+`errs.Error[storeTag]` are unrelated types, so a package's `errors.As` and type switches
+still match only its own envelope. The type alias (`=`, not a defined type) is what makes
+`*RuntimeError` the same type as `*errs.Error[runtimeTag]`, so the shared methods apply
+without a per-package re-declaration.
+
+Sentinels stay in the package that owns them, and so does any package-specific helper —
+`httpapi.OpOf`, for example. Only the envelope is shared.
+
+One cost of the move: `E` captures `debug.Stack()` from inside `internal/errs`, so the
+stack carries two extra frames (`errs.E` and the package's `E`) above the origin call
+site.
 
 ### Composing with the sentinel errors
 
@@ -156,12 +186,13 @@ nothing else.
 ## Known gaps to decide deliberately
 
 - `Stack` is captured at every origin but nothing reads it unless a log site emits it.
-  Either surface it at `Debug` (a `LogValue()` on each error type) or drop the field; it
-  costs a `debug.Stack()` per error for no payoff until something reads it.
+  Either surface it at `Debug` (a `LogValue()` on `errs.Error`, which every package would
+  inherit at once) or drop the field; it costs a `debug.Stack()` per error for no payoff
+  until something reads it.
 - `Wrap` may be unused in a package that is always at one end of the chain. Keeping it so
   every package presents the same API is a reasonable call, but it is a call.
 - Sentinel vs struct is resolved in the roadmaps (see roadmap 02): the sentinels are the public
   contract callers switch on; the struct is the diagnostic envelope carrying them in
-  `Err`. Roadmap 02 pins the composition with a test
-  (`TestRuntimeErrorPreservesSentinel`) so the error type can never silently swallow a
-  sentinel it was handed.
+  `Err`. The composition is pinned by a conformance test in `internal/errs`
+  (`TestErrorPreservesSentinelThroughWraps`) so the envelope can never silently swallow a
+  sentinel it was handed — one test now covers every package that aliases it.

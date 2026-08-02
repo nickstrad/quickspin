@@ -121,8 +121,9 @@ Two deliberate asymmetries worth keeping:
   the contract package or gets copied.
 
 And the positive form of the last point: **tolerated duplication is a choice, not an
-oversight.** The per-package `errors.go` files
-([`error-handling-and-logging.mdx`](error-handling-and-logging.mdx)) are deliberately
-triplicated because the alternative is an everything-dependency. A little copying is
-better than a little dependency; the review question is whether the duplication is
-stable, not whether it exists.
+oversight.** A little copying is better than a little dependency; the review question is
+whether the duplication is stable, not whether it exists — and whether the shared thing
+would be a leaf. The per-package `errors.go` files
+([`error-handling-and-logging.mdx`](error-handling-and-logging.mdx)) were copied until the
+envelope stopped changing, then collapsed onto `internal/errs`, which imports nothing from
+`internal/` and so cannot become an everything-dependency.
