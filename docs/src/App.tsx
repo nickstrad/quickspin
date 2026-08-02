@@ -78,9 +78,10 @@ function loadReaderPreferences(): ReaderPreferences {
 
 function RoadmapStatus({ roadmap }: { roadmap: Roadmap }) {
   const completed = roadmap.status === "completed";
-  const completedOn = completed
-    ? completionDateFormatter.format(new Date(`${roadmap.completedOn}T00:00:00Z`))
-    : undefined;
+  const completedOn =
+    completed && roadmap.completedOn
+      ? completionDateFormatter.format(new Date(`${roadmap.completedOn}T00:00:00Z`))
+      : undefined;
 
   return (
     <div className={`roadmap-status roadmap-status--${roadmap.status}`}>
@@ -91,7 +92,7 @@ function RoadmapStatus({ roadmap }: { roadmap: Roadmap }) {
         <strong>{completed ? "Delivered" : "Future state"}</strong>
         <p>
           {completed
-            ? `Marked complete ${completedOn}. This roadmap is retained as historical context; current code and tests are authoritative where delivery differs.`
+            ? `${completedOn ? `Marked complete ${completedOn}.` : "Marked complete."} This roadmap is retained as historical context; current code and tests are authoritative where delivery differs.`
             : "This roadmap outlines Quickspin’s intended direction, not its current behavior. Use the codebase as the authority for what exists today."}
         </p>
       </div>

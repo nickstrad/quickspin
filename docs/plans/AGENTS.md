@@ -102,6 +102,11 @@ Every roadmap must define completion as something a machine can check, not a fee
   is review plus making the contract tests pass.
 - When a roadmap completes, move it to `closed/`, add
   `{/* Completed YYYY-MM-DD. <deviation note> */}` below its dependency line, and update
-  `docs/index.mdx`. The reader uses that note as completion metadata.
+  `docs/index.mdx`. This note is not optional decoration: the reader
+  (`docs/src/documents.tsx`) parses it as completion metadata and **throws at page load**
+  for any file under `plans/closed/` missing a `{/* Completed YYYY-MM-DD.` comment,
+  taking down the whole published site. Moving the file and adding the note are one
+  atomic step — never commit one without the other. Run `make docs-build` after closing
+  a roadmap; it fails if the note is missing or malformed.
 - Roadmaps are MDX documents. Ordinary Markdown is valid, but use MDX deliberately to make
   concepts, diagrams, and progressive hints easier to study.

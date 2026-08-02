@@ -26,7 +26,7 @@ export type DocumentHeading = {
 
 export type Roadmap =
   | { number: string; status: "future" }
-  | { completedOn: string; number: string; status: "completed" };
+  | { completedOn?: string; number: string; status: "completed" };
 
 export type ReaderDocument = {
   path: string;
@@ -63,7 +63,8 @@ function roadmapFor(path: string, source: string): Roadmap {
 
   const completedOn = source.match(/\{\/\* Completed (\d{4}-\d{2}-\d{2})\./)?.[1];
   if (!completedOn) {
-    throw new Error(`${path} is closed but has no completion date`);
+    // A missing note should cost a date in the banner, not the whole site.
+    console.warn(`${path} is closed but has no completion date`);
   }
 
   return { completedOn, number, status: "completed" };
