@@ -1,11 +1,9 @@
 # Package Boundaries & Dependency Direction
 
-Forward-looking reference material, not a description of current code. It proposes the
-rules for where new code goes and which package may import which, so that future changes
+Rules for where new code goes and which package may import which, so that future changes
 — new runtime backends, new stores, new transport surfaces — land in the right place
-without re-deriving the layout each time. The concrete package names below come from the
-target layout in `ARCHITECTURE_PLAN.md` (repo root, while the migration is pending);
-the rules are meant to outlive that document.
+without re-deriving the layout each time. The package names below now match the code;
+the rules are meant to outlive any particular snapshot of it.
 
 One rule carries most of the weight:
 
@@ -28,12 +26,18 @@ store          ──► sandbox, events   persistence contract
 store/sqlite   ──► store         a store implementation
 runtime/docker ──► runtime       a runtime implementation
 api            ──► sandbox, runtime      wire DTOs + converters
-control        ──► store, runtime, sandbox   orchestration
-httpapi        ──► control, api  HTTP transport
+control        ──► store, sandbox        admission: client intent + policy
+reconciler     ──► store, runtime, sandbox   convergence: repairs drift on a ticker
+httpapi        ──► control, api, store, runtime   HTTP transport (+ pass-through reads)
 client         ──► api, sandbox, runtime     HTTP client
-cli            ──► client        cobra surface (+ control, for serve wiring)
+cli            ──► client, daemon        cobra surface
+daemon         ──► httpapi, reconciler, store/sqlite, runtime/docker   composition root
 cmd/*          ──► cli           thin mains
 ```
+
+(`errs`, the shared error envelope, is omitted above: it imports nothing from
+`internal/` and may be imported from anywhere — see the closing note on tolerated
+duplication.)
 
 `events` sits beside `sandbox` rather than inside it: an event is a record of what
 happened, not a rule about what a sandbox is, and the state machine must not grow a
@@ -42,6 +46,15 @@ wire tags beyond the ones the domain records already carry. The event log is par
 store contract rather than one implementation's extra, because a transition and its
 event have to commit together: `UpdateSandboxState` takes the reason and appends the row,
 so no store can offer transitions without history.
+
+`control` and `reconciler` split the store's writers by *source of truth*, not by
+call path: control admits client intent (the states `pending` and `stopping`, lease
+renewals) after its policy decisions — validation ordering, idempotency rulings, TTL
+clamps, error taxonomy — while the reconciler is the only component that transitions
+state from runtime facts. Neither is a chokepoint for the other; what keeps two
+writers safe is that every write restates the state it read in its WHERE clause, so
+the store referees mechanics (guards, event atomicity, idempotent replay) without
+learning policy. This split is convention enforced in review, not by the compiler.
 
 Stated as rules rather than a snapshot:
 
@@ -91,7 +104,8 @@ receives each kind:
 | --- | --- | --- |
 | A rule about what a sandbox *is* — a legal state transition, a spec default, a validation | `sandbox` | The function needs an HTTP status, a SQL row, or a Docker type to compile. |
 | A fact about something that already happened — a lifecycle transition, its reason | `events` | The function recomputes the record from current state instead of reading what was appended. |
-| A multi-step operation with failure handling — create-with-compensation, destroy's transition dance | `control` | It is a one-line pass-through to the store; leave those in the handler. |
+| An admission decision on a client request — validation ordering, an idempotency ruling, a TTL clamp, which failures are the client's fault | `control` | It is a one-line pass-through to the store; leave those in the handler. |
+| Repair of drift between recorded and observed state — a converge action, a compensation for a write that lost its guard | `reconciler` | It runs during a request instead of a pass; request paths record intent, they do not converge. |
 | A request/response shape or its converter | `api` | Only the server or only the client can use it. Wire shapes are shared or they are not wire shapes. |
 | Talk to Docker, SQL, tar, or the moby SDK | The implementation subpackage | The contract package needs a new import to accommodate it. |
 | An HTTP route, decoding, error-to-status mapping | `httpapi` | Business decisions creep in; extract them down into `control` or `sandbox`. |
@@ -112,8 +126,9 @@ Two deliberate asymmetries worth keeping:
 - **Layer-cake packages** — `models/`, `services/`, `handlers/`, `domain/`. Packages are
   named for what they are about (`sandbox`, `runtime`, `store`), not for which layer of
   a diagram they occupy.
-- **Grab bags** — `util/`, `common/`, `helpers/`, or a shared `errs` package that every
-  other package imports. A package everything depends on is a package nothing can change.
+- **Grab bags** — `util/`, `common/`, `helpers/`. A package everything depends on is a
+  package nothing can change; the narrow exception is a true leaf like `errs`, which
+  earns broad import by importing nothing itself (see below).
 - **Wrap-everything service layers** — see above; the layer earns its place per
   operation, not per package.
 - **Convenience back-edges** — importing the server package for one struct, importing a
