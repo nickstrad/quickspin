@@ -1,11 +1,13 @@
 # Concurrency & State Conventions
 
-Forward-looking reference material, not a description of current code. `internal/runtime`
-as first built (roadmap 02) is single-goroutine and needs none of this. It becomes load-
-bearing at roadmaps 05–06 (a control plane with a reconcile loop and an HTTP API touching
-shared records) and roadmap 17 (workers). Read it before writing either. Adapted from a
-earlier codebase that guarded exactly this shape of state — "read a record, do
-slow Docker I/O, write the result" — in real code.
+Part description of current code, part forward-looking guidance. The category-4 shape
+below — a WHERE-guarded write that re-checks its assumption around slow Docker I/O — is
+implemented as of roadmap 06: the reconciler uses it for every state transition, and
+`TestReconcilerDoesNotResurrectDestroyedSandbox` (internal/reconciler) pins the
+lost-update interleaving. The rest becomes load-bearing at roadmap 08 (quota admission),
+14 (the tap/IP allocator), and 17 (workers) — read it before writing any of those.
+Adapted from an earlier codebase that guarded exactly this shape of state — "read a
+record, do slow Docker I/O, write the result" — in real code.
 
 One framing correction against the roadmaps: the sibling project held its records in
 mutex-guarded maps, while Quickspin's roadmaps make the **database authoritative from roadmap
@@ -149,9 +151,10 @@ WHERE id = ? AND state = 'pending';   -- 0 rows affected => someone else moved i
 ```
 
 The zero-rows-affected result is the SQL spelling of the callback's early `return`, and
-the reconciler must treat it as "leave it alone," not as an error. Roadmap 06 mandates this
-shape and pins the interleaving with `TestReconcilerDoesNotResurrectDestroyedSandbox` —
-the same test this section prescribes, renamed to its home.
+the reconciler treats it as "undo the side effect and stand down," not as success: its
+`ActionCreate` destroys the container it just made when the write-back misses. This is
+implemented (roadmap 06) and the interleaving is pinned by
+`TestReconcilerDoesNotResurrectDestroyedSandbox` in internal/reconciler.
 
 ## The `Locked` suffix
 
@@ -235,8 +238,9 @@ have one that drives every helper from goroutines standing in for the real loops
 Three failure modes are invisible to `-race` and need tests of their own:
 
 - **Lost updates.** `-race` cannot see the resurrect-a-destroyed-sandbox sequence above.
-  Pin it by driving the exact interleaving — in the roadmaps this is roadmap 06's
-  `TestReconcilerDoesNotResurrectDestroyedSandbox`.
+  Pin it by driving the exact interleaving — `TestReconcilerDoesNotResurrectDestroyedSandbox`
+  (internal/reconciler) does this with a fake runtime whose `Create` blocks on a channel,
+  and is the template for the same test at future seams (roadmaps 08 and 17).
 - **Deadlock** shows up as the test binary's timeout, not a failure. A fan-out over many
   failing candidates with an under-sized error channel hangs instead of passing — write the
   test with more failing candidates than any plausible fixed buffer.
