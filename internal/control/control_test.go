@@ -37,9 +37,10 @@ func newTestStore(t *testing.T) *sqlite.Store {
 // the case did not intend panics the test rather than silently succeeding.
 type fakeStore struct {
 	store.Store
-	createSandbox      func(ctx context.Context, key string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error)
-	getSandbox         func(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error)
-	updateSandboxState func(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error)
+	createSandbox       func(ctx context.Context, key string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error)
+	getSandbox          func(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error)
+	updateSandboxExpiry func(ctx context.Context, sandboxID string, expiresAt time.Time) (*sandbox.Sandbox, error)
+	updateSandboxState  func(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error)
 }
 
 func (f *fakeStore) CreateSandbox(ctx context.Context, key string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error) {
@@ -48,6 +49,10 @@ func (f *fakeStore) CreateSandbox(ctx context.Context, key string, spec sandbox.
 
 func (f *fakeStore) GetSandbox(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error) {
 	return f.getSandbox(ctx, sandboxID)
+}
+
+func (f *fakeStore) UpdateSandboxExpiry(ctx context.Context, sandboxID string, expiresAt time.Time) (*sandbox.Sandbox, error) {
+	return f.updateSandboxExpiry(ctx, sandboxID, expiresAt)
 }
 
 func (f *fakeStore) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error) {
@@ -199,6 +204,84 @@ func TestCreateSandboxLeavesAnInvalidSpecFromTheStoreAsTheCallersFault(t *testin
 	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, 0)
 	if errors.Is(err, ErrInternal) {
 		t.Errorf("CreateSandbox() error = %v, want no ErrInternal marker", err)
+	}
+}
+
+func TestKeepaliveExtendsTTLUpToCap(t *testing.T) {
+	now := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	tests := []struct {
+		name    string
+		ttl     time.Duration
+		wantTTL time.Duration
+	}{
+		{name: "explicit ttl renews from now", ttl: 90 * time.Second, wantTTL: 90 * time.Second},
+		{name: "omitted ttl takes the default", wantTTL: sandbox.DefaultTTL},
+		{name: "ttl above the cap clamps", ttl: sandbox.MaxTTL + time.Hour, wantTTL: sandbox.MaxTTL},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var storedExpiry time.Time
+			c := New(discardLogger(), &fakeStore{
+				updateSandboxExpiry: func(_ context.Context, sandboxID string, expiresAt time.Time) (*sandbox.Sandbox, error) {
+					storedExpiry = expiresAt
+					return &sandbox.Sandbox{SandboxID: sandboxID, State: sandbox.Running, ExpiresAt: expiresAt}, nil
+				},
+			}, runtimetest.Fake{})
+			c.now = func() time.Time { return now }
+
+			sbx, err := c.KeepaliveSandbox(context.Background(), "sbx_1", tt.ttl)
+			if err != nil {
+				t.Fatalf("KeepaliveSandbox() error = %v, want nil", err)
+			}
+
+			wantExpiry := now.Add(tt.wantTTL)
+			if !storedExpiry.Equal(wantExpiry) {
+				t.Errorf("stored ExpiresAt = %v, want %v", storedExpiry, wantExpiry)
+			}
+			if !sbx.ExpiresAt.Equal(wantExpiry) {
+				t.Errorf("returned ExpiresAt = %v, want %v", sbx.ExpiresAt, wantExpiry)
+			}
+		})
+	}
+}
+
+// The fake store panics on any call, so reaching the write fails the test.
+func TestKeepaliveRejectsANegativeTTLBeforeTheStoreWrite(t *testing.T) {
+	c := New(discardLogger(), &fakeStore{}, runtimetest.Fake{})
+
+	_, err := c.KeepaliveSandbox(context.Background(), "sbx_1", -time.Second)
+	if !errors.Is(err, sandbox.ErrInvalidSpec) {
+		t.Fatalf("KeepaliveSandbox() error = %v, want sandbox.ErrInvalidSpec", err)
+	}
+	if errors.Is(err, ErrInternal) {
+		t.Error("a negative extension is the caller's mistake, want no ErrInternal marker")
+	}
+}
+
+func TestKeepalivePreservesStoreErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		want error
+	}{
+		{name: "unknown sandbox", want: store.ErrNotFound},
+		{name: "lease is no longer renewable", want: sandbox.ErrInvalidStateTransition},
+		{name: "persistence failure", want: errors.New("database is on fire")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := New(discardLogger(), &fakeStore{
+				updateSandboxExpiry: func(context.Context, string, time.Time) (*sandbox.Sandbox, error) {
+					return nil, tt.want
+				},
+			}, runtimetest.Fake{})
+
+			_, err := c.KeepaliveSandbox(context.Background(), "sbx_1", time.Minute)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("KeepaliveSandbox() error = %v, want store cause %v", err, tt.want)
+			}
+		})
 	}
 }
 

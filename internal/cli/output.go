@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/nickstrad/quickspin/internal/events"
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/sandbox"
 	"gopkg.in/yaml.v3"
@@ -25,6 +26,13 @@ func (r renderer) writeSandbox(w io.Writer, sbx *sandbox.Sandbox) error {
 
 func (r renderer) writeSandboxes(w io.Writer, sandboxes []*sandbox.Sandbox) error {
 	return r.write(w, sandboxes, sandboxTableRows(sandboxes))
+}
+
+func (r renderer) writeEvents(w io.Writer, evts []*events.Event) error {
+	if evts == nil {
+		evts = []*events.Event{}
+	}
+	return r.write(w, evts, eventTableRows(evts))
 }
 
 func (r renderer) writeDestroyResult(w io.Writer, result destroyResult) error {
@@ -78,6 +86,21 @@ func sandboxTableRows(sandboxes []*sandbox.Sandbox) [][]string {
 			image,
 			sbx.CreatedAt.Format(time.RFC3339),
 			sbx.ExpiresAt.Format(time.RFC3339),
+		})
+	}
+	return rows
+}
+
+func eventTableRows(evts []*events.Event) [][]string {
+	rows := make([][]string, 1, len(evts)+1)
+	rows[0] = []string{"SANDBOX ID", "FROM", "TO", "AT", "REASON"}
+	for _, event := range evts {
+		rows = append(rows, []string{
+			event.SandboxID,
+			string(event.FromState),
+			string(event.ToState),
+			event.At.Format(time.RFC3339),
+			event.Reason,
 		})
 	}
 	return rows

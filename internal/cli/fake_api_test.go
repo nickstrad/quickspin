@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"time"
 
+	"github.com/nickstrad/quickspin/internal/events"
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/sandbox"
 )
@@ -14,6 +15,8 @@ type fakeAPI struct {
 	CreateFn     func(context.Context, string, sandbox.SpecFile, time.Duration) (*sandbox.Sandbox, error)
 	ListFn       func(context.Context) ([]*sandbox.Sandbox, error)
 	InspectFn    func(context.Context, string) (runtime.Info, error)
+	EventsFn     func(context.Context, string) ([]*events.Event, error)
+	KeepaliveFn  func(context.Context, string, time.Duration) (*sandbox.Sandbox, error)
 	DestroyFn    func(context.Context, string) error
 	ExecFn       func(context.Context, string, []string, runtime.ExecOpts) (runtime.ExecResult, error)
 	WriteFileFn  func(context.Context, string, string, []byte, fs.FileMode) error
@@ -32,6 +35,14 @@ func (f fakeAPI) ListSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error) 
 
 func (f fakeAPI) InspectSandbox(ctx context.Context, id string) (runtime.Info, error) {
 	return f.InspectFn(ctx, id)
+}
+
+func (f fakeAPI) GetSandboxEvents(ctx context.Context, id string) ([]*events.Event, error) {
+	return f.EventsFn(ctx, id)
+}
+
+func (f fakeAPI) KeepaliveSandbox(ctx context.Context, id string, ttl time.Duration) (*sandbox.Sandbox, error) {
+	return f.KeepaliveFn(ctx, id, ttl)
 }
 
 func (f fakeAPI) DestroySandbox(ctx context.Context, id string) error {

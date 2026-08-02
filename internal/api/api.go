@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"time"
 
+	"github.com/nickstrad/quickspin/internal/events"
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/sandbox"
 )
@@ -31,6 +32,28 @@ func NewCreateSandboxRequest(spec sandbox.SpecFile, ttl time.Duration) CreateSan
 }
 
 func (r CreateSandboxRequest) TTL() time.Duration {
+	return time.Duration(r.TTLSeconds) * time.Second
+}
+
+// KeepaliveSandboxRequest carries the renewed lifetime measured from the
+// server's receipt of the request. Zero takes the default; the control layer
+// rejects negative values and clamps values above the platform cap.
+type KeepaliveSandboxRequest struct {
+	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
+}
+
+func NewKeepaliveSandboxRequest(ttl time.Duration) KeepaliveSandboxRequest {
+	seconds := ceilSeconds(ttl)
+	if ttl < 0 {
+		// Preserve invalid negative durations across the wire so the server can
+		// reject them instead of silently treating them as an omitted value. A
+		// sub-second negative still needs a nonzero representation.
+		seconds = min(int64(ttl/time.Second), -1)
+	}
+	return KeepaliveSandboxRequest{TTLSeconds: seconds}
+}
+
+func (r KeepaliveSandboxRequest) TTL() time.Duration {
 	return time.Duration(r.TTLSeconds) * time.Second
 }
 
@@ -65,6 +88,36 @@ func (s SandboxResponse) Sandbox() *sandbox.Sandbox {
 		ExpiresAt: s.ExpiresAt,
 		CreatedAt: s.CreatedAt,
 		UpdatedAt: s.UpdatedAt,
+	}
+}
+
+// SandboxEventResponse is the wire form of events.Event. The store's
+// append-order id stays internal: array order is the public history contract.
+type SandboxEventResponse struct {
+	SandboxID string    `json:"sandbox_id"`
+	FromState string    `json:"from_state"`
+	ToState   string    `json:"to_state"`
+	At        time.Time `json:"at"`
+	Reason    string    `json:"reason"`
+}
+
+func NewSandboxEventResponse(event *events.Event) SandboxEventResponse {
+	return SandboxEventResponse{
+		SandboxID: event.SandboxID,
+		FromState: string(event.FromState),
+		ToState:   string(event.ToState),
+		At:        event.At,
+		Reason:    event.Reason,
+	}
+}
+
+func (e SandboxEventResponse) Event() *events.Event {
+	return &events.Event{
+		SandboxID: e.SandboxID,
+		FromState: sandbox.TaskState(e.FromState),
+		ToState:   sandbox.TaskState(e.ToState),
+		At:        e.At,
+		Reason:    e.Reason,
 	}
 }
 

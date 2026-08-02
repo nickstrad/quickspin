@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nickstrad/quickspin/internal/api"
+	"github.com/nickstrad/quickspin/internal/events"
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
 	"github.com/nickstrad/quickspin/internal/sandbox"
@@ -76,6 +77,7 @@ type fakeStore struct {
 	createSandbox      func(ctx context.Context, key string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error)
 	getSandbox         func(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error)
 	getSandboxes       func(ctx context.Context) ([]*sandbox.Sandbox, error)
+	getSandboxEvents   func(ctx context.Context, sandboxID string) ([]*events.Event, error)
 	updateSandboxState func(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error)
 }
 
@@ -89,6 +91,10 @@ func (f *fakeStore) GetSandbox(ctx context.Context, sandboxID string) (*sandbox.
 
 func (f *fakeStore) GetSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error) {
 	return f.getSandboxes(ctx)
+}
+
+func (f *fakeStore) GetSandboxEvents(ctx context.Context, sandboxID string) ([]*events.Event, error) {
+	return f.getSandboxEvents(ctx, sandboxID)
 }
 
 func (f *fakeStore) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error) {
@@ -132,10 +138,27 @@ func mustCreate(t *testing.T, srv *API, key, body string) map[string]any {
 // a container and moves the row out of pending.
 func markRunning(t *testing.T, srv *API, id string) {
 	t.Helper()
+	transitionSandbox(t, srv, id, sandbox.Pending, sandbox.Running)
+}
 
-	if _, err := srv.store.UpdateSandboxState(context.Background(), id, sandbox.Pending, sandbox.Running, "test"); err != nil {
-		t.Fatalf("UpdateSandboxState(%s, pending, running) error = %v, want nil", id, err)
+func transitionSandbox(t *testing.T, srv *API, id string, from, to sandbox.TaskState) *sandbox.Sandbox {
+	t.Helper()
+
+	updated, err := srv.store.UpdateSandboxState(t.Context(), id, from, to, "test")
+	if err != nil {
+		t.Fatalf("UpdateSandboxState(%s, %s, %s) error = %v, want nil", id, from, to, err)
 	}
+	return updated
+}
+
+func mustGetSandbox(t *testing.T, srv *API, id string) *sandbox.Sandbox {
+	t.Helper()
+
+	sbx, err := srv.store.GetSandbox(t.Context(), id)
+	if err != nil {
+		t.Fatalf("GetSandbox(%s) error = %v, want nil", id, err)
+	}
+	return sbx
 }
 
 func decodeObject(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
@@ -470,6 +493,106 @@ func TestListSandboxesMapsStoreFailureTo500(t *testing.T) {
 	})
 
 	rec := do(t, srv, http.MethodGet, "/v1/sandboxes", "", nil)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	if got := decodeError(t, rec); got.Error.Code != api.CodeInternal {
+		t.Errorf("error code = %q, want %q", got.Error.Code, api.CodeInternal)
+	}
+}
+
+func TestGetSandboxEventsReturnsOrderedWireEvents(t *testing.T) {
+	srv := newTestAPI(t)
+	id := sandboxID(t, mustCreate(t, srv, "k1", alpineSpec))
+	markRunning(t, srv, id)
+
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes/"+id+"/events", "", nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	var got []struct {
+		api.SandboxEventResponse
+		ID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding events %q error = %v, want nil", rec.Body.String(), err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("event count = %d, want the create and running transitions", len(got))
+	}
+	if got[0].FromState != "" || got[0].ToState != string(sandbox.Pending) {
+		t.Errorf("first event = %#v, want creation -> pending", got[0])
+	}
+	if got[1].FromState != string(sandbox.Pending) || got[1].ToState != string(sandbox.Running) {
+		t.Errorf("second event = %#v, want pending -> running", got[1])
+	}
+	for i, event := range got {
+		if event.SandboxID != id {
+			t.Errorf("event %d sandbox_id = %v, want %q", i, event.SandboxID, id)
+		}
+		if event.At.IsZero() || event.Reason == "" {
+			t.Errorf("event %d = %#v, want its time and reason", i, event)
+		}
+		if event.ID != nil {
+			t.Errorf("event %d = %#v, want the store row id omitted", i, event)
+		}
+	}
+}
+
+func TestGetSandboxEventsReturnsEmptyArray(t *testing.T) {
+	srv := newTestAPIWithStore(t, &fakeStore{
+		getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
+			return &sandbox.Sandbox{SandboxID: "sbx_known"}, nil
+		},
+		getSandboxEvents: func(context.Context, string) ([]*events.Event, error) {
+			return nil, nil
+		},
+	})
+
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes/sbx_known/events", "", nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
+		t.Errorf("body = %s, want []", body)
+	}
+}
+
+func TestGetSandboxEventsUnknownSandboxReturns404(t *testing.T) {
+	srv := newTestAPIWithStore(t, &fakeStore{
+		getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
+			return nil, store.ErrNotFound
+		},
+	})
+
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes/sbx_missing/events", "", nil)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	if got := decodeError(t, rec); got.Error.Code != api.CodeNotFound {
+		t.Errorf("error code = %q, want %q", got.Error.Code, api.CodeNotFound)
+	}
+}
+
+func TestGetSandboxEventsMapsStoreFailureTo500(t *testing.T) {
+	srv := newTestAPIWithStore(t, &fakeStore{
+		getSandbox: func(context.Context, string) (*sandbox.Sandbox, error) {
+			return &sandbox.Sandbox{SandboxID: "sbx_known"}, nil
+		},
+		getSandboxEvents: func(context.Context, string) ([]*events.Event, error) {
+			return nil, errors.New("database is on fire")
+		},
+	})
+
+	rec := do(t, srv, http.MethodGet, "/v1/sandboxes/sbx_known/events", "", nil)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)

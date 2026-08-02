@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nickstrad/quickspin/internal/client"
+	"github.com/nickstrad/quickspin/internal/events"
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/spf13/cobra"
@@ -19,6 +20,8 @@ type sandboxAPI interface {
 	CreateSandbox(ctx context.Context, idempotencyKey string, spec sandbox.SpecFile, ttl time.Duration) (*sandbox.Sandbox, error)
 	ListSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error)
 	InspectSandbox(ctx context.Context, sandboxID string) (runtime.Info, error)
+	GetSandboxEvents(ctx context.Context, sandboxID string) ([]*events.Event, error)
+	KeepaliveSandbox(ctx context.Context, sandboxID string, ttl time.Duration) (*sandbox.Sandbox, error)
 	DestroySandbox(ctx context.Context, sandboxID string) error
 	Exec(ctx context.Context, sandboxID string, cmd []string, opts runtime.ExecOpts) (runtime.ExecResult, error)
 	WriteFile(ctx context.Context, sandboxID, path string, content []byte, mode fs.FileMode) error

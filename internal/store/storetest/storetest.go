@@ -71,6 +71,89 @@ func Run(t *testing.T, factory Factory) {
 		}
 	})
 
+	t.Run("ExpiryRenewalIsGuardedBySandboxState", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			state       sandbox.TaskState
+			transitions []sandbox.TaskState
+			renewable   bool
+		}{
+			{name: "pending sandbox is renewable", state: sandbox.Pending, renewable: true},
+			{name: "running sandbox is renewable", state: sandbox.Running, transitions: []sandbox.TaskState{sandbox.Running}, renewable: true},
+			{name: "failed sandbox is not renewable", state: sandbox.Failed, transitions: []sandbox.TaskState{sandbox.Failed}},
+			{name: "stopping sandbox is not renewable", state: sandbox.Stopping, transitions: []sandbox.TaskState{sandbox.Running, sandbox.Stopping}},
+			{name: "stopped sandbox is not renewable", state: sandbox.Stopped, transitions: []sandbox.TaskState{sandbox.Running, sandbox.Stopping, sandbox.Stopped}},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				ctx := context.Background()
+				st := factory(t)
+				sbx := createSandbox(t, ctx, st, "renew-"+string(tt.state), specFor("alpine:3.20"))
+				for _, to := range tt.transitions {
+					sbx = transition(t, ctx, st, sbx.SandboxID, sbx.State, to)
+				}
+				expiresAt := TestExpiry().Add(time.Hour)
+
+				renewed, err := st.UpdateSandboxExpiry(ctx, sbx.SandboxID, expiresAt)
+				if tt.renewable {
+					if err != nil {
+						t.Fatalf("UpdateSandboxExpiry(%s) error = %v, want nil", tt.state, err)
+					}
+					if renewed == nil {
+						t.Fatalf("UpdateSandboxExpiry(%s) = nil, want a sandbox", tt.state)
+					}
+					if renewed.State != tt.state || !renewed.ExpiresAt.Equal(expiresAt) {
+						t.Errorf("UpdateSandboxExpiry(%s) = %#v, want state %q and expiry %v", tt.state, renewed, tt.state, expiresAt)
+					}
+				} else if !errors.Is(err, sandbox.ErrInvalidStateTransition) {
+					t.Fatalf("UpdateSandboxExpiry(%s) error = %v, want ErrInvalidStateTransition", tt.state, err)
+				}
+
+				persisted, err := st.GetSandbox(ctx, sbx.SandboxID)
+				if err != nil {
+					t.Fatalf("GetSandbox(%s) error = %v, want nil", sbx.SandboxID, err)
+				}
+				wantExpiry := TestExpiry()
+				if tt.renewable {
+					wantExpiry = expiresAt
+				}
+				if persisted.State != tt.state || !persisted.ExpiresAt.Equal(wantExpiry) {
+					t.Errorf("persisted sandbox = %#v, want state %q and expiry %v", persisted, tt.state, wantExpiry)
+				}
+			})
+		}
+	})
+
+	t.Run("ExpiryRenewalRequiresAnExistingSandbox", func(t *testing.T) {
+		ctx := context.Background()
+		st := factory(t)
+
+		_, err := st.UpdateSandboxExpiry(ctx, "sbx_00000000-0000-0000-0000-000000000000", TestExpiry())
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("UpdateSandboxExpiry(missing) error = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("MissingRenewalExpiryRejected", func(t *testing.T) {
+		ctx := context.Background()
+		st := factory(t)
+		sbx := createSandbox(t, ctx, st, "missing-renewal-expiry", specFor("alpine:3.20"))
+
+		_, err := st.UpdateSandboxExpiry(ctx, sbx.SandboxID, time.Time{})
+		if !errors.Is(err, store.ErrMissingExpiry) {
+			t.Fatalf("UpdateSandboxExpiry(zero expiry) error = %v, want ErrMissingExpiry", err)
+		}
+
+		persisted, err := st.GetSandbox(ctx, sbx.SandboxID)
+		if err != nil {
+			t.Fatalf("GetSandbox(%s) error = %v, want nil", sbx.SandboxID, err)
+		}
+		if persisted.State != sandbox.Pending || !persisted.ExpiresAt.Equal(TestExpiry()) {
+			t.Errorf("sandbox after rejected renewal = %#v, want pending with expiry %v", persisted, TestExpiry())
+		}
+	})
+
 	t.Run("MissingExpiryRejected", func(t *testing.T) {
 		ctx := context.Background()
 		st := factory(t)

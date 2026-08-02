@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/nickstrad/quickspin/internal/api"
+	"github.com/nickstrad/quickspin/internal/events"
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/sandbox"
 )
@@ -106,6 +107,36 @@ func (c *Client) DestroySandbox(ctx context.Context, sandboxID string) error {
 	return c.do(ctx, request{method: http.MethodDelete, path: sandboxPath(sandboxID)})
 }
 
+func (c *Client) GetSandboxEvents(ctx context.Context, sandboxID string) ([]*events.Event, error) {
+	var resp []api.SandboxEventResponse
+	if err := c.do(ctx, request{
+		method: http.MethodGet,
+		path:   sandboxSubresourcePath(sandboxID, "events"),
+		out:    &resp,
+	}); err != nil {
+		return nil, err
+	}
+
+	evts := make([]*events.Event, len(resp))
+	for i, r := range resp {
+		evts[i] = r.Event()
+	}
+	return evts, nil
+}
+
+func (c *Client) KeepaliveSandbox(ctx context.Context, sandboxID string, ttl time.Duration) (*sandbox.Sandbox, error) {
+	var resp api.SandboxResponse
+	if err := c.do(ctx, request{
+		method: http.MethodPost,
+		path:   sandboxSubresourcePath(sandboxID, "keepalive"),
+		body:   api.NewKeepaliveSandboxRequest(ttl),
+		out:    &resp,
+	}); err != nil {
+		return nil, err
+	}
+	return resp.Sandbox(), nil
+}
+
 func (c *Client) Exec(
 	ctx context.Context,
 	sandboxID string,
@@ -115,7 +146,7 @@ func (c *Client) Exec(
 	var resp api.ExecResponse
 	err := c.do(ctx, request{
 		method: http.MethodPost,
-		path:   sandboxPath(sandboxID) + "/exec",
+		path:   sandboxSubresourcePath(sandboxID, "exec"),
 		body:   api.ExecRequest{Command: cmd, Options: api.NewExecOptions(opts)},
 		out:    &resp,
 	})
@@ -133,7 +164,7 @@ func (c *Client) WriteFile(
 ) error {
 	return c.do(ctx, request{
 		method: http.MethodPut,
-		path:   sandboxPath(sandboxID) + "/files",
+		path:   sandboxSubresourcePath(sandboxID, "files"),
 		body: api.WriteInSandboxRequest{
 			Path:     path,
 			Content:  content,
@@ -148,7 +179,7 @@ func (c *Client) ReadFile(ctx context.Context, sandboxID, path string) ([]byte, 
 	var content []byte
 	err := c.do(ctx, request{
 		method: http.MethodGet,
-		path:   sandboxPath(sandboxID) + "/files",
+		path:   sandboxSubresourcePath(sandboxID, "files"),
 		query:  url.Values{"path": {path}},
 		out:    &content,
 	})
@@ -159,7 +190,7 @@ func (c *Client) ListDir(ctx context.Context, sandboxID, path string) ([]runtime
 	var resp []api.FileInfoResponse
 	err := c.do(ctx, request{
 		method: http.MethodGet,
-		path:   sandboxPath(sandboxID) + "/dir",
+		path:   sandboxSubresourcePath(sandboxID, "dir"),
 		query:  url.Values{"path": {path}},
 		out:    &resp,
 	})
@@ -176,7 +207,7 @@ func (c *Client) ListDir(ctx context.Context, sandboxID, path string) ([]runtime
 func (c *Client) RemovePath(ctx context.Context, sandboxID, path string) error {
 	return c.do(ctx, request{
 		method: http.MethodDelete,
-		path:   sandboxPath(sandboxID) + "/files",
+		path:   sandboxSubresourcePath(sandboxID, "files"),
 		query:  url.Values{"path": {path}},
 	})
 }
@@ -186,6 +217,10 @@ func (c *Client) RemovePath(ctx context.Context, sandboxID, path string) error {
 // be the place that decides.
 func sandboxPath(sandboxID string) string {
 	return "/v1/sandboxes/" + url.PathEscape(sandboxID)
+}
+
+func sandboxSubresourcePath(sandboxID, subresource string) string {
+	return sandboxPath(sandboxID) + "/" + subresource
 }
 
 type request struct {

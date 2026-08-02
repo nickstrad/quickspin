@@ -48,6 +48,12 @@ SET state = ?, updated_at = CURRENT_TIMESTAMP
 WHERE platform_id = ? AND state = ?
 RETURNING id, platform_id, state, spec, created_at, updated_at, expires_at;`
 
+const UpdateSandboxExpiryQuery = `
+UPDATE sandboxes
+SET expires_at = ?, updated_at = CURRENT_TIMESTAMP
+WHERE platform_id = ? AND state IN (?, ?)
+RETURNING id, platform_id, state, spec, created_at, updated_at, expires_at;`
+
 const InsertSandboxQuery = `
 INSERT INTO sandboxes (state, spec, platform_id, expires_at)
 VALUES (?, ?, ?, ?)
@@ -188,6 +194,41 @@ func (s *Store) CreateIdempotencyKey(ctx context.Context, idempotencyKey, sandbo
 	s.logger.DebugContext(ctx, "recorded idempotency key", "idempotencyKey", idempotencyKey, "sandboxID", k.SandboxID)
 
 	return k, nil
+}
+
+func (s *Store) UpdateSandboxExpiry(ctx context.Context, sandboxID string, expiresAt time.Time) (*sandbox.Sandbox, error) {
+	const op = "sqlite.Store.UpdateSandboxExpiry"
+	msg := fmt.Sprintf("updating the expiry for sandbox %s", sandboxID)
+
+	if expiresAt.IsZero() {
+		return nil, store.E(op, msg, store.ErrMissingExpiry)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, store.E(op, msg, err)
+	}
+	defer tx.Rollback()
+
+	sbx, err := scanRow(tx.QueryRowContext(ctx, UpdateSandboxExpiryQuery,
+		expiresAt, sandboxID, sandbox.Pending, sandbox.Running), scanSandbox)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			if _, getErr := scanRow(tx.QueryRowContext(ctx, GetSandboxQuery, sandboxID), scanSandbox); getErr != nil {
+				return nil, store.Wrap(op, msg, getErr)
+			}
+			return nil, store.E(op, msg, sandbox.ErrInvalidStateTransition)
+		}
+		return nil, store.Wrap(op, msg, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, store.E(op, msg, err)
+	}
+
+	s.logger.InfoContext(ctx, "sandbox expiry changed", "sandboxID", sandboxID, "expiresAt", expiresAt)
+
+	return sbx, nil
 }
 
 func (s *Store) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error) {

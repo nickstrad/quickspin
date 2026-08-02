@@ -67,6 +67,25 @@ func (c *Control) CreateSandbox(ctx context.Context, idempotencyKey string, spec
 	return sbx, nil
 }
 
+// KeepaliveSandbox replaces the lease with one measured from the current time.
+func (c *Control) KeepaliveSandbox(ctx context.Context, sandboxID string, ttl time.Duration) (*sandbox.Sandbox, error) {
+	const op = "control.Control.KeepaliveSandbox"
+
+	ttl = min(ttl, sandbox.MaxTTL)
+	ttl, err := sandbox.ResolveTTL(ttl)
+	if err != nil {
+		return nil, Wrap(op, "resolving the requested ttl", err)
+	}
+
+	expiresAt := c.now().Add(ttl)
+	sbx, err := c.store.UpdateSandboxExpiry(ctx, sandboxID, expiresAt)
+	if err != nil {
+		return nil, Wrap(op, "renewing the sandbox expiry", err)
+	}
+
+	return sbx, nil
+}
+
 // DestroySandbox is idempotent: a sandbox that is absent or already past
 // running is the outcome the caller asked for, so it reports success.
 func (c *Control) DestroySandbox(ctx context.Context, sandboxID string) error {

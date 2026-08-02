@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/nickstrad/quickspin/internal/store"
@@ -95,6 +96,13 @@ func TestSqliteStoreOperationsHonorCanceledContext(t *testing.T) {
 			name: "update sandbox state",
 			call: func() error {
 				_, err := st.UpdateSandboxState(ctx, sandboxID, sandbox.Pending, sandbox.Running, "canceled transition")
+				return err
+			},
+		},
+		{
+			name: "update sandbox expiry",
+			call: func() error {
+				_, err := st.UpdateSandboxExpiry(ctx, sandboxID, storetest.TestExpiry().Add(time.Hour))
 				return err
 			},
 		},

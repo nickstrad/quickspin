@@ -178,6 +178,14 @@ func decodeBody[T any](a *API, w http.ResponseWriter, r *http.Request, op, what 
 	return v, true
 }
 
+func decodeOptionalBody[T any](a *API, w http.ResponseWriter, r *http.Request, op, what string) (T, bool) {
+	if r.Body == http.NoBody {
+		var zero T
+		return zero, true
+	}
+	return decodeBody[T](a, w, r, op, what)
+}
+
 // queryPath reads the path query parameter the file and directory GET routes
 // carry instead of a body, which proxies may drop on a GET.
 func (a *API) queryPath(w http.ResponseWriter, r *http.Request, op string) (string, bool) {
@@ -245,6 +253,31 @@ func (a *API) ListSandboxes(w http.ResponseWriter, r *http.Request) {
 	a.respond(w, r, http.StatusOK, resp)
 }
 
+func (a *API) GetSandboxEvents(w http.ResponseWriter, r *http.Request) {
+	const op = "httpapi.API.GetSandboxEvents"
+	ctx := r.Context()
+	sandboxID := chi.URLParam(r, sandboxIDParam)
+
+	// Event lookup deliberately returns an empty slice for an unknown id, so
+	// existence must be established separately to preserve resource semantics.
+	if _, err := a.store.GetSandbox(ctx, sandboxID); err != nil {
+		a.failWith(w, r, Wrap(op, "loading the sandbox", err))
+		return
+	}
+
+	events, err := a.store.GetSandboxEvents(ctx, sandboxID)
+	if err != nil {
+		a.failInternal(w, r, op, "listing sandbox events", err)
+		return
+	}
+
+	resp := make([]api.SandboxEventResponse, len(events))
+	for i, event := range events {
+		resp[i] = api.NewSandboxEventResponse(event)
+	}
+	a.respond(w, r, http.StatusOK, resp)
+}
+
 func (a *API) InspectSandbox(w http.ResponseWriter, r *http.Request) {
 	const op = "httpapi.API.InspectSandbox"
 	ctx := r.Context()
@@ -278,6 +311,24 @@ func (a *API) DestroySandbox(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.respond(w, r, http.StatusNoContent, nil)
+}
+
+func (a *API) KeepaliveSandbox(w http.ResponseWriter, r *http.Request) {
+	const op = "httpapi.API.KeepaliveSandbox"
+	sandboxID := chi.URLParam(r, sandboxIDParam)
+
+	req, ok := decodeOptionalBody[api.KeepaliveSandboxRequest](a, w, r, op, "sandbox keepalive request")
+	if !ok {
+		return
+	}
+
+	sbx, err := a.control.KeepaliveSandbox(r.Context(), sandboxID, req.TTL())
+	if err != nil {
+		a.failWith(w, r, Wrap(op, "renewing the sandbox lease", err))
+		return
+	}
+
+	a.respond(w, r, http.StatusOK, api.NewSandboxResponse(sbx))
 }
 
 func (a *API) ExecInSandbox(w http.ResponseWriter, r *http.Request) {
@@ -442,7 +493,9 @@ func (a *API) initRouter() {
 		r.Get("/", a.ListSandboxes)
 		r.Route(fmt.Sprintf("/{%s}", sandboxIDParam), func(r chi.Router) {
 			r.Get("/", a.InspectSandbox)
+			r.Get("/events", a.GetSandboxEvents)
 			r.Delete("/", a.DestroySandbox)
+			r.Post("/keepalive", a.KeepaliveSandbox)
 			r.Post("/exec", a.ExecInSandbox)
 			r.Put("/files", a.WriteInSandbox)
 			r.Get("/files", a.ReadFromSandbox)

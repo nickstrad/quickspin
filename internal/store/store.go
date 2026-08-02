@@ -19,6 +19,9 @@ type Store interface {
 	CreateSandbox(ctx context.Context, idempotencyKey string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error)
 	GetSandbox(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error)
 	GetSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error)
+	// UpdateSandboxExpiry renews only pending or running rows and rejects a
+	// zero expiry.
+	UpdateSandboxExpiry(ctx context.Context, sandboxID string, expiresAt time.Time) (*sandbox.Sandbox, error)
 	// reason is recorded on the event this transition appends; the row and its
 	// event commit together or not at all.
 	UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error)
