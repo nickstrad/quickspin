@@ -6,8 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
-	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
 	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/nickstrad/quickspin/internal/store"
@@ -37,43 +37,69 @@ func newTestStore(t *testing.T) *sqlite.Store {
 // the case did not intend panics the test rather than silently succeeding.
 type fakeStore struct {
 	store.Store
-	createSandbox      func(ctx context.Context, key string, spec sandbox.SpecFile) (*sandbox.Sandbox, error)
+	createSandbox      func(ctx context.Context, key string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error)
 	getSandbox         func(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error)
-	updateSandboxState func(ctx context.Context, sandboxID string, from, to sandbox.TaskState) (*sandbox.Sandbox, error)
+	updateSandboxState func(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error)
 }
 
-func (f *fakeStore) CreateSandbox(ctx context.Context, key string, spec sandbox.SpecFile) (*sandbox.Sandbox, error) {
-	return f.createSandbox(ctx, key, spec)
+func (f *fakeStore) CreateSandbox(ctx context.Context, key string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error) {
+	return f.createSandbox(ctx, key, spec, expiresAt)
 }
 
 func (f *fakeStore) GetSandbox(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error) {
 	return f.getSandbox(ctx, sandboxID)
 }
 
-func (f *fakeStore) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState) (*sandbox.Sandbox, error) {
-	return f.updateSandboxState(ctx, sandboxID, from, to)
+func (f *fakeStore) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error) {
+	return f.updateSandboxState(ctx, sandboxID, from, to, reason)
 }
 
 func ptr[T any](v T) *T { return &v }
 
-// The row is committed before the runtime is asked for anything, so a create
-// that fails has to be recorded on it: a sandbox left in pending is
-// indistinguishable from one still starting.
-func TestCreateSandboxMarksTheSandboxFailedWhenTheRuntimeRefuses(t *testing.T) {
+// Create records intent and stops. The container is the reconciler's to make,
+// which is what lets a crash between the two cost a tick rather than a sandbox.
+// The Fake panics on an unset CreateFn, so a create that reaches the runtime
+// fails here.
+func TestCreateSandboxRecordsAPendingSandboxAndStartsNoRuntime(t *testing.T) {
 	st := newTestStore(t)
-	boom := errors.New("no such image")
-	c := New(discardLogger(), st, runtimetest.Fake{
-		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
-			return runtime.Info{}, boom
-		},
-	})
+	c := New(discardLogger(), st, runtimetest.Fake{})
 
-	sbx, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{})
-	if !errors.Is(err, boom) {
-		t.Fatalf("CreateSandbox() error = %v, want the runtime failure", err)
+	sbx, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, 0)
+	if err != nil {
+		t.Fatalf("CreateSandbox() error = %v, want nil", err)
 	}
-	if sbx != nil {
-		t.Errorf("CreateSandbox() sandbox = %#v, want nil", sbx)
+	if sbx.State != sandbox.Pending {
+		t.Errorf("State = %q, want %q", sbx.State, sandbox.Pending)
+	}
+
+	stored, err := st.GetSandbox(context.Background(), sbx.SandboxID)
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v, want nil", err)
+	}
+	if stored.State != sandbox.Pending {
+		t.Errorf("stored State = %q, want %q", stored.State, sandbox.Pending)
+	}
+}
+
+// A repeated key returns the original record rather than writing a second one.
+func TestCreateSandboxReplaysTheOriginalRecord(t *testing.T) {
+	st := newTestStore(t)
+	c := New(discardLogger(), st, runtimetest.Fake{})
+
+	first, err := c.CreateSandbox(context.Background(), "same-operation", sandbox.SpecFile{}, 0)
+	if err != nil {
+		t.Fatalf("CreateSandbox() error = %v, want nil", err)
+	}
+	second, err := c.CreateSandbox(context.Background(), "same-operation", sandbox.SpecFile{Image: ptr("debian:12")}, 0)
+	if err != nil {
+		t.Fatalf("replayed CreateSandbox() error = %v, want nil", err)
+	}
+
+	if second.SandboxID != first.SandboxID {
+		t.Errorf("replay sandbox id = %q, want the original %q", second.SandboxID, first.SandboxID)
+	}
+	if second.Spec.Image != nil {
+		t.Errorf("replay spec image = %v, want the original request's nil", second.Spec.Image)
 	}
 
 	sandboxes, err := st.GetSandboxes(context.Background())
@@ -81,71 +107,52 @@ func TestCreateSandboxMarksTheSandboxFailedWhenTheRuntimeRefuses(t *testing.T) {
 		t.Fatalf("GetSandboxes() error = %v, want nil", err)
 	}
 	if len(sandboxes) != 1 {
-		t.Fatalf("GetSandboxes() returned %d sandboxes, want 1", len(sandboxes))
-	}
-	if sandboxes[0].State != sandbox.Failed {
-		t.Errorf("State = %q, want %q", sandboxes[0].State, sandbox.Failed)
+		t.Errorf("GetSandboxes() returned %d sandboxes, want 1", len(sandboxes))
 	}
 }
 
-// The compensation is best-effort: the caller is already on its way to a 5xx,
-// so a store that cannot record the failure must not replace the runtime error
-// the caller is about to classify.
-func TestCreateSandboxKeepsTheRuntimeErrorWhenCompensationFails(t *testing.T) {
-	boom := errors.New("no such image")
-	var compensated bool
-	st := &fakeStore{
-		createSandbox: func(context.Context, string, sandbox.SpecFile) (*sandbox.Sandbox, error) {
-			return &sandbox.Sandbox{SandboxID: "sbx_1", State: sandbox.Pending}, nil
-		},
-		updateSandboxState: func(_ context.Context, _ string, from, to sandbox.TaskState) (*sandbox.Sandbox, error) {
-			compensated = from == sandbox.Pending && to == sandbox.Failed
-			return nil, errors.New("database is on fire")
-		},
+func TestCreateSandboxTurnsTheTTLIntoAnAbsoluteExpiry(t *testing.T) {
+	now := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	tests := []struct {
+		name string
+		ttl  time.Duration
+		want time.Time
+	}{
+		{name: "explicit ttl", ttl: 90 * time.Second, want: now.Add(90 * time.Second)},
+		{name: "omitted ttl takes the default", ttl: 0, want: now.Add(sandbox.DefaultTTL)},
 	}
-	c := New(discardLogger(), st, runtimetest.Fake{
-		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
-			return runtime.Info{}, boom
-		},
-	})
 
-	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{})
-	if !errors.Is(err, boom) {
-		t.Fatalf("CreateSandbox() error = %v, want the runtime failure", err)
-	}
-	if !compensated {
-		t.Error("the compensating pending→failed transition was never attempted")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got time.Time
+			c := New(discardLogger(), &fakeStore{
+				createSandbox: func(_ context.Context, _ string, _ sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error) {
+					got = expiresAt
+					return &sandbox.Sandbox{SandboxID: "sbx_1", State: sandbox.Pending, ExpiresAt: expiresAt}, nil
+				},
+			}, runtimetest.Fake{})
+			c.now = func() time.Time { return now }
+
+			if _, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, tt.ttl); err != nil {
+				t.Fatalf("CreateSandbox() error = %v, want nil", err)
+			}
+			if !got.Equal(tt.want) {
+				t.Errorf("stored ExpiresAt = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
-// A repeated key must not start a second container: the record already has one.
-func TestCreateSandboxReplaysWithoutStartingASecondRuntime(t *testing.T) {
-	st := newTestStore(t)
-	var creates int
-	c := New(discardLogger(), st, runtimetest.Fake{
-		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
-			creates++
-			return runtime.Info{}, nil
-		},
-	})
+// The fake store panics on any call, so reaching the write fails the test.
+func TestCreateSandboxRejectsAnOverCapTTLBeforeTheStoreWrite(t *testing.T) {
+	c := New(discardLogger(), &fakeStore{}, runtimetest.Fake{})
 
-	first, err := c.CreateSandbox(context.Background(), "same-operation", sandbox.SpecFile{})
-	if err != nil {
-		t.Fatalf("CreateSandbox() error = %v, want nil", err)
+	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, sandbox.MaxTTL+time.Second)
+	if !errors.Is(err, sandbox.ErrInvalidSpec) {
+		t.Fatalf("CreateSandbox() error = %v, want sandbox.ErrInvalidSpec", err)
 	}
-	second, err := c.CreateSandbox(context.Background(), "same-operation", sandbox.SpecFile{Image: ptr("debian:12")})
-	if err != nil {
-		t.Fatalf("replayed CreateSandbox() error = %v, want nil", err)
-	}
-
-	if creates != 1 {
-		t.Errorf("runtime.Create called %d times, want 1", creates)
-	}
-	if second.SandboxID != first.SandboxID {
-		t.Errorf("replay sandbox id = %q, want the original %q", second.SandboxID, first.SandboxID)
-	}
-	if second.State != sandbox.Running {
-		t.Errorf("replay state = %q, want %q", second.State, sandbox.Running)
+	if errors.Is(err, ErrInternal) {
+		t.Error("an over-cap ttl is the caller's mistake, want no ErrInternal marker")
 	}
 }
 
@@ -154,7 +161,7 @@ func TestCreateSandboxReplaysWithoutStartingASecondRuntime(t *testing.T) {
 func TestCreateSandboxRejectsAnUnresolvableSpecBeforeTheStoreWrite(t *testing.T) {
 	c := New(discardLogger(), &fakeStore{}, runtimetest.Fake{})
 
-	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{Memory: ptr("12x")})
+	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{Memory: ptr("12x")}, 0)
 	if !errors.Is(err, sandbox.ErrInvalidSpec) {
 		t.Fatalf("CreateSandbox() error = %v, want sandbox.ErrInvalidSpec", err)
 	}
@@ -167,12 +174,12 @@ func TestCreateSandboxRejectsAnUnresolvableSpecBeforeTheStoreWrite(t *testing.T)
 // inconsistency, so the store's not-found sentinel must not read as a 404.
 func TestCreateSandboxMarksAStoreFailureInternal(t *testing.T) {
 	c := New(discardLogger(), &fakeStore{
-		createSandbox: func(context.Context, string, sandbox.SpecFile) (*sandbox.Sandbox, error) {
+		createSandbox: func(context.Context, string, sandbox.SpecFile, time.Time) (*sandbox.Sandbox, error) {
 			return nil, store.ErrNotFound
 		},
 	}, runtimetest.Fake{})
 
-	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{})
+	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, 0)
 	if !errors.Is(err, ErrInternal) {
 		t.Errorf("CreateSandbox() error = %v, want the ErrInternal marker", err)
 	}
@@ -184,51 +191,30 @@ func TestCreateSandboxMarksAStoreFailureInternal(t *testing.T) {
 // An invalid spec rejected by the store stays the caller's mistake.
 func TestCreateSandboxLeavesAnInvalidSpecFromTheStoreAsTheCallersFault(t *testing.T) {
 	c := New(discardLogger(), &fakeStore{
-		createSandbox: func(context.Context, string, sandbox.SpecFile) (*sandbox.Sandbox, error) {
+		createSandbox: func(context.Context, string, sandbox.SpecFile, time.Time) (*sandbox.Sandbox, error) {
 			return nil, sandbox.ErrInvalidSpec
 		},
 	}, runtimetest.Fake{})
 
-	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{})
+	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, 0)
 	if errors.Is(err, ErrInternal) {
 		t.Errorf("CreateSandbox() error = %v, want no ErrInternal marker", err)
-	}
-}
-
-// The container is running by the time this transition fails, so a row left in
-// pending is ours to answer for.
-func TestCreateSandboxMarksAFailedRunningTransitionInternal(t *testing.T) {
-	c := New(discardLogger(), &fakeStore{
-		createSandbox: func(context.Context, string, sandbox.SpecFile) (*sandbox.Sandbox, error) {
-			return &sandbox.Sandbox{SandboxID: "sbx_1", State: sandbox.Pending}, nil
-		},
-		updateSandboxState: func(context.Context, string, sandbox.TaskState, sandbox.TaskState) (*sandbox.Sandbox, error) {
-			return nil, sandbox.ErrInvalidStateTransition
-		},
-	}, runtimetest.Fake{
-		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
-			return runtime.Info{}, nil
-		},
-	})
-
-	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{})
-	if !errors.Is(err, ErrInternal) {
-		t.Errorf("CreateSandbox() error = %v, want the ErrInternal marker", err)
 	}
 }
 
 func TestDestroySandboxWalksRunningToStopped(t *testing.T) {
 	st := newTestStore(t)
 	c := New(discardLogger(), st, runtimetest.Fake{
-		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
-			return runtime.Info{}, nil
-		},
 		DestroyFn: func(context.Context, string) error { return nil },
 	})
 
-	sbx, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{})
+	sbx, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, 0)
 	if err != nil {
 		t.Fatalf("CreateSandbox() error = %v, want nil", err)
+	}
+	// Stands in for the reconciler, which is what moves a sandbox to running.
+	if _, err := st.UpdateSandboxState(context.Background(), sbx.SandboxID, sandbox.Pending, sandbox.Running, "test"); err != nil {
+		t.Fatalf("UpdateSandboxState(pending, running) error = %v, want nil", err)
 	}
 
 	if err := c.DestroySandbox(context.Background(), sbx.SandboxID); err != nil {
@@ -260,7 +246,7 @@ func TestDestroySandboxIsASuccessWhenNothingIsRunning(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := New(discardLogger(), &fakeStore{
-				updateSandboxState: func(context.Context, string, sandbox.TaskState, sandbox.TaskState) (*sandbox.Sandbox, error) {
+				updateSandboxState: func(context.Context, string, sandbox.TaskState, sandbox.TaskState, string) (*sandbox.Sandbox, error) {
 					return nil, tt.storeErr
 				},
 			}, runtimetest.Fake{})

@@ -3,6 +3,7 @@ package cli_test
 import (
 	"context"
 	"io/fs"
+	"time"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/sandbox"
@@ -10,7 +11,7 @@ import (
 
 // Nil callbacks make unexpected API calls fail the test.
 type fakeAPI struct {
-	CreateFn     func(context.Context, string, sandbox.SpecFile) (*sandbox.Sandbox, error)
+	CreateFn     func(context.Context, string, sandbox.SpecFile, time.Duration) (*sandbox.Sandbox, error)
 	ListFn       func(context.Context) ([]*sandbox.Sandbox, error)
 	InspectFn    func(context.Context, string) (runtime.Info, error)
 	DestroyFn    func(context.Context, string) error
@@ -21,8 +22,8 @@ type fakeAPI struct {
 	RemovePathFn func(context.Context, string, string) error
 }
 
-func (f fakeAPI) CreateSandbox(ctx context.Context, key string, spec sandbox.SpecFile) (*sandbox.Sandbox, error) {
-	return f.CreateFn(ctx, key, spec)
+func (f fakeAPI) CreateSandbox(ctx context.Context, key string, spec sandbox.SpecFile, ttl time.Duration) (*sandbox.Sandbox, error) {
+	return f.CreateFn(ctx, key, spec, ttl)
 }
 
 func (f fakeAPI) ListSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error) {
@@ -62,6 +63,7 @@ func sandboxRecord(id, image string, state sandbox.TaskState) *sandbox.Sandbox {
 		SandboxID: id,
 		State:     state,
 		Spec:      sandbox.SpecFile{Image: &image},
+		ExpiresAt: testTime.Add(sandbox.DefaultTTL),
 		CreatedAt: testTime,
 		UpdatedAt: testTime,
 	}

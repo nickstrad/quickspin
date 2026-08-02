@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/sandbox"
@@ -18,6 +19,8 @@ type Control struct {
 	logger  *slog.Logger
 	store   store.Store
 	runtime runtime.Runtime
+	// Injected so TTL tests need not sleep.
+	now func() time.Time
 }
 
 func New(logger *slog.Logger, store store.Store, runtime runtime.Runtime) *Control {
@@ -25,12 +28,14 @@ func New(logger *slog.Logger, store store.Store, runtime runtime.Runtime) *Contr
 		logger:  logger.With("subcomponent", "control"),
 		store:   store,
 		runtime: runtime,
+		now:     time.Now,
 	}
 }
 
 // CreateSandbox records the sandbox, starts it, and reports it running. A
-// repeated idempotency key returns the original record untouched.
-func (c *Control) CreateSandbox(ctx context.Context, idempotencyKey string, spec sandbox.SpecFile) (*sandbox.Sandbox, error) {
+// repeated idempotency key returns the original record untouched. A zero ttl
+// takes sandbox.DefaultTTL.
+func (c *Control) CreateSandbox(ctx context.Context, idempotencyKey string, spec sandbox.SpecFile, ttl time.Duration) (*sandbox.Sandbox, error) {
 	const op = "control.Control.CreateSandbox"
 
 	// Resolved before the store write so an unenforceable limit is a 422 with no
@@ -43,7 +48,12 @@ func (c *Control) CreateSandbox(ctx context.Context, idempotencyKey string, spec
 		return nil, Wrap(op, "resolving the submitted spec", err)
 	}
 
-	sbx, err := c.store.CreateSandbox(ctx, idempotencyKey, spec)
+	ttl, err = sandbox.ResolveTTL(ttl)
+	if err != nil {
+		return nil, Wrap(op, "resolving the requested ttl", err)
+	}
+
+	sbx, err := c.store.CreateSandbox(ctx, idempotencyKey, spec, c.now().Add(ttl))
 	if err != nil {
 		// A store.ErrNotFound here is not the client's problem: it means the
 		// idempotency key points at a sandbox that no longer exists, which is
@@ -54,41 +64,7 @@ func (c *Control) CreateSandbox(ctx context.Context, idempotencyKey string, spec
 		return nil, Wrap(op, "recording the sandbox", err)
 	}
 
-	// A repeated key returns the original sandbox, which already has a runtime;
-	// starting a second one is exactly the duplicate the key exists to prevent.
-	if sbx.State != sandbox.Pending {
-		c.logger.InfoContext(ctx, "returning the existing sandbox for a repeated idempotency key",
-			"idempotencyKey", idempotencyKey, "sandboxID", sbx.SandboxID, "state", sbx.State)
-		return sbx, nil
-	}
-
-	// The store minted the id and it is already durable, so the runtime is told
-	// which sandbox it is building rather than inventing a second identity.
-	if _, err := c.runtime.Create(ctx, sbx.SandboxID, resolved); err != nil {
-		c.markFailed(ctx, sbx.SandboxID)
-		return nil, Wrap(op, "starting the sandbox", err)
-	}
-
-	// Create starts the container, so success means running rather than
-	// created-but-idle.
-	running, err := c.store.UpdateSandboxState(ctx, sbx.SandboxID, sandbox.Pending, sandbox.Running)
-	if err != nil {
-		return nil, Wrap(op, "recording the sandbox as running", errors.Join(ErrInternal, err))
-	}
-
-	return running, nil
-}
-
-// markFailed records a create that the runtime refused. The error is logged
-// rather than returned: the caller is already on its way to a 5xx, and a row
-// left in pending is a reconciler's problem, not this request's.
-func (c *Control) markFailed(ctx context.Context, sandboxID string) {
-	if _, err := c.store.UpdateSandboxState(ctx, sandboxID, sandbox.Pending, sandbox.Failed); err != nil {
-		c.logger.ErrorContext(ctx, "marking the sandbox failed after the runtime refused it",
-			"sandboxID", sandboxID, "err", err)
-		return
-	}
-	c.logger.WarnContext(ctx, "sandbox marked failed after the runtime refused it", "sandboxID", sandboxID)
+	return sbx, nil
 }
 
 // DestroySandbox is idempotent: a sandbox that is absent or already past
@@ -100,7 +76,7 @@ func (c *Control) DestroySandbox(ctx context.Context, sandboxID string) error {
 	// reading the row to feed its own state back in: the store's WHERE gate
 	// rejects every other case and says whether the id was absent or the state
 	// was wrong.
-	if _, err := c.store.UpdateSandboxState(ctx, sandboxID, sandbox.Running, sandbox.Stopping); err != nil {
+	if _, err := c.store.UpdateSandboxState(ctx, sandboxID, sandbox.Running, sandbox.Stopping, "destroy requested"); err != nil {
 		// An absent row or one already past Running means the sandbox is not
 		// running, which is the outcome the caller asked for — DELETE is
 		// idempotent, so that is a success, not an error.
@@ -118,7 +94,7 @@ func (c *Control) DestroySandbox(ctx context.Context, sandboxID string) error {
 
 	// The container is gone by now, so a row still in stopping is our
 	// inconsistency rather than anything the client did wrong.
-	if _, err := c.store.UpdateSandboxState(ctx, sandboxID, sandbox.Stopping, sandbox.Stopped); err != nil {
+	if _, err := c.store.UpdateSandboxState(ctx, sandboxID, sandbox.Stopping, sandbox.Stopped, "runtime destroyed the sandbox"); err != nil {
 		return Wrap(op, "recording the sandbox as stopped", errors.Join(ErrInternal, err))
 	}
 

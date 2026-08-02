@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/nickstrad/quickspin/internal/store"
@@ -42,6 +43,49 @@ func Run(t *testing.T, factory Factory) {
 		}
 		if got.Spec.Image == nil || *got.Spec.Image != "alpine:3.20" {
 			t.Errorf("GetSandbox(%s) Spec.Image = %v, want alpine:3.20", created.SandboxID, got.Spec.Image)
+		}
+	})
+
+	// The expiry is what a reaper reads, so it has to survive both the round
+	// trip and the state transitions the sandbox goes through on the way there.
+	t.Run("ExpiryRoundTripsAndSurvivesTransitions", func(t *testing.T) {
+		ctx := context.Background()
+		st := factory(t)
+
+		created := createSandbox(t, ctx, st, "expiry", specFor("alpine:3.20"))
+		if !created.ExpiresAt.Equal(TestExpiry()) {
+			t.Errorf("CreateSandbox ExpiresAt = %v, want %v", created.ExpiresAt, TestExpiry())
+		}
+
+		got, err := st.GetSandbox(ctx, created.SandboxID)
+		if err != nil {
+			t.Fatalf("GetSandbox(%s) error = %v, want nil", created.SandboxID, err)
+		}
+		if !got.ExpiresAt.Equal(TestExpiry()) {
+			t.Errorf("GetSandbox ExpiresAt = %v, want %v", got.ExpiresAt, TestExpiry())
+		}
+
+		running := transition(t, ctx, st, created.SandboxID, sandbox.Pending, sandbox.Running)
+		if !running.ExpiresAt.Equal(TestExpiry()) {
+			t.Errorf("UpdateSandboxState ExpiresAt = %v, want %v", running.ExpiresAt, TestExpiry())
+		}
+	})
+
+	t.Run("MissingExpiryRejected", func(t *testing.T) {
+		ctx := context.Background()
+		st := factory(t)
+
+		_, err := st.CreateSandbox(ctx, "no-expiry", specFor("alpine:3.20"), time.Time{})
+		if !errors.Is(err, store.ErrMissingExpiry) {
+			t.Fatalf("CreateSandbox(zero expiry) error = %v, want ErrMissingExpiry", err)
+		}
+
+		sandboxes, err := st.GetSandboxes(ctx)
+		if err != nil {
+			t.Fatalf("GetSandboxes() error = %v, want nil", err)
+		}
+		if len(sandboxes) != 0 {
+			t.Errorf("GetSandboxes() = %#v, want no row written for a rejected create", sandboxes)
 		}
 	})
 
@@ -199,7 +243,7 @@ func Run(t *testing.T, factory Factory) {
 		transition(t, ctx, st, id, sandbox.Running, sandbox.Stopping)
 		transition(t, ctx, st, id, sandbox.Stopping, sandbox.Stopped)
 
-		if _, err := st.UpdateSandboxState(ctx, id, sandbox.Stopped, sandbox.Running); !errors.Is(err, sandbox.ErrInvalidStateTransition) {
+		if _, err := st.UpdateSandboxState(ctx, id, sandbox.Stopped, sandbox.Running, "illegal"); !errors.Is(err, sandbox.ErrInvalidStateTransition) {
 			t.Fatalf("UpdateSandboxState(stopped, running) error = %v, want ErrInvalidStateTransition", err)
 		}
 
@@ -212,13 +256,103 @@ func Run(t *testing.T, factory Factory) {
 		}
 	})
 
+	// The invariant the append-only log exists for: history is never recomputed,
+	// so replaying it has to land on the state the row reports.
+	t.Run("EveryTransitionEmitsEvent", func(t *testing.T) {
+		ctx := context.Background()
+		st := factory(t)
+
+		sbx := createSandbox(t, ctx, st, "events", specFor("alpine:3.20"))
+		id := sbx.SandboxID
+		transition(t, ctx, st, id, sandbox.Pending, sandbox.Running)
+		transition(t, ctx, st, id, sandbox.Running, sandbox.Stopping)
+		final := transition(t, ctx, st, id, sandbox.Stopping, sandbox.Stopped)
+
+		got, err := st.GetSandboxEvents(ctx, id)
+		if err != nil {
+			t.Fatalf("GetSandboxEvents(%s) error = %v, want nil", id, err)
+		}
+		if len(got) != 4 {
+			t.Fatalf("GetSandboxEvents(%s) returned %d events, want the create plus 3 transitions", id, len(got))
+		}
+
+		var replayed sandbox.TaskState
+		for i, e := range got {
+			if e.SandboxID != id {
+				t.Errorf("event %d sandbox id = %q, want %q", i, e.SandboxID, id)
+			}
+			if e.Reason == "" {
+				t.Errorf("event %d has no reason, want the caller's", i)
+			}
+			if e.At.IsZero() {
+				t.Errorf("event %d At is zero, want the instant of the transition", i)
+			}
+			if e.FromState != replayed {
+				t.Fatalf("event %d from state = %q, want the previous event's to state %q", i, e.FromState, replayed)
+			}
+			replayed = e.ToState
+		}
+		if replayed != final.State {
+			t.Errorf("replayed state = %q, want the sandbox's current %q", replayed, final.State)
+		}
+	})
+
+	t.Run("RejectedTransitionEmitsNoEvent", func(t *testing.T) {
+		ctx := context.Background()
+		st := factory(t)
+
+		id := createSandbox(t, ctx, st, "no-event", specFor("alpine:3.20")).SandboxID
+
+		if _, err := st.UpdateSandboxState(ctx, id, sandbox.Running, sandbox.Stopping, "never happened"); err == nil {
+			t.Fatal("UpdateSandboxState(running, stopping) on a pending row error = nil, want a rejection")
+		}
+
+		got, err := st.GetSandboxEvents(ctx, id)
+		if err != nil {
+			t.Fatalf("GetSandboxEvents(%s) error = %v, want nil", id, err)
+		}
+		if len(got) != 1 {
+			t.Errorf("GetSandboxEvents(%s) returned %d events, want only the create", id, len(got))
+		}
+	})
+
+	t.Run("EventsAreScopedToTheirSandbox", func(t *testing.T) {
+		ctx := context.Background()
+		st := factory(t)
+
+		first := createSandbox(t, ctx, st, "first", specFor("alpine:3.20")).SandboxID
+		second := createSandbox(t, ctx, st, "second", specFor("debian:12")).SandboxID
+		transition(t, ctx, st, first, sandbox.Pending, sandbox.Running)
+
+		got, err := st.GetSandboxEvents(ctx, second)
+		if err != nil {
+			t.Fatalf("GetSandboxEvents(%s) error = %v, want nil", second, err)
+		}
+		if len(got) != 1 || got[0].SandboxID != second {
+			t.Errorf("GetSandboxEvents(%s) = %+v, want only its own create event", second, got)
+		}
+	})
+
+	t.Run("EventListsAreEmptySlicesNotNil", func(t *testing.T) {
+		ctx := context.Background()
+		st := factory(t)
+
+		unknown, err := st.GetSandboxEvents(ctx, "sbx_00000000-0000-0000-0000-000000000000")
+		if err != nil {
+			t.Fatalf("GetSandboxEvents(missing) error = %v, want nil", err)
+		}
+		if unknown == nil || len(unknown) != 0 {
+			t.Errorf("GetSandboxEvents(missing) = %#v, want an empty non-nil slice", unknown)
+		}
+	})
+
 	t.Run("TransitionRequiresCurrentFromState", func(t *testing.T) {
 		ctx := context.Background()
 		st := factory(t)
 		sbx := createSandbox(t, ctx, st, "stale-transition", specFor("alpine:3.20"))
 		id := sbx.SandboxID
 
-		if _, err := st.UpdateSandboxState(ctx, id, sandbox.Running, sandbox.Stopping); !errors.Is(err, sandbox.ErrInvalidStateTransition) {
+		if _, err := st.UpdateSandboxState(ctx, id, sandbox.Running, sandbox.Stopping, "stale"); !errors.Is(err, sandbox.ErrInvalidStateTransition) {
 			t.Fatalf(
 				"UpdateSandboxState(running, stopping) for a pending row error = %v, want ErrInvalidStateTransition",
 				err,
@@ -239,6 +373,12 @@ func specFor(image string) sandbox.SpecFile {
 	return sandbox.SpecFile{Image: &image}
 }
 
+// Fixed and rounded so a store that loses sub-second precision on the round
+// trip still compares equal.
+func TestExpiry() time.Time {
+	return time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+}
+
 func createSandbox(
 	t *testing.T,
 	ctx context.Context,
@@ -248,7 +388,7 @@ func createSandbox(
 ) *sandbox.Sandbox {
 	t.Helper()
 
-	sbx, err := st.CreateSandbox(ctx, key, spec)
+	sbx, err := st.CreateSandbox(ctx, key, spec, TestExpiry())
 	if err != nil {
 		t.Fatalf("CreateSandbox(%q) error = %v, want nil", key, err)
 	}
@@ -265,7 +405,7 @@ func transition(
 ) *sandbox.Sandbox {
 	t.Helper()
 
-	sbx, err := st.UpdateSandboxState(ctx, id, from, to)
+	sbx, err := st.UpdateSandboxState(ctx, id, from, to, "storetest transition")
 	if err != nil {
 		t.Fatalf("UpdateSandboxState(%q, %q, %q) error = %v, want nil", from, to, id, err)
 	}

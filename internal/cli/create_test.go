@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/sandbox"
@@ -11,7 +12,7 @@ import (
 
 func recordingCreate(got *sandbox.SpecFile) fakeAPI {
 	return fakeAPI{
-		CreateFn: func(_ context.Context, _ string, spec sandbox.SpecFile) (*sandbox.Sandbox, error) {
+		CreateFn: func(_ context.Context, _ string, spec sandbox.SpecFile, _ time.Duration) (*sandbox.Sandbox, error) {
 			*got = spec
 			return sandboxRecord(testID, "alpine:3.20", sandbox.Running), nil
 		},
@@ -50,8 +51,8 @@ func TestCreatePassesImageAndEnvironmentAndWritesATable(t *testing.T) {
 	}
 
 	want := "" +
-		"ID                                        STATE    IMAGE        CREATED AT\n" +
-		testID + "  running  alpine:3.20  2026-07-25T12:00:00Z\n"
+		"ID                                        STATE    IMAGE        CREATED AT            EXPIRES AT\n" +
+		testID + "  running  alpine:3.20  2026-07-25T12:00:00Z  2026-07-25T12:15:00Z\n"
 	if stdout != want {
 		t.Errorf("create output =\n%q\nwant\n%q", stdout, want)
 	}
@@ -86,6 +87,38 @@ func TestCreateLimitFlagsReachTheSpec(t *testing.T) {
 	}
 	if !gotSpec.AllowNetwork {
 		t.Error("AllowNetwork = false, want true when --allow-network is given")
+	}
+}
+
+// An omitted --ttl sends zero rather than a client-side default: the server
+// owns the default, so the two can never drift apart.
+func TestCreateSendsTheRequestedTTL(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want time.Duration
+	}{
+		{name: "explicit", args: []string{"--ttl", "30m"}, want: 30 * time.Minute},
+		{name: "omitted", want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sent time.Duration
+			api := fakeAPI{
+				CreateFn: func(_ context.Context, _ string, _ sandbox.SpecFile, ttl time.Duration) (*sandbox.Sandbox, error) {
+					sent = ttl
+					return sandboxRecord(testID, "alpine:3.20", sandbox.Running), nil
+				},
+			}
+
+			if _, _, err := execute(t, api, append([]string{"sandbox", "create"}, tt.args...)...); err != nil {
+				t.Fatalf("execute create error = %v, want nil", err)
+			}
+			if sent != tt.want {
+				t.Errorf("ttl sent = %v, want %v", sent, tt.want)
+			}
+		})
 	}
 }
 
@@ -172,7 +205,7 @@ func TestInvalidEnvironmentStopsBeforeCreate(t *testing.T) {
 func TestCreateSendsAFreshIdempotencyKey(t *testing.T) {
 	var keys []string
 	api := fakeAPI{
-		CreateFn: func(_ context.Context, key string, _ sandbox.SpecFile) (*sandbox.Sandbox, error) {
+		CreateFn: func(_ context.Context, key string, _ sandbox.SpecFile, _ time.Duration) (*sandbox.Sandbox, error) {
 			keys = append(keys, key)
 			return sandboxRecord(testID, "alpine:3.20", sandbox.Running), nil
 		},

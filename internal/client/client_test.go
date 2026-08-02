@@ -17,13 +17,14 @@ import (
 	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
 	"github.com/nickstrad/quickspin/internal/sandbox"
+	"github.com/nickstrad/quickspin/internal/store"
 	"github.com/nickstrad/quickspin/internal/store/sqlite"
 )
 
 // The tests here run against the real API over a real socket, because the thing
 // under test is the wire form: a client tested against a hand-written stub
 // would agree with itself about a shape the server never sends.
-func newTestClient(t *testing.T, rt runtime.Runtime) *client.Client {
+func newTestClient(t *testing.T, rt runtime.Runtime) (*client.Client, store.Store) {
 	t.Helper()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -41,36 +42,38 @@ func newTestClient(t *testing.T, rt runtime.Runtime) *client.Client {
 	server := httptest.NewServer(srv.Handler())
 	t.Cleanup(server.Close)
 
-	return client.New(server.URL, server.Client())
+	return client.New(server.URL, server.Client()), st
 }
 
-// runningSandbox creates one through the API, which is the only way to reach
-// the running state the file and exec routes gate on.
-func runningSandbox(t *testing.T, c *client.Client) string {
+// runningSandbox creates one through the API and then transitions it the way
+// the reconciler will: create only records intent, and the file and exec routes
+// gate on running.
+func runningSandbox(t *testing.T, c *client.Client, st store.Store) string {
 	t.Helper()
 
 	image := "alpine:3.20"
-	sbx, err := c.CreateSandbox(t.Context(), "key-1", sandbox.SpecFile{Image: &image})
+	sbx, err := c.CreateSandbox(t.Context(), "key-1", sandbox.SpecFile{Image: &image}, 0)
 	if err != nil {
 		t.Fatalf("CreateSandbox error = %v, want nil", err)
 	}
-	if sbx.State != sandbox.Running {
-		t.Fatalf("CreateSandbox state = %q, want %q", sbx.State, sandbox.Running)
+	if sbx.State != sandbox.Pending {
+		t.Fatalf("CreateSandbox state = %q, want %q", sbx.State, sandbox.Pending)
+	}
+
+	if _, err := st.UpdateSandboxState(t.Context(), sbx.SandboxID, sandbox.Pending, sandbox.Running, "test"); err != nil {
+		t.Fatalf("UpdateSandboxState(pending, running) error = %v, want nil", err)
 	}
 	return sbx.SandboxID
 }
 
+// No CreateFn: no route starts a container, so a server that tries panics here.
 func okRuntime() runtimetest.Fake {
-	return runtimetest.Fake{
-		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
-			return runtime.Info{}, nil
-		},
-	}
+	return runtimetest.Fake{}
 }
 
 func TestCreateAndListRoundTrip(t *testing.T) {
-	c := newTestClient(t, okRuntime())
-	id := runningSandbox(t, c)
+	c, st := newTestClient(t, okRuntime())
+	id := runningSandbox(t, c, st)
 
 	sbxs, err := c.ListSandboxes(t.Context())
 	if err != nil {
@@ -87,14 +90,14 @@ func TestCreateAndListRoundTrip(t *testing.T) {
 }
 
 func TestRepeatedIdempotencyKeyReturnsTheSameSandbox(t *testing.T) {
-	c := newTestClient(t, okRuntime())
+	c, _ := newTestClient(t, okRuntime())
 
 	image := "alpine:3.20"
-	first, err := c.CreateSandbox(t.Context(), "key-1", sandbox.SpecFile{Image: &image})
+	first, err := c.CreateSandbox(t.Context(), "key-1", sandbox.SpecFile{Image: &image}, 0)
 	if err != nil {
 		t.Fatalf("first CreateSandbox error = %v, want nil", err)
 	}
-	second, err := c.CreateSandbox(t.Context(), "key-1", sandbox.SpecFile{Image: &image})
+	second, err := c.CreateSandbox(t.Context(), "key-1", sandbox.SpecFile{Image: &image}, 0)
 	if err != nil {
 		t.Fatalf("second CreateSandbox error = %v, want nil", err)
 	}
@@ -120,8 +123,8 @@ func TestExecResultCrossesTheWireIntact(t *testing.T) {
 		return want, nil
 	}
 
-	c := newTestClient(t, rt)
-	got, err := c.Exec(t.Context(), runningSandbox(t, c), []string{"sh", "-c", "exit 137"}, runtime.ExecOpts{})
+	c, st := newTestClient(t, rt)
+	got, err := c.Exec(t.Context(), runningSandbox(t, c, st), []string{"sh", "-c", "exit 137"}, runtime.ExecOpts{})
 	if err != nil {
 		t.Fatalf("Exec error = %v, want nil", err)
 	}
@@ -156,8 +159,8 @@ func TestFileRoutesRoundTrip(t *testing.T) {
 		return nil
 	}
 
-	c := newTestClient(t, rt)
-	id := runningSandbox(t, c)
+	c, st := newTestClient(t, rt)
+	id := runningSandbox(t, c, st)
 	ctx := t.Context()
 
 	// Bytes that are not valid UTF-8, since base64 is what the envelope relies
@@ -199,8 +202,8 @@ func TestDestroyIsIdempotent(t *testing.T) {
 	rt := okRuntime()
 	rt.DestroyFn = func(context.Context, string) error { return nil }
 
-	c := newTestClient(t, rt)
-	id := runningSandbox(t, c)
+	c, st := newTestClient(t, rt)
+	id := runningSandbox(t, c, st)
 
 	if err := c.DestroySandbox(t.Context(), id); err != nil {
 		t.Fatalf("first DestroySandbox error = %v, want nil", err)
@@ -212,7 +215,7 @@ func TestDestroyIsIdempotent(t *testing.T) {
 }
 
 func TestErrorEnvelopeBecomesATypedError(t *testing.T) {
-	c := newTestClient(t, okRuntime())
+	c, _ := newTestClient(t, okRuntime())
 
 	_, err := c.InspectSandbox(t.Context(), "sbx_does-not-exist")
 	if !client.HasCode(err, api.CodeNotFound) {

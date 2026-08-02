@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/nickstrad/quickspin/internal/sandbox"
@@ -15,6 +16,7 @@ type createFlags struct {
 	memory       string
 	pidsLimit    int64
 	allowNetwork bool
+	ttl          time.Duration
 }
 
 func resolveCreateSpec(
@@ -113,9 +115,9 @@ EOF
 			if spec.Image != nil {
 				image = *spec.Image
 			}
-			app.logCommand(cmd, "image", image, "specFile", specPath)
+			app.logCommand(cmd, "image", image, "ttl", flags.ttl, "specFile", specPath)
 
-			sandbox, err := app.api.CreateSandbox(cmd.Context(), uuid.NewString(), spec)
+			sandbox, err := app.api.CreateSandbox(cmd.Context(), uuid.NewString(), spec, flags.ttl)
 			if err != nil {
 				return fmt.Errorf("create sandbox: %w", err)
 			}
@@ -155,6 +157,13 @@ EOF
 		"allow-network",
 		false,
 		"give the sandbox network access (default: no network)",
+	)
+	cmd.Flags().DurationVar(
+		&flags.ttl,
+		"ttl",
+		0,
+		fmt.Sprintf("how long the sandbox may live before it is reaped (default %s, max %s)",
+			sandbox.DefaultTTL, sandbox.MaxTTL),
 	)
 
 	return cmd

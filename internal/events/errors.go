@@ -1,4 +1,4 @@
-package store
+package events
 
 import (
 	"errors"
@@ -7,16 +7,14 @@ import (
 )
 
 // The public contract of this package: callers test these with errors.Is and
-// must never parse error strings or reach into StoreError's fields. A lookup
-// miss returns a bare sentinel; the database/sql boundary wraps with E. See
+// must never parse error strings or reach into EventError's fields. See
 // docs/reference/error-handling-and-logging.mdx.
 var (
-	ErrNotFound      = errors.New("sandbox not found")
-	ErrMissingExpiry = errors.New("sandbox expiry is missing")
+	ErrInvalidEvent = errors.New("invalid event")
 )
 
-type StoreError struct {
-	Op      string // "store.SqlliteStore.CreateSandbox" — package.Type.Method
+type EventError struct {
+	Op      string // "events.Event.Validate" — package.Type.Method
 	Message string
 	Err     error
 	Stack   string
@@ -24,8 +22,8 @@ type StoreError struct {
 
 // E builds an error at an origin and captures a stack. Wrap adds an operation
 // above an error that already carries one, so the stack is captured once.
-func E(op, message string, err error) *StoreError {
-	return &StoreError{
+func E(op, message string, err error) *EventError {
+	return &EventError{
 		Op:      op,
 		Message: message,
 		Err:     err,
@@ -33,11 +31,11 @@ func E(op, message string, err error) *StoreError {
 	}
 }
 
-func Wrap(op, message string, err error) *StoreError {
-	return &StoreError{Op: op, Message: message, Err: err}
+func Wrap(op, message string, err error) *EventError {
+	return &EventError{Op: op, Message: message, Err: err}
 }
 
-func (e *StoreError) Error() string {
+func (e *EventError) Error() string {
 	parts := make([]string, 0, 3)
 	if e.Op != "" {
 		parts = append(parts, e.Op)
@@ -51,4 +49,4 @@ func (e *StoreError) Error() string {
 	return strings.Join(parts, ": ")
 }
 
-func (e *StoreError) Unwrap() error { return e.Err }
+func (e *EventError) Unwrap() error { return e.Err }

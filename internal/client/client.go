@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/nickstrad/quickspin/internal/api"
 	"github.com/nickstrad/quickspin/internal/runtime"
@@ -68,12 +69,12 @@ func HasCode(err error, code string) bool {
 	return apiErr.Code == code
 }
 
-func (c *Client) CreateSandbox(ctx context.Context, idempotencyKey string, spec sandbox.SpecFile) (*sandbox.Sandbox, error) {
+func (c *Client) CreateSandbox(ctx context.Context, idempotencyKey string, spec sandbox.SpecFile, ttl time.Duration) (*sandbox.Sandbox, error) {
 	var resp api.SandboxResponse
 	err := c.do(ctx, request{
 		method:         http.MethodPost,
 		path:           "/v1/sandboxes",
-		body:           spec,
+		body:           api.NewCreateSandboxRequest(spec, ttl),
 		idempotencyKey: idempotencyKey,
 		out:            &resp,
 	})

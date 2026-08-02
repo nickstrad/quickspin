@@ -6,6 +6,7 @@ package sandbox
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"time"
 )
@@ -75,11 +76,31 @@ func (s *SpecFile) Validate() error {
 	return nil
 }
 
+// An omitted TTL means DefaultTTL, never "forever".
+const (
+	DefaultTTL = 15 * time.Minute
+	MaxTTL     = 24 * time.Hour
+)
+
+// ResolveTTL turns a requested lifetime into the one that will be enforced.
+func ResolveTTL(requested time.Duration) (time.Duration, error) {
+	const op = "sandbox.ResolveTTL"
+
+	if requested == 0 {
+		return DefaultTTL, nil
+	}
+	if requested < 0 || requested > MaxTTL {
+		return 0, E(op, fmt.Sprintf("ttl %s is outside (0, %s]", requested, MaxTTL), ErrInvalidSpec)
+	}
+	return requested, nil
+}
+
 type Sandbox struct {
 	ID        int       `json:"-" yaml:"-"`
 	SandboxID string    `json:"sandbox_id" yaml:"sandbox_id"`
 	State     TaskState `json:"state" yaml:"state"`
 	Spec      SpecFile  `json:"spec" yaml:"spec"`
+	ExpiresAt time.Time `json:"expires_at" yaml:"expires_at"`
 	CreatedAt time.Time `json:"created_at" yaml:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" yaml:"updated_at"`
 }

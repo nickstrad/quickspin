@@ -17,6 +17,23 @@ import (
 // https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Idempotency-Key
 const IdempotencyKeyHeader = "Idempotency-Key"
 
+// CreateSandboxRequest carries the lifetime alongside the spec. The lifetime is
+// a TTL rather than an absolute instant because the server's clock is the one
+// that decides when the sandbox dies; zero means the server default. Whole
+// seconds for the same reason ExecOptions uses them.
+type CreateSandboxRequest struct {
+	Spec       sandbox.SpecFile `json:"spec"`
+	TTLSeconds int64            `json:"ttl_seconds,omitempty"`
+}
+
+func NewCreateSandboxRequest(spec sandbox.SpecFile, ttl time.Duration) CreateSandboxRequest {
+	return CreateSandboxRequest{Spec: spec, TTLSeconds: ceilSeconds(ttl)}
+}
+
+func (r CreateSandboxRequest) TTL() time.Duration {
+	return time.Duration(r.TTLSeconds) * time.Second
+}
+
 // SandboxResponse is the wire form of sandbox.Sandbox. Spec stays sandbox.SpecFile
 // unconverted: the spec document is already the deliberate user-facing format
 // that CreateSandbox accepts. The store's integer row id never travels.
@@ -24,6 +41,7 @@ type SandboxResponse struct {
 	SandboxID string           `json:"sandbox_id"`
 	State     string           `json:"state"`
 	Spec      sandbox.SpecFile `json:"spec"`
+	ExpiresAt time.Time        `json:"expires_at"`
 	CreatedAt time.Time        `json:"created_at"`
 	UpdatedAt time.Time        `json:"updated_at"`
 }
@@ -33,6 +51,7 @@ func NewSandboxResponse(sbx *sandbox.Sandbox) SandboxResponse {
 		SandboxID: sbx.SandboxID,
 		State:     string(sbx.State),
 		Spec:      sbx.Spec,
+		ExpiresAt: sbx.ExpiresAt,
 		CreatedAt: sbx.CreatedAt,
 		UpdatedAt: sbx.UpdatedAt,
 	}
@@ -43,6 +62,7 @@ func (s SandboxResponse) Sandbox() *sandbox.Sandbox {
 		SandboxID: s.SandboxID,
 		State:     sandbox.TaskState(s.State),
 		Spec:      s.Spec,
+		ExpiresAt: s.ExpiresAt,
 		CreatedAt: s.CreatedAt,
 		UpdatedAt: s.UpdatedAt,
 	}
@@ -86,17 +106,20 @@ type ExecOptions struct {
 }
 
 func NewExecOptions(opts runtime.ExecOpts) ExecOptions {
-	var secs int64
-	if opts.Timeout > 0 {
-		// Rounded up so a sub-second timeout does not become zero, which would
-		// silently mean "use the default" on the server.
-		secs = int64((opts.Timeout + time.Second - 1) / time.Second)
-	}
 	return ExecOptions{
 		Env:            opts.Env,
 		WorkDir:        opts.WorkDir,
-		TimeoutSeconds: secs,
+		TimeoutSeconds: ceilSeconds(opts.Timeout),
 	}
+}
+
+// Rounded up so a sub-second duration does not become zero, which would
+// silently mean "use the default" on the server.
+func ceilSeconds(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	return int64((d + time.Second - 1) / time.Second)
 }
 
 func (o ExecOptions) ExecOpts() runtime.ExecOpts {

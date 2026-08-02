@@ -89,13 +89,18 @@ func liveImage() string {
 }
 
 func TestLiveSandboxLifecycle(t *testing.T) {
+	// Create now only records intent, so nothing in the shipped composition
+	// starts a container until the reconciler (roadmap 06) exists. Everything
+	// below the create still describes the lifecycle this suite must prove.
+	t.Skip("blocked until the reconciler drives pending sandboxes to running")
+
 	c := newLiveClient(t)
 
 	ctx, cancel := context.WithTimeout(t.Context(), liveTimeout)
 	defer cancel()
 
 	image := liveImage()
-	created, err := c.CreateSandbox(ctx, "live-lifecycle", sandbox.SpecFile{Image: &image})
+	created, err := c.CreateSandbox(ctx, "live-lifecycle", sandbox.SpecFile{Image: &image}, 0)
 	if err != nil {
 		t.Fatalf("CreateSandbox(%s) error = %v, want nil", image, err)
 	}

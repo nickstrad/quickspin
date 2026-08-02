@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/nickstrad/quickspin/internal/client"
 	"github.com/nickstrad/quickspin/internal/runtime"
@@ -15,7 +16,7 @@ import (
 )
 
 type sandboxAPI interface {
-	CreateSandbox(ctx context.Context, idempotencyKey string, spec sandbox.SpecFile) (*sandbox.Sandbox, error)
+	CreateSandbox(ctx context.Context, idempotencyKey string, spec sandbox.SpecFile, ttl time.Duration) (*sandbox.Sandbox, error)
 	ListSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error)
 	InspectSandbox(ctx context.Context, sandboxID string) (runtime.Info, error)
 	DestroySandbox(ctx context.Context, sandboxID string) error

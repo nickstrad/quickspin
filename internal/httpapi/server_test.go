@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nickstrad/quickspin/internal/api"
 	"github.com/nickstrad/quickspin/internal/runtime"
@@ -45,13 +47,10 @@ func newTestStore(t *testing.T) *sqlite.Store {
 func newTestAPIWithStore(t *testing.T, st store.Store) *API {
 	t.Helper()
 
-	// A create that succeeds, so a case not about the runtime still reaches the
-	// pending-to-running transition. Inspect and Destroy are scripted too so
-	// lifecycle tests can walk create → inspect → delete without a daemon.
+	// Inspect and Destroy are scripted so lifecycle tests can walk create →
+	// inspect → delete without a daemon. Create is not: no route starts a
+	// container, so an unset CreateFn panics a handler that tries.
 	return newTestAPIWithRuntime(t, st, runtimetest.Fake{
-		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
-			return runtime.Info{}, nil
-		},
 		InspectFn: func(_ context.Context, sandboxID string) (runtime.Info, error) {
 			return runtime.Info{ID: sandboxID, State: runtime.StateRunning}, nil
 		},
@@ -74,14 +73,14 @@ func newTestAPIWithRuntime(t *testing.T, st store.Store, rt runtime.Runtime) *AP
 // the case did not intend.
 type fakeStore struct {
 	store.Store
-	createSandbox      func(ctx context.Context, key string, spec sandbox.SpecFile) (*sandbox.Sandbox, error)
+	createSandbox      func(ctx context.Context, key string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error)
 	getSandbox         func(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error)
 	getSandboxes       func(ctx context.Context) ([]*sandbox.Sandbox, error)
-	updateSandboxState func(ctx context.Context, sandboxID string, from, to sandbox.TaskState) (*sandbox.Sandbox, error)
+	updateSandboxState func(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error)
 }
 
-func (f *fakeStore) CreateSandbox(ctx context.Context, key string, spec sandbox.SpecFile) (*sandbox.Sandbox, error) {
-	return f.createSandbox(ctx, key, spec)
+func (f *fakeStore) CreateSandbox(ctx context.Context, key string, spec sandbox.SpecFile, expiresAt time.Time) (*sandbox.Sandbox, error) {
+	return f.createSandbox(ctx, key, spec, expiresAt)
 }
 
 func (f *fakeStore) GetSandbox(ctx context.Context, sandboxID string) (*sandbox.Sandbox, error) {
@@ -92,8 +91,8 @@ func (f *fakeStore) GetSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error
 	return f.getSandboxes(ctx)
 }
 
-func (f *fakeStore) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState) (*sandbox.Sandbox, error) {
-	return f.updateSandboxState(ctx, sandboxID, from, to)
+func (f *fakeStore) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error) {
+	return f.updateSandboxState(ctx, sandboxID, from, to, reason)
 }
 
 func do(t *testing.T, srv *API, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -123,10 +122,20 @@ func mustCreate(t *testing.T, srv *API, key, body string) map[string]any {
 	t.Helper()
 
 	rec := do(t, srv, http.MethodPost, "/v1/sandboxes", body, withKey(key))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("POST /v1/sandboxes = %d, want %d (body %s)", rec.Code, http.StatusCreated, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("POST /v1/sandboxes = %d, want %d (body %s)", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 	return decodeObject(t, rec)
+}
+
+// markRunning stands in for the reconciler, which is the only thing that starts
+// a container and moves the row out of pending.
+func markRunning(t *testing.T, srv *API, id string) {
+	t.Helper()
+
+	if _, err := srv.store.UpdateSandboxState(context.Background(), id, sandbox.Pending, sandbox.Running, "test"); err != nil {
+		t.Fatalf("UpdateSandboxState(%s, pending, running) error = %v, want nil", id, err)
+	}
 }
 
 func decodeObject(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
@@ -165,7 +174,7 @@ func sandboxID(t *testing.T, record map[string]any) string {
 	return id
 }
 
-const alpineSpec = `{"image":"alpine:3.20"}`
+const alpineSpec = `{"spec":{"image":"alpine:3.20"}}`
 
 // A bind failure used to be discarded inside a goroutine: the process logged
 // that it was listening and then blocked forever on a port it never held.
@@ -195,13 +204,16 @@ func TestStopBeforeStartIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxReturnsCreatedRecord(t *testing.T) {
-	srv := newTestAPI(t)
+// The request records intent and returns; the container is the reconciler's
+// job. The Fake panics on an unset CreateFn, so a handler that still starts a
+// runtime fails here.
+func TestCreateSandboxAcceptsAndReturnsAPendingRecord(t *testing.T) {
+	srv := newTestAPIWithRuntime(t, newTestStore(t), runtimetest.Fake{})
 
 	rec := do(t, srv, http.MethodPost, "/v1/sandboxes", alpineSpec, withKey("k1"))
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusCreated, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", ct)
@@ -211,10 +223,8 @@ func TestCreateSandboxReturnsCreatedRecord(t *testing.T) {
 	if id := sandboxID(t, got); !strings.HasPrefix(id, "sbx_") {
 		t.Errorf("sandbox_id = %q, want an sbx_-prefixed id", id)
 	}
-	// Pending is the row's initial state, not what the caller sees: the response
-	// is written after the runtime create succeeds and the row transitions.
-	if got["state"] != string(sandbox.Running) {
-		t.Errorf("state = %v, want %q", got["state"], sandbox.Running)
+	if got["state"] != string(sandbox.Pending) {
+		t.Errorf("state = %v, want %q", got["state"], sandbox.Pending)
 	}
 	spec, ok := got["spec"].(map[string]any)
 	if !ok || spec["image"] != "alpine:3.20" {
@@ -222,26 +232,58 @@ func TestCreateSandboxReturnsCreatedRecord(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxWithNoFieldsUsesTheDefaultImage(t *testing.T) {
-	st := newTestStore(t)
+// Stored specs remain unresolved so defaults can change independently — the
+// reconciler resolves them when it builds the container.
+func TestCreateSandboxStoresTheSpecUnresolved(t *testing.T) {
+	srv := newTestAPIWithRuntime(t, newTestStore(t), runtimetest.Fake{})
 
-	var gotSpec runtime.Spec
-	srv := newTestAPIWithRuntime(t, st, runtimetest.Fake{
-		CreateFn: func(_ context.Context, _ string, spec runtime.Spec) (runtime.Info, error) {
-			gotSpec = spec
-			return runtime.Info{}, nil
-		},
-	})
+	record := mustCreate(t, srv, "k1", `{"spec":{}}`)
 
-	record := mustCreate(t, srv, "k1", `{}`)
-	if gotSpec.Image != sandbox.DefaultImage {
-		t.Errorf("runtime image = %q, want %q", gotSpec.Image, sandbox.DefaultImage)
-	}
-
-	// Stored specs remain unresolved so defaults can change independently.
 	spec, ok := record["spec"].(map[string]any)
 	if !ok || spec["image"] != nil {
 		t.Errorf("echoed spec = %#v, want a null image", spec)
+	}
+}
+
+func TestCreateSandboxAppliesTheRequestedTTL(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want time.Duration
+	}{
+		{name: "explicit", body: `{"spec":{"image":"alpine:3.20"},"ttl_seconds":60}`, want: time.Minute},
+		{name: "omitted", body: alpineSpec, want: sandbox.DefaultTTL},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestAPI(t)
+
+			before := time.Now()
+			record := mustCreate(t, srv, "k1", tt.body)
+			expiresAt, err := time.Parse(time.RFC3339Nano, record["expires_at"].(string))
+			if err != nil {
+				t.Fatalf("parsing expires_at %v error = %v, want nil", record["expires_at"], err)
+			}
+
+			if expiresAt.Before(before.Add(tt.want)) || expiresAt.After(time.Now().Add(tt.want)) {
+				t.Errorf("expires_at = %v, want roughly %v after the request", expiresAt, tt.want)
+			}
+		})
+	}
+}
+
+func TestCreateSandboxRejectsAnOverCapTTL(t *testing.T) {
+	srv := newTestAPI(t)
+
+	body := fmt.Sprintf(`{"spec":{},"ttl_seconds":%d}`, int64(sandbox.MaxTTL/time.Second)+1)
+	rec := do(t, srv, http.MethodPost, "/v1/sandboxes", body, withKey("k1"))
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	if got := decodeError(t, rec); got.Error.Code != api.CodeUnprocessable {
+		t.Errorf("error code = %q, want %q", got.Error.Code, api.CodeUnprocessable)
 	}
 }
 
@@ -289,7 +331,7 @@ func TestCreateSandboxRejectsBadRequests(t *testing.T) {
 		{
 			name:   "unknown field",
 			key:    "k1",
-			body:   `{"image":"alpine:3.20","gpus":4}`,
+			body:   `{"spec":{"image":"alpine:3.20"},"gpus":4}`,
 			status: http.StatusBadRequest,
 			code:   api.CodeInvalidRequest,
 		},
@@ -326,7 +368,7 @@ func TestCreateSandboxIsIdempotentAcrossRequests(t *testing.T) {
 	srv := newTestAPI(t)
 
 	first := mustCreate(t, srv, "same-operation", alpineSpec)
-	second := mustCreate(t, srv, "same-operation", `{"image":"debian:12"}`)
+	second := mustCreate(t, srv, "same-operation", `{"spec":{"image":"debian:12"}}`)
 
 	if sandboxID(t, second) != sandboxID(t, first) {
 		t.Errorf("retry sandbox_id = %q, want the original %q", sandboxID(t, second), sandboxID(t, first))
@@ -349,39 +391,10 @@ func TestCreateSandboxIsIdempotentAcrossRequests(t *testing.T) {
 	}
 }
 
-// The row is committed before the runtime is asked for anything, so a create
-// that fails has to be recorded on it. A sandbox left in pending is
-// indistinguishable from one still starting.
-func TestCreateSandboxMarksTheSandboxFailedWhenTheRuntimeFails(t *testing.T) {
-	st := newTestStore(t)
-
-	srv := newTestAPIWithRuntime(t, st, runtimetest.Fake{
-		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
-			return runtime.Info{}, errors.New("no such image")
-		},
-	})
-
-	rec := do(t, srv, http.MethodPost, "/v1/sandboxes", alpineSpec, withKey("k1"))
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusInternalServerError, rec.Body.String())
-	}
-
-	sandboxes, err := st.GetSandboxes(context.Background())
-	if err != nil {
-		t.Fatalf("GetSandboxes() error = %v, want nil", err)
-	}
-	if len(sandboxes) != 1 {
-		t.Fatalf("GetSandboxes() returned %d sandboxes, want 1", len(sandboxes))
-	}
-	if sandboxes[0].State != sandbox.Failed {
-		t.Errorf("State = %q, want %q", sandboxes[0].State, sandbox.Failed)
-	}
-}
-
 func TestCreateSandboxMapsStoreFailureTo500(t *testing.T) {
 	boom := errors.New("database is on fire")
 	srv := newTestAPIWithStore(t, &fakeStore{
-		createSandbox: func(context.Context, string, sandbox.SpecFile) (*sandbox.Sandbox, error) {
+		createSandbox: func(context.Context, string, sandbox.SpecFile, time.Time) (*sandbox.Sandbox, error) {
 			return nil, boom
 		},
 	})
@@ -420,7 +433,7 @@ func TestListSandboxesReturnsEveryRecord(t *testing.T) {
 	srv := newTestAPI(t)
 
 	first := mustCreate(t, srv, "k1", alpineSpec)
-	second := mustCreate(t, srv, "k2", `{"image":"debian:12"}`)
+	second := mustCreate(t, srv, "k2", `{"spec":{"image":"debian:12"}}`)
 
 	rec := do(t, srv, http.MethodGet, "/v1/sandboxes", "", nil)
 	if rec.Code != http.StatusOK {
@@ -470,8 +483,8 @@ func TestListSandboxesMapsStoreFailureTo500(t *testing.T) {
 // container info, not the store row.
 func TestInspectSandboxReturnsRuntimeInfo(t *testing.T) {
 	srv := newTestAPI(t)
-	created := mustCreate(t, srv, "k1", alpineSpec)
-	id := sandboxID(t, created)
+	id := sandboxID(t, mustCreate(t, srv, "k1", alpineSpec))
+	markRunning(t, srv, id)
 
 	rec := do(t, srv, http.MethodGet, "/v1/sandboxes/"+id, "", nil)
 
@@ -553,16 +566,13 @@ func TestInspectSandboxMapsStoreFailureTo500(t *testing.T) {
 // reconciler exists. Exec already answered 404 for it; Inspect used to answer
 // 500 for the same condition.
 func TestInspectSandboxMapsAMissingContainerTo404(t *testing.T) {
-	st := newTestStore(t)
-	srv := newTestAPIWithRuntime(t, st, runtimetest.Fake{
-		CreateFn: func(context.Context, string, runtime.Spec) (runtime.Info, error) {
-			return runtime.Info{}, nil
-		},
+	srv := newTestAPIWithRuntime(t, newTestStore(t), runtimetest.Fake{
 		InspectFn: func(context.Context, string) (runtime.Info, error) {
 			return runtime.Info{}, runtime.E("runtime.Fake.Inspect", "no such container", runtime.ErrNotFound)
 		},
 	})
 	id := sandboxID(t, mustCreate(t, srv, "k1", alpineSpec))
+	markRunning(t, srv, id)
 
 	rec := do(t, srv, http.MethodGet, "/v1/sandboxes/"+id, "", nil)
 
@@ -618,6 +628,7 @@ func TestDestroyUnknownSandboxReturns204(t *testing.T) {
 func TestDestroyedSandboxRemainsListed(t *testing.T) {
 	srv := newTestAPI(t)
 	id := sandboxID(t, mustCreate(t, srv, "k1", alpineSpec))
+	markRunning(t, srv, id)
 
 	if rec := do(t, srv, http.MethodDelete, "/v1/sandboxes/"+id, "", nil); rec.Code != http.StatusNoContent {
 		t.Fatalf("DELETE status = %d, want %d", rec.Code, http.StatusNoContent)

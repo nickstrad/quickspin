@@ -13,21 +13,25 @@ import (
 	"github.com/nickstrad/quickspin/internal/store/storetest"
 )
 
+func newTestStore(t *testing.T, path string) *sqlite.Store {
+	t.Helper()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	st, err := sqlite.New(context.Background(), path, "", logger)
+	if err != nil {
+		t.Fatalf("New(%s) error = %v, want nil", path, err)
+	}
+	t.Cleanup(func() {
+		if err := st.Cleanup(); err != nil {
+			t.Errorf("Cleanup() error = %v, want nil", err)
+		}
+	})
+	return st
+}
+
 func TestSqliteStore(t *testing.T) {
 	storetest.Run(t, func(t *testing.T) store.Store {
-		t.Helper()
-
-		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-		st, err := sqlite.New(context.Background(), ":memory:", "", logger)
-		if err != nil {
-			t.Fatalf("New(:memory:) error = %v, want nil", err)
-		}
-		t.Cleanup(func() {
-			if err := st.Cleanup(); err != nil {
-				t.Errorf("Cleanup() error = %v, want nil", err)
-			}
-		})
-		return st
+		return newTestStore(t, ":memory:")
 	})
 }
 
@@ -42,19 +46,10 @@ func TestNewHonorsCanceledContext(t *testing.T) {
 }
 
 func TestSqliteStoreOperationsHonorCanceledContext(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := sqlite.New(context.Background(), ":memory:", "", logger)
-	if err != nil {
-		t.Fatalf("New(:memory:) error = %v, want nil", err)
-	}
-	t.Cleanup(func() {
-		if err := st.Cleanup(); err != nil {
-			t.Errorf("Cleanup() error = %v, want nil", err)
-		}
-	})
+	st := newTestStore(t, ":memory:")
 
 	seedImage := "alpine:3.20"
-	sbx, err := st.CreateSandbox(context.Background(), "seed", sandbox.SpecFile{Image: &seedImage})
+	sbx, err := st.CreateSandbox(context.Background(), "seed", sandbox.SpecFile{Image: &seedImage}, storetest.TestExpiry())
 	if err != nil {
 		t.Fatalf("CreateSandbox(seed) error = %v, want nil", err)
 	}
@@ -99,14 +94,14 @@ func TestSqliteStoreOperationsHonorCanceledContext(t *testing.T) {
 		{
 			name: "update sandbox state",
 			call: func() error {
-				_, err := st.UpdateSandboxState(ctx, sandboxID, sandbox.Pending, sandbox.Running)
+				_, err := st.UpdateSandboxState(ctx, sandboxID, sandbox.Pending, sandbox.Running, "canceled transition")
 				return err
 			},
 		},
 		{
 			name: "create sandbox",
 			call: func() error {
-				_, err := st.CreateSandbox(ctx, "canceled-create", sandbox.SpecFile{Image: &canceledImage})
+				_, err := st.CreateSandbox(ctx, "canceled-create", sandbox.SpecFile{Image: &canceledImage}, storetest.TestExpiry())
 				return err
 			},
 		},

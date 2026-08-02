@@ -203,18 +203,20 @@ func (a *API) CreateSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spec, ok := decodeBody[sandbox.SpecFile](a, w, r, op, "sandbox spec")
+	req, ok := decodeBody[api.CreateSandboxRequest](a, w, r, op, "sandbox create request")
 	if !ok {
 		return
 	}
 
-	sbx, err := a.control.CreateSandbox(ctx, idempotencyKey, spec)
+	sbx, err := a.control.CreateSandbox(ctx, idempotencyKey, req.Spec, req.TTL())
 	if err != nil {
 		a.failWith(w, r, Wrap(op, "creating the sandbox", err))
 		return
 	}
 
-	a.respond(w, r, http.StatusCreated, api.NewSandboxResponse(sbx))
+	// 202, not 201: the row exists but the sandbox does not yet run, and the
+	// reconciler is what closes that gap.
+	a.respond(w, r, http.StatusAccepted, api.NewSandboxResponse(sbx))
 }
 
 func (a *API) respond(w http.ResponseWriter, r *http.Request, status int, v any) {

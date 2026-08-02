@@ -66,7 +66,7 @@ func infoTableRows(infos []runtime.Info) [][]string {
 
 func sandboxTableRows(sandboxes []*sandbox.Sandbox) [][]string {
 	rows := make([][]string, 1, len(sandboxes)+1)
-	rows[0] = []string{"ID", "STATE", "IMAGE", "CREATED AT"}
+	rows[0] = []string{"ID", "STATE", "IMAGE", "CREATED AT", "EXPIRES AT"}
 	for _, sbx := range sandboxes {
 		image := ""
 		if sbx.Spec.Image != nil {
@@ -77,6 +77,7 @@ func sandboxTableRows(sandboxes []*sandbox.Sandbox) [][]string {
 			string(sbx.State),
 			image,
 			sbx.CreatedAt.Format(time.RFC3339),
+			sbx.ExpiresAt.Format(time.RFC3339),
 		})
 	}
 	return rows

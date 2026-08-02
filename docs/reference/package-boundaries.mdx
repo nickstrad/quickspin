@@ -23,7 +23,8 @@ The intended import graph, from sink to surface (arrows = imports):
 ```
 runtime                          the leaf: sandbox execution contract + its types
 sandbox        ──► runtime       domain: records, state machine, spec resolution
-store          ──► sandbox       persistence contract
+events         ──► sandbox       domain: the append-only transition log
+store          ──► sandbox, events   persistence contract
 store/sqlite   ──► store         a store implementation
 runtime/docker ──► runtime       a runtime implementation
 api            ──► sandbox, runtime      wire DTOs + converters
@@ -33,6 +34,14 @@ client         ──► api, sandbox, runtime     HTTP client
 cli            ──► client        cobra surface (+ control, for serve wiring)
 cmd/*          ──► cli           thin mains
 ```
+
+`events` sits beside `sandbox` rather than inside it: an event is a record of what
+happened, not a rule about what a sandbox is, and the state machine must not grow a
+dependency on its own audit trail. It is a leaf like `sandbox` — no logging, no SQL, no
+wire tags beyond the ones the domain records already carry. The event log is part of the
+store contract rather than one implementation's extra, because a transition and its
+event have to commit together: `UpdateSandboxState` takes the reason and appends the row,
+so no store can offer transitions without history.
 
 Stated as rules rather than a snapshot:
 
@@ -81,6 +90,7 @@ receives each kind:
 | You are writing… | It goes in… | Signal you picked wrong |
 | --- | --- | --- |
 | A rule about what a sandbox *is* — a legal state transition, a spec default, a validation | `sandbox` | The function needs an HTTP status, a SQL row, or a Docker type to compile. |
+| A fact about something that already happened — a lifecycle transition, its reason | `events` | The function recomputes the record from current state instead of reading what was appended. |
 | A multi-step operation with failure handling — create-with-compensation, destroy's transition dance | `control` | It is a one-line pass-through to the store; leave those in the handler. |
 | A request/response shape or its converter | `api` | Only the server or only the client can use it. Wire shapes are shared or they are not wire shapes. |
 | Talk to Docker, SQL, tar, or the moby SDK | The implementation subpackage | The contract package needs a new import to accommodate it. |
