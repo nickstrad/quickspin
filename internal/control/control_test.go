@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nickstrad/quickspin/internal/runtime/runtimetest"
 	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/nickstrad/quickspin/internal/store"
 	"github.com/nickstrad/quickspin/internal/store/sqlite"
@@ -42,7 +41,7 @@ func ptr[T any](v T) *T { return &v }
 // fails here.
 func TestCreateSandboxRecordsAPendingSandboxAndStartsNoRuntime(t *testing.T) {
 	st := newTestStore(t)
-	c := New(discardLogger(), st, runtimetest.Fake{})
+	c := New(discardLogger(), st)
 
 	sbx, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, 0)
 	if err != nil {
@@ -64,7 +63,7 @@ func TestCreateSandboxRecordsAPendingSandboxAndStartsNoRuntime(t *testing.T) {
 // A repeated key returns the original record rather than writing a second one.
 func TestCreateSandboxReplaysTheOriginalRecord(t *testing.T) {
 	st := newTestStore(t)
-	c := New(discardLogger(), st, runtimetest.Fake{})
+	c := New(discardLogger(), st)
 
 	first, err := c.CreateSandbox(context.Background(), "same-operation", sandbox.SpecFile{}, 0)
 	if err != nil {
@@ -110,7 +109,7 @@ func TestCreateSandboxTurnsTheTTLIntoAnAbsoluteExpiry(t *testing.T) {
 					got = expiresAt
 					return &sandbox.Sandbox{SandboxID: "sbx_1", State: sandbox.Pending, ExpiresAt: expiresAt}, nil
 				},
-			}, runtimetest.Fake{})
+			})
 			c.now = func() time.Time { return now }
 
 			if _, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, tt.ttl); err != nil {
@@ -125,7 +124,7 @@ func TestCreateSandboxTurnsTheTTLIntoAnAbsoluteExpiry(t *testing.T) {
 
 // The fake store panics on any call, so reaching the write fails the test.
 func TestCreateSandboxRejectsAnOverCapTTLBeforeTheStoreWrite(t *testing.T) {
-	c := New(discardLogger(), storetest.Fake{}, runtimetest.Fake{})
+	c := New(discardLogger(), storetest.Fake{})
 
 	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, sandbox.MaxTTL+time.Second)
 	if !errors.Is(err, sandbox.ErrInvalidSpec) {
@@ -139,7 +138,7 @@ func TestCreateSandboxRejectsAnOverCapTTLBeforeTheStoreWrite(t *testing.T) {
 // A spec that cannot be resolved must not leave a row behind: the fake store
 // panics on any call, so reaching the write fails the test.
 func TestCreateSandboxRejectsAnUnresolvableSpecBeforeTheStoreWrite(t *testing.T) {
-	c := New(discardLogger(), storetest.Fake{}, runtimetest.Fake{})
+	c := New(discardLogger(), storetest.Fake{})
 
 	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{Memory: ptr("12x")}, 0)
 	if !errors.Is(err, sandbox.ErrInvalidSpec) {
@@ -157,7 +156,7 @@ func TestCreateSandboxMarksAStoreFailureInternal(t *testing.T) {
 		CreateSandboxFn: func(context.Context, string, sandbox.SpecFile, time.Time) (*sandbox.Sandbox, error) {
 			return nil, store.ErrNotFound
 		},
-	}, runtimetest.Fake{})
+	})
 
 	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, 0)
 	if !errors.Is(err, ErrInternal) {
@@ -174,7 +173,7 @@ func TestCreateSandboxLeavesAnInvalidSpecFromTheStoreAsTheCallersFault(t *testin
 		CreateSandboxFn: func(context.Context, string, sandbox.SpecFile, time.Time) (*sandbox.Sandbox, error) {
 			return nil, sandbox.ErrInvalidSpec
 		},
-	}, runtimetest.Fake{})
+	})
 
 	_, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, 0)
 	if errors.Is(err, ErrInternal) {
@@ -202,7 +201,7 @@ func TestKeepaliveExtendsTTLUpToCap(t *testing.T) {
 					storedExpiry = expiresAt
 					return &sandbox.Sandbox{SandboxID: sandboxID, State: sandbox.Running, ExpiresAt: expiresAt}, nil
 				},
-			}, runtimetest.Fake{})
+			})
 			c.now = func() time.Time { return now }
 
 			sbx, err := c.KeepaliveSandbox(context.Background(), "sbx_1", tt.ttl)
@@ -223,7 +222,7 @@ func TestKeepaliveExtendsTTLUpToCap(t *testing.T) {
 
 // The fake store panics on any call, so reaching the write fails the test.
 func TestKeepaliveRejectsANegativeTTLBeforeTheStoreWrite(t *testing.T) {
-	c := New(discardLogger(), storetest.Fake{}, runtimetest.Fake{})
+	c := New(discardLogger(), storetest.Fake{})
 
 	_, err := c.KeepaliveSandbox(context.Background(), "sbx_1", -time.Second)
 	if !errors.Is(err, sandbox.ErrInvalidSpec) {
@@ -250,7 +249,7 @@ func TestKeepalivePreservesStoreErrors(t *testing.T) {
 				UpdateSandboxExpiryFn: func(context.Context, string, time.Time) (*sandbox.Sandbox, error) {
 					return nil, tt.want
 				},
-			}, runtimetest.Fake{})
+			})
 
 			_, err := c.KeepaliveSandbox(context.Background(), "sbx_1", time.Minute)
 			if !errors.Is(err, tt.want) {
@@ -266,7 +265,7 @@ func TestKeepalivePreservesStoreErrors(t *testing.T) {
 // destroy that reaches the runtime fails here.
 func TestDestroySandboxMarksStoppingAndStartsNoRuntime(t *testing.T) {
 	st := newTestStore(t)
-	c := New(discardLogger(), st, runtimetest.Fake{})
+	c := New(discardLogger(), st)
 
 	sbx, err := c.CreateSandbox(context.Background(), "k1", sandbox.SpecFile{}, 0)
 	if err != nil {
@@ -304,7 +303,7 @@ func TestDestroySandboxWritesOnlyTheStoppingTransition(t *testing.T) {
 			writes = append(writes, write{from: from, to: to, reason: reason})
 			return &sandbox.Sandbox{SandboxID: sandboxID, State: to}, nil
 		},
-	}, runtimetest.Fake{})
+	})
 
 	if err := c.DestroySandbox(context.Background(), "sbx_1"); err != nil {
 		t.Fatalf("DestroySandbox() error = %v, want nil", err)
@@ -335,7 +334,7 @@ func TestDestroySandboxIsASuccessWhenNothingIsRunning(t *testing.T) {
 				UpdateSandboxStateFn: func(context.Context, string, sandbox.TaskState, sandbox.TaskState, string) (*sandbox.Sandbox, error) {
 					return nil, tt.storeErr
 				},
-			}, runtimetest.Fake{})
+			})
 
 			err := c.DestroySandbox(context.Background(), "sbx_1")
 			if tt.wantError && !errors.Is(err, tt.storeErr) {
@@ -367,7 +366,7 @@ func TestRequireRunning(t *testing.T) {
 				GetSandboxFn: func(context.Context, string) (*sandbox.Sandbox, error) {
 					return tt.sbx, tt.storeErr
 				},
-			}, runtimetest.Fake{})
+			})
 
 			err := c.RequireRunning(context.Background(), "sbx_1")
 			if tt.want == nil {

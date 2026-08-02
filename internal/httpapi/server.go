@@ -54,7 +54,7 @@ func NewAPI(host string, port int, logger *slog.Logger, store store.Store, runti
 		logger:  logger.With("subcomponent", "api"),
 		store:   store,
 		runtime: runtime,
-		control: control.New(logger, store, runtime),
+		control: control.New(logger, store),
 	}
 }
 

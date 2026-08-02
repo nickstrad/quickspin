@@ -10,25 +10,22 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/nickstrad/quickspin/internal/runtime"
 	"github.com/nickstrad/quickspin/internal/sandbox"
 	"github.com/nickstrad/quickspin/internal/store"
 )
 
 type Control struct {
-	logger  *slog.Logger
-	store   store.Store
-	runtime runtime.Runtime
+	logger *slog.Logger
+	store  store.Store
 	// Injected so TTL tests need not sleep.
 	now func() time.Time
 }
 
-func New(logger *slog.Logger, store store.Store, runtime runtime.Runtime) *Control {
+func New(logger *slog.Logger, store store.Store) *Control {
 	return &Control{
-		logger:  logger.With("subcomponent", "control"),
-		store:   store,
-		runtime: runtime,
-		now:     time.Now,
+		logger: logger.With("subcomponent", "control"),
+		store:  store,
+		now:    time.Now,
 	}
 }
 

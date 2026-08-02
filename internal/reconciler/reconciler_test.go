@@ -763,7 +763,7 @@ func TestReconcilerDoesNotResurrectDestroyedSandbox(t *testing.T) {
 			var logs bytes.Buffer
 			r := NewReconciler(slog.New(slog.NewTextHandler(&logs, nil)), st, rt)
 			r.now = func() time.Time { return storetest.TestExpiry().Add(-time.Hour) }
-			c := control.New(slog.New(slog.DiscardHandler), st, rt)
+			c := control.New(slog.New(slog.DiscardHandler), st)
 
 			type pass struct {
 				actions []ReconcileAction
@@ -842,7 +842,7 @@ func TestEveryTransitionEmitsEvent(t *testing.T) {
 			return nil
 		},
 	}
-	c := control.New(logger, st, rt)
+	c := control.New(logger, st)
 	r := NewReconciler(logger, st, rt)
 
 	image := "alpine:3.20"

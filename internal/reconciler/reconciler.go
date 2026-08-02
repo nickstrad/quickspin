@@ -103,7 +103,6 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) ([]ReconcileAction, erro
 type reconcileItem struct {
 	desired  *sandbox.Sandbox
 	observed *runtime.Info
-	action   ReconcileAction
 }
 
 func (it reconcileItem) id() string {
