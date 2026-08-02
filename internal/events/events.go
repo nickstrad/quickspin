@@ -1,7 +1,7 @@
 // Package events is the append-only history of what happened to a sandbox: one
 // immutable row per lifecycle transition. It is a record of facts, never
 // derived state, so nothing here recomputes an event — see
-// docs/plans/open/06-reconciler-leases-events.mdx.
+// docs/plans/closed/06-reconciler-leases-events.mdx.
 package events
 
 import (

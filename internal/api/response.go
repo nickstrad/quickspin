@@ -7,7 +7,7 @@ import (
 
 // ErrorResponse is wire format, not a Go error: the server writes it and every
 // future client (SDKs, the worker client) decodes it, which is why it lives in
-// a package owned by neither. See docs/plans/open/05-control-plane-api.mdx.
+// a package owned by neither. See docs/plans/closed/05-control-plane-api.mdx.
 type ErrorResponse struct {
 	Error ErrorBody `json:"error"`
 }

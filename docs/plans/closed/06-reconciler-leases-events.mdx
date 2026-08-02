@@ -188,15 +188,25 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) (Actions, error)
 // expiredReaped — so tests and logs can assert on behavior.
 ```
 
-Schema additions: `sandboxes.expires_at`, `sandboxes.desired_state`, and
+Schema additions: `sandboxes.expires_at` and
 `events(id, sandbox_id, at, from_state, to_state, reason)`. New API surface:
 `GET /v1/sandboxes/{id}/events`, and `POST /v1/sandboxes/{id}/keepalive` to extend the
 TTL (default e.g. 15 minutes, cap enforced).
 
 Committed decisions:
 
-- Desired vs observed state are separate columns; the reconciler is the **only**
-  component that transitions observed state based on runtime facts.
+- One `state` column carries both intent and observation. Desired state is
+  encoded in-band by the intent states — `pending` ("should exist") and
+  `stopping` ("should not"), the only states API handlers write — and the
+  reconciler is the **only** component that transitions state based on runtime
+  facts. The write-ownership split is enforced by the WHERE-guarded writes
+  (pinned by `TestReconcilerDoesNotResurrectDestroyedSandbox`), not by column
+  separation. The tradeoff: a single column cannot express re-convergence
+  toward a desired value ("desired running, observed failed → retry"), which
+  the current state machine deliberately treats as terminal. A separate
+  `desired_state` column becomes worth adding when something needs that retry
+  loop (a restart/redeploy feature, or roadmap 17's worker-driven retries),
+  ideally before roadmap 15's Postgres migration so the column rides along.
 - The what-to-do branching is a pure function, straight from the code-structure
   reference: `decideReconcileAction(desired *SandboxRecord, observed *runtime.Info,
   now time.Time) ReconcileAction`. Every (desired, observed) pairing — including both
@@ -207,11 +217,12 @@ Committed decisions:
   and logged (the DB is authoritative). The label from roadmap 02 is what makes this safe.
 - The clock is injected (`func() time.Time`) so TTL tests don't sleep.
 
-<Callout tone="system" title="Ownership of the observed-state column is exclusive">
-  API handlers write desired state (`desired_state`, `expires_at`); only the reconciler
-  writes observed state from runtime facts. The moment two components write the same
-  column from different sources of truth, the lost-update bug stops being a test case
-  and becomes a lottery.
+<Callout tone="system" title="Ownership of state transitions is exclusive">
+  API handlers write only intent (`pending`, `stopping`, `expires_at`); only the
+  reconciler transitions state from runtime facts, and every write restates the
+  state it read in its WHERE clause. The moment two components write the same
+  state from different sources of truth without that guard, the lost-update bug
+  stops being a test case and becomes a lottery.
 </Callout>
 
 End to end, these decisions compose into the new asynchronous create path:
@@ -226,7 +237,7 @@ sequenceDiagram
     participant R as reconciler
     participant D as runtime (Docker)
     C->>API: create request
-    API->>DB: insert row: desired_state running,<br/>observed pending, expires_at set
+    API->>DB: insert row: state pending,<br/>expires_at set
     API-->>C: 202 Accepted, state pending
     Note over R,D: next ticker pass
     R->>DB: list all rows
@@ -242,7 +253,7 @@ sequenceDiagram
 
 <TaskList>
   <Task title="Migrate the schema and make create asynchronous">
-    Add `expires_at`, `desired_state`, and the `events` table. `POST /v1/sandboxes`
+    Add `expires_at` and the `events` table. `POST /v1/sandboxes`
     inserts a `pending` row and returns 202 immediately; the reconciler creates the
     container.
   </Task>
@@ -275,8 +286,8 @@ sequenceDiagram
     check="You have a written table where every (desired, observed) pairing — including both-nil and present-but-drifted — has exactly one named action, and no pairing is missing."
   >
     Before the migration, enumerate the states: desired row present/absent ×
-    desired_state pending/running/destroyed × container present/absent/exited, plus
-    expiry. Each cell gets one action (create, destroy, markFailed, reapExpired,
+    row state pending/running/stopping/terminal × container present/absent/exited,
+    plus expiry. Each cell gets one action (create, destroy, markFailed, reapExpired,
     destroyOrphan, none). This table becomes `decideReconcileAction` and its test
     almost verbatim — the code is a `switch` over the table, and
     `TestDecideReconcileAction` is the table with names.
@@ -285,8 +296,8 @@ sequenceDiagram
     title="Make create async before touching the loop"
     check="POST /v1/sandboxes returns 202 with state pending and no container exists yet; a manual ReconcileOnce call then brings the container up and the row reads running."
   >
-    The handler change is small: insert the row with `desired_state='running'`,
-    observed state `pending`, `expires_at = now + defaultTTL`, return `202 Accepted`.
+    The handler change is small: insert the row with `state='pending'` (the
+    intent to run) and `expires_at = now + defaultTTL`, return `202 Accepted`.
     Delete the handler's direct runtime call. Wire a temporary CLI or test hook that
     invokes `ReconcileOnce` once so you can drive convergence by hand before any
     ticker exists — debugging a loop is much harder than debugging a function.
@@ -341,8 +352,8 @@ sequenceDiagram
     check="hack/validate-06.sh passes at all three kill points, and the hand-labeled orphan container is gone within one reconcile interval."
   >
     When `validate-06.sh` finds a mismatch after a `kill -9`, first identify which
-    half-done state you are in: `sqlite3 quickspin.db 'SELECT id, state,
-    desired_state FROM sandboxes'` versus `docker ps -a --filter
+    half-done state you are in: `sqlite3 quickspin.db 'SELECT platform_id, state
+    FROM sandboxes'` versus `docker ps -a --filter
     label=quickspin.managed=true`. A row stuck in `pending` forever means the pass is
     erroring out early on a different sandbox — check for a `return err` inside the
     loop. A leaked container with no row means orphan adoption never ran, usually
