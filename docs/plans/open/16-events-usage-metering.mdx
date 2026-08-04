@@ -1,0 +1,338 @@
+# 16 — Event enrichment and usage metering
+
+Depends on: 09 (tenants on every record); 13 recommended first (the `actor` field and
+host attribution earn their place once placement exists). 07's `generation` column
+assumed.
+
+## Summary
+
+Make the event log carry its full story, then build the pipeline that turns it into
+money-shaped numbers. Part one enriches the `events` table roadmap 06 created:
+structured reason codes, an `actor` column (api, reconciler, reaper, scheduler,
+admin), `tenant_id`, and the roadmap 07 `generation` — plus API and CLI surfaces for
+reading a sandbox's lifecycle history. Part two builds `internal/usage`: a usage
+processor that consumes lifecycle events through a checkpointed cursor and derives
+usage records (runtime minutes from Running→terminal intervals, billable API
+operations), daily rollup tables, and a pricing engine that turns rollups into a
+monthly invoice document per tenant. The controller never computes a price — it emits
+facts; everything downstream is derived, deletable, and rebuildable from the events.
+
+## Industry context
+
+Metering is a core control-plane responsibility alongside reconciliation, scheduling,
+and runtime management: AWS bills from usage records aggregated into the Cost and
+Usage Report, Modal and E2B meter per-second sandbox runtime, Stripe built an entire
+product line on ingesting usage events and applying pricing after the fact. The
+universal shape is the one this roadmap builds: immutable facts at the bottom, a
+processor deriving normalized usage, a pricing layer that is pure configuration, and
+aggregation tables so billing queries never scan raw events. Nobody serious computes
+invoices from live runtime state — state says what is true now; billing needs what was
+true across time, which only the event history knows.
+
+<KeyPoint label="Facts flow down, money is derived">
+  events → usage processor → usage_records → daily rollups → pricing → invoice.
+  Every arrow is re-runnable: delete everything downstream of `events` and the
+  pipeline rebuilds it identically. That property — derivability — is the test of
+  whether the controller stayed a fact-emitter and the usage service stayed a pure
+  consumer.
+</KeyPoint>
+
+## Key concepts
+
+- Deriving intervals from event pairs: a sandbox's billable runtime is the sum of
+  Running→(Stopped|Failed|Destroyed) spans, with the two hard edges — a sandbox still
+  running at query time (open interval, meter to `now`) and a sandbox that crashed
+  (the terminal event's timestamp truncates the span honestly).
+- A checkpointed consumer: the processor remembers the last event ID it processed and
+  resumes from there — the smallest form of the cursor/offset pattern every stream
+  system (Kafka consumer groups, Postgres logical replication) is built on.
+- Idempotent derivation: reprocessing the same events must not double-bill. At-least-
+  once delivery plus idempotent writes (unique keys on derived records) is the
+  standard alternative to chasing exactly-once.
+- Facts versus derived state, again: roadmap 06 taught events-versus-row; this roadmap
+  adds the second derivation layer and the discipline that derived tables are caches,
+  never sources.
+- Aggregation as a query-shape decision: rollup tables exist because "this month's
+  invoice" must not scan every event ever written.
+
+### Concept: billable time is an interval query over an append-only log
+
+The events table stores points in time; billing needs durations. The derivation walks
+a sandbox's ordered events and pairs each transition into `running` with the next
+terminal transition, summing the gaps. Three cases keep this honest. A sandbox
+currently running has an open interval — meter it up to the processing timestamp, and
+emit the partial usage record with a marker so the next processor run extends rather
+than duplicates it. A sandbox whose host died (roadmap 13) has a `failed` event
+written by the reconciler — the customer's meter stops at that event's timestamp, not
+at whenever the plane noticed; the event log is precisely what makes that fair. And
+ordering comes from the roadmap 07 generation, not from timestamps: two events in the
+same clock second still have a total order, which is why the generation column was
+worth adding before the billing code that needs it.
+
+<Mermaid
+  caption="The pipeline as data flow. The controller only appends events; each downstream stage reads the previous one and is idempotent, so any stage can be wiped and re-derived."
+  code={`
+flowchart LR
+    A["events\n(immutable facts)"] --> B["usage processor\n(checkpointed cursor)"]
+    B --> C["usage_records\n(runtime minutes, ops)"]
+    C --> D["usage_daily\n(per-tenant rollups)"]
+    D --> E["pricing engine\n(static price list)"]
+    E --> F["invoice\n(monthly, per tenant)"]
+`}
+/>
+
+### Concept: the processor is a reconciler that never destroys anything
+
+The usage processor has the same shape as roadmap 06's reconciler — a loop that reads
+state, decides, writes — but consumes an append-only log instead of converging live
+resources. Its correctness rule is idempotence: it may crash after writing usage
+records but before advancing its checkpoint, so the same events will be processed
+twice, and the write path must tolerate that. The mechanical answer is deterministic
+record identity — a usage record's unique key derives from what it measures (sandbox,
+interval start generation, metric), so the second processing attempt upserts the same
+row instead of inserting a sibling. `TestUsageProcessorIsIdempotent` reprocesses the
+whole log from generation zero and asserts totals do not change; if that test needs
+special-case code to pass, the record keys are wrong.
+
+### Concept: pricing is configuration, so invoices are a pure function
+
+Everything upstream of the pricing engine is measurement; the engine itself is
+multiplication. Keeping it a pure function — `invoice(rollups, priceList) Invoice` —
+means price changes never touch the pipeline, currency rounding lives in exactly one
+place (integer cents, half-up, documented), and the invoice test is a table: rollups
+in, line items out. The temptation to let the processor "just apply the rate while
+it's there" recreates the coupling this roadmap exists to teach against: a rate change
+would then rewrite historical usage, and usage is supposed to be a fact.
+
+## Design and interfaces
+
+```text
+events additions (roadmap 06 schema +):
+  actor      TEXT NOT NULL      -- api | reconciler | reaper | scheduler | admin
+  reason     TEXT NOT NULL      -- structured code: user_requested, ttl_expired,
+                                --   readiness_timeout, host_dead, quota_denied, ...
+  tenant_id  TEXT NOT NULL      -- denormalized at write time; events are self-contained
+  generation INTEGER NOT NULL   -- exists since roadmap 07
+
+usage schema (new, internal/usage owns it):
+  usage_records(id, tenant_id, sandbox_id, metric{runtime_seconds, sandbox_create,
+                exec_call, file_upload, file_download}, quantity, period_start,
+                period_end, source_generation, UNIQUE(sandbox_id, metric,
+                source_generation))
+  usage_checkpoints(consumer, last_event_id)
+  usage_daily(tenant_id, day, metric, quantity, PRIMARY KEY(tenant_id, day, metric))
+
+API / CLI:
+  GET /v1/sandboxes/{id}/events           now returns actor, reason, generation
+  GET /v1/usage?from=&to=                 tenant-scoped daily rollups
+  quickspin events <sandbox>              lifecycle history, human-readable
+  quickspin admin usage show --tenant --month
+  quickspin admin invoice generate --tenant --month   → JSON (and rendered text)
+```
+
+Committed decisions:
+
+- Lifecycle events are the usage boundary — no separate `UsageStarted`/`UsageStopped`
+  events, no periodic metering ticks. Both alternatives are recorded below as the
+  paths commercial platforms take at scale; at this scale they duplicate facts the
+  log already holds.
+- The processor is a loop inside the existing plane binary (same process as the
+  reconciler, own ticker, own checkpoint row) — a separate usage *service* is the
+  stated future shape once operation volume justifies it, and the package boundary
+  (`internal/usage` touching only its own tables plus read-only events) is drawn so
+  extraction is mechanical.
+- Billable API operations (create, exec, upload, download) are metered from events,
+  which means those operations must emit events where they do not yet — the audit
+  that closes that gap is part one's real work, not a side effect.
+- Invoices are documents (JSON plus rendered text), not payment integrations. Prices
+  live in a versioned file loaded at startup; the invoice records which price-list
+  version it used.
+- Money is integer cents end to end; floats never touch a quantity after the
+  runtime-seconds division, and that division's rounding rule (round up to the next
+  second, like every cloud) is a documented, tested decision.
+
+<Callout tone="warning" title="Do not meter from the sandboxes table">
+  The row knows what is true now; it has already forgotten the three restarts this
+  month. Every quantity in this roadmap derives from events — if a needed fact is not
+  in the log, the fix is emitting the missing event, never reading live state from
+  the usage path.
+</Callout>
+
+## Tasks
+
+<TaskList>
+  <Task title="Enrich the events schema and close emission gaps">
+    Migration for actor/reason/tenant_id, structured reason codes as typed constants,
+    and an audit that every billable operation (create, exec, upload, download) emits
+    an event — adding the missing ones.
+  </Task>
+  <Task title="Expose lifecycle history">
+    Extend `GET /v1/sandboxes/{id}/events` with the new fields and add the
+    `quickspin events` CLI verb.
+  </Task>
+  <Task title="Build the checkpointed usage processor">
+    `internal/usage`: cursor over events, interval derivation for runtime seconds,
+    operation counting, idempotent upserts keyed on deterministic record identity.
+  </Task>
+  <Task title="Add daily rollups">
+    A rollup pass folding usage_records into usage_daily, idempotent per (tenant,
+    day, metric), plus `GET /v1/usage` serving from rollups only.
+  </Task>
+  <Task title="Write the pricing engine and invoice generation">
+    A pure `invoice(rollups, priceList)` function, the versioned price-list file, and
+    `quickspin admin invoice generate` emitting JSON + rendered text.
+  </Task>
+  <Task title="Validate the pipeline end to end">
+    `hack/validate-16.sh`: drive a sandbox through create/exec/stop, run the
+    processor, assert the invoice contains the expected runtime and operation lines.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Start with the emission audit, not the schema"
+    check="A grep-driven table in your notes lists every billable operation and the event it emits; the gaps are explicit before any migration is written."
+  >
+    Walk each public handler and ask "what fact does this leave in the log?" Exec and
+    the file endpoints likely emit nothing today — they were workload ops, not state
+    transitions. Decide the event shape for operation events (from_state = to_state,
+    reason carries the operation) or add an operations-style event kind; either
+    works, but pick before the migration so the schema is written once.
+  </Hint>
+  <Hint
+    title="Derive intervals with a pure function over ordered events"
+    check="TestRuntimeSecondsFromEvents passes its table: clean stop, crash truncation, still-running open interval, and a stop-start-stop restart pattern each produce the expected seconds."
+  >
+    `runtimeSeconds(events []Event, now time.Time) []Span` — no store, no clock
+    reads inside. Order by generation, not timestamp. The open-interval case returns
+    a span ending at `now` with an open marker; the caller (the processor) is what
+    turns open spans into extendable records. Table-test this to death before wiring
+    the processor — every billing bug you cannot have later is one this table
+    catches now.
+  </Hint>
+  <Hint
+    title="Checkpoint after the derived writes, in the same transaction"
+    check="TestUsageProcessorIsIdempotent passes: kill the processor between any two operations, rerun from the stale checkpoint, totals unchanged."
+  >
+    One transaction per batch: derive records, upsert them (`ON CONFLICT` on the
+    deterministic key), advance `usage_checkpoints.last_event_id`, commit. Crash
+    before commit ⇒ full replay of the batch ⇒ the upserts land on the same rows.
+    The deterministic key is the design decision: `(sandbox_id, metric,
+    source_generation)` pins a record to the event that opened it.
+  </Hint>
+  <Hint
+    title="Rollups are a second idempotent derivation, not a trigger"
+    check="TestDailyRollupMatchesRawRecords passes, and rerunning the rollup pass changes nothing."
+  >
+    Recompute each affected (tenant, day, metric) from usage_records with
+    `INSERT ... ON CONFLICT DO UPDATE` — full recompute per key, not incremental
+    addition, so replays converge instead of accumulating. Day boundaries in UTC,
+    stated in the docs; timezone choices are billing policy, and policy is written
+    down.
+  </Hint>
+  <Hint
+    title="Keep the pricing engine embarrassingly simple"
+    check="TestInvoiceTotalsMatchPriceList is a pure table test: rollups + price list in, line items and total out, integer cents everywhere."
+  >
+    A price list struct loaded from a versioned file, one function producing line
+    items, `math/big` unnecessary — int64 cents with explicit rounding at the
+    seconds→minutes edge only. Stamp the price-list version into the invoice; a
+    regenerated invoice for a closed month must reproduce byte-identical totals.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: totals drift on replay"
+    check="hack/validate-16.sh wipes usage_records, usage_daily, and the checkpoint, reruns the processor from generation zero, and the regenerated invoice matches the original exactly."
+  >
+    If replay changes totals, the bug is one of three: a record key that includes
+    something non-deterministic (a timestamp taken at processing time), an open
+    interval that was extended by insert instead of upsert (look for two rows per
+    running span), or rollups added incrementally instead of recomputed. The wipe-
+    and-replay check in the validate script is the pipeline's own conformance test —
+    run it after every processor change.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Unit tests (`make test`):
+
+- `TestRuntimeSecondsFromEvents` — table: clean stop, crash truncation, open
+  interval, restart pattern.
+- `TestUsageProcessorIsIdempotent` — replay from a stale checkpoint changes no
+  totals.
+- `TestDailyRollupMatchesRawRecords` — rollups equal a direct aggregation, rerun
+  changes nothing.
+- `TestInvoiceTotalsMatchPriceList` — pure table test, integer cents.
+- `TestEventsCarryActorAndReason` — every emission site sets both; unknown reason
+  codes fail closed.
+
+Integration (`hack/validate-16.sh`, Lima):
+
+- A driven lifecycle (create, exec, sleep, stop) yields an invoice whose runtime line
+  matches the slept duration within one rounding unit and whose operation lines match
+  the exact call counts.
+- Wipe-and-replay: derived tables and checkpoint deleted, processor rerun, invoice
+  regenerated byte-identical.
+
+Deliberately untested and deliberately absent: payment processing; resource-seconds
+(CPU-seconds, GB-seconds) — the usage-snapshot path is recorded as the extension for
+when a runtime exposes cgroup stats; periodic metering ticks and explicit
+UsageStarted/UsageStopped events — both noted as the resilient-at-scale alternatives
+this scale does not need; host-level utilization economics (infrastructure cost vs
+revenue), which becomes possible after roadmaps 13–14 but is analysis, not pipeline.
+
+## Solo-developer tradeoffs
+
+Commercial platforms run metering as separate services on a message bus with
+periodic-tick events, because at their scale a missed Stopped event is a certainty
+and ticks bound the loss; your events are rows in the same Postgres, the processor is
+a goroutine, and the checkpoint is a row — the same concepts with the operational
+surface of one binary. Stripe would hand you rating and invoicing as a product; doing
+the pricing engine by hand is the point here, and its output is a JSON document, not
+a charge. The single-process choice is reversible by design: the package boundary and
+own-tables rule mean "extract a usage service" is a deployment change, not a rewrite
+— which is exactly the claim the package-boundaries reference makes, tested against a
+real subsystem.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="book"
+    title="Designing Data-Intensive Applications"
+    by="Martin Kleppmann, ch. 10–11 (Batch and Stream Processing)"
+  >
+    The derived-data worldview this roadmap implements small: logs as source of
+    truth, consumers with offsets, idempotence versus exactly-once, and rebuilding
+    downstream state by replay.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Turning the database inside-out"
+    href="https://www.confluent.io/blog/turning-the-database-inside-out-with-apache-samza/"
+    by="Martin Kleppmann"
+  >
+    The talk-turned-essay on treating the append-only log as the primary artifact and
+    every table as a derived view — the architecture of this pipeline, argued from
+    first principles.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Stripe: Usage-based billing"
+    href="https://docs.stripe.com/billing/subscriptions/usage-based"
+  >
+    How a commercial system draws the same lines: meter events in, rating applied
+    downstream, invoices as derived documents — vocabulary worth borrowing even
+    without the product.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="AWS Cost and Usage Reports"
+    href="https://docs.aws.amazon.com/cur/latest/userguide/what-is-cur.html"
+  >
+    The industrial endpoint of the aggregation idea: normalized usage lines by the
+    billion, rolled up by dimension — what usage_daily grows into at cloud scale.
+  </Resource>
+</Resources>

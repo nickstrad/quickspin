@@ -1,20 +1,20 @@
-# 17 — Control plane / worker split and host heartbeats
+# 13 — Host registration, heartbeats, and placement
 
-Depends on: 15, 16 (07's guest architecture assumed).
+Depends on: 08, 11, 12 (07's guest architecture assumed).
 
 ## Summary
 
-Break the monolith: sandbox execution moves into `quickspin-workerd`, a daemon that
-runs on each host, exposes the `Runtime` operations over an authenticated internal
-HTTP API, registers itself with the control plane, and heartbeats. The plane —
-which can now run anywhere, since it no longer needs `/dev/kvm` — keeps a `hosts`
-table, places new sandboxes on a healthy host with capacity, and (via the reconciler)
-declares hosts dead when heartbeats stop, failing their sandboxes. This is the roadmap
-that makes "monitor live cloud hosts" a property of the system rather than of your
-SSH habits.
+Turn roadmap 08's single statically-configured host agent into a registered fleet.
+`quickspin-hostd` already owns all host-side execution; this roadmap makes hosts
+*discoverable and mortal*: hostd registers itself with the control plane at boot and
+heartbeats every few seconds, the plane keeps a `hosts` table, places new sandboxes on
+a healthy host with capacity, and (via the reconciler) declares hosts dead when
+heartbeats stop, failing their sandboxes. It ends with prod running two real hosts —
+the "1 or 2 hosts I can watch" milestone — and makes "monitor live cloud hosts" a
+property of the system rather than of your SSH habits.
 
 It also delivers `hack/failure-suite.sh`: a named failure-injection suite that
-deliberately kills a worker mid-create, silences heartbeats without killing anything,
+deliberately kills a hostd mid-create, silences heartbeats without killing anything,
 replays API requests, exhausts capacity, and abandons runtime resources — turning
 every distributed-systems claim this roadmap makes into a scenario you have personally
 run, not a textbook answer.
@@ -26,14 +26,15 @@ Nomad's server/client, and (per their engineering posts) how E2B and Fly place m
 on host fleets. The mechanisms you're building are the textbook trio — registration,
 heartbeats with a dead-host threshold, and capacity-aware placement — plus the rule
 that makes distributed state survivable: the database's desired state is authoritative,
-workers hold no durable truth, and a dead worker's sandboxes are *failed, not
+hosts hold no durable truth, and a dead host's sandboxes are *failed, not
 migrated* (sandboxes are stateful; honest platforms kill them and let clients recreate
-from snapshots — exactly why roadmap 11 exists).
+from snapshots — exactly why roadmap 10 exists).
 
 ## Key concepts
 
-- Designing an internal service-to-service API and its auth (static bearer token per
-  host from the plane's admin CLI; mTLS noted as the industry answer and deferred).
+- Growing roadmap 08's internal API: registration and heartbeat endpoints, and its
+  single shared token replaced by per-host revocable tokens minted by the plane's
+  admin CLI (mTLS still the industry answer, still deferred).
 - Failure detection theory made concrete: heartbeat interval vs death threshold,
   why "no heartbeat" means *unknown* not *dead*, and what a flapping host does to
   naive logic.
@@ -42,17 +43,16 @@ from snapshots — exactly why roadmap 11 exists).
   the pure function only *chooses*; the *reservation* is a check-then-act hazard — two
   concurrent creates can both pick a host's last slot. Committing the placement re-checks
   capacity inside the insert's transaction (`FOR UPDATE` on the host row), the same
-  fold-the-check-into-the-reserve rule as roadmap 08's quota, one layer down.
-- Both process boundaries follow the error reference: workerd serves the shared
-  `api.ErrorResponse`; the plane's worker client logs the DTO and mints a
-  `ControlPlaneError` (never a fake wrap), and `internal/worker` gets its own
-  `WorkerError` type with the standard 30 lines.
+  fold-the-check-into-the-reserve rule as roadmap 09's quota, one layer down.
+- The process-boundary error rules from roadmap 08 extend to the new surface:
+  registration and heartbeat failures mint typed errors in the plane's host client,
+  never fake wraps of errors this process never had.
 - The reconciler generalized across two layers: converging sandboxes *and* hosts.
 
 ### Concept: a missed heartbeat is absence of evidence, not evidence of death
 
-A heartbeat is the only signal the plane has about a worker, and it is a weak one: when
-heartbeats stop, the plane cannot distinguish a crashed workerd from a network
+A heartbeat is the only signal the plane has about a host, and it is a weak one: when
+heartbeats stop, the plane cannot distinguish a crashed hostd from a network
 partition, a GC pause, or a plane-side ingestion hiccup. The host's sandboxes may be
 running perfectly. That ambiguity is why the design uses *two* thresholds rather than
 one. At 30 seconds (three missed 10-second beats) the host becomes `unready`: the
@@ -73,15 +73,15 @@ stateDiagram-v2
     ready --> unready: no heartbeat for 30s — placement stops
     unready --> ready: heartbeat resumes (the flapping budget)
     unready --> dead: silence reaches 2m
-    dead --> ready: workerd restarts and re-registers
+    dead --> ready: hostd restarts and re-registers
     ready --> draining: admin host drain
     note right of dead : sandboxes marked failed, events emitted — never migrated
     note right of draining : no new placements, running sandboxes finish or expire
 `}
 />
 
-<Figure caption="The split: workers push registration and heartbeats up; the plane pushes Runtime calls down to a placed host; the reconciler watches heartbeat age and demotes silent hosts.">
-  <svg viewBox="0 0 620 268" role="img" aria-label="Control plane and worker split with registration, heartbeats, and placement">
+<Figure caption="Hosts push registration and heartbeats up; the plane pushes Runtime calls down to a placed host; the reconciler watches heartbeat age and demotes silent hosts.">
+  <svg viewBox="0 0 620 268" role="img" aria-label="Control plane and registered host agents with registration, heartbeats, and placement">
     <defs>
       <marker id="arrow17" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
         <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
@@ -99,11 +99,11 @@ stateDiagram-v2
     <rect x="40" y="106" width="210" height="36" fill="none" stroke="#405049" strokeWidth="1" />
     <text x="145" y="128" textAnchor="middle" fontSize="10" fill="#405049">reconciler: heartbeat age → unready → dead</text>
     <rect x="380" y="20" width="220" height="76" fill="none" stroke="#18231f" strokeWidth="1.5" />
-    <text x="490" y="40" textAnchor="middle" fontSize="12" fill="#18231f">quickspin-workerd (host A)</text>
+    <text x="490" y="40" textAnchor="middle" fontSize="12" fill="#18231f">quickspin-hostd (host A)</text>
     <text x="490" y="58" textAnchor="middle" fontSize="10" fill="#405049">Runtime over HTTP + bearer token</text>
     <text x="490" y="74" textAnchor="middle" fontSize="10" fill="#405049">sandboxes as local processes</text>
     <rect x="380" y="120" width="220" height="56" fill="none" stroke="#18231f" strokeWidth="1.5" strokeDasharray="6 4" />
-    <text x="490" y="144" textAnchor="middle" fontSize="12" fill="#405049">workerd (host B) — silent</text>
+    <text x="490" y="144" textAnchor="middle" fontSize="12" fill="#405049">hostd (host B) — silent</text>
     <text x="490" y="162" textAnchor="middle" fontSize="10" fill="#405049">last_heartbeat_at aging out</text>
     <line x1="380" y1="40" x2="272" y2="52" stroke="#caa552" strokeWidth="1.5" markerEnd="url(#arrow17g)" />
     <text x="330" y="34" textAnchor="middle" fontSize="10" fill="#7f5d43">POST /register at boot</text>
@@ -115,8 +115,8 @@ stateDiagram-v2
     <text x="312" y="128" textAnchor="middle" fontSize="10" fill="#8f3423">no beat &gt; 2m: dead,</text>
     <text x="312" y="142" textAnchor="middle" fontSize="10" fill="#8f3423">sandboxes → failed</text>
     <rect x="20" y="200" width="580" height="52" fill="none" stroke="#405049" strokeWidth="1" strokeDasharray="6 4" />
-    <text x="310" y="220" textAnchor="middle" fontSize="10" fill="#405049">DB desired state is the only durable truth — workers can be lost and rebuilt from it</text>
-    <text x="310" y="238" textAnchor="middle" fontSize="10" fill="#405049">workload ops (exec, files) still flow plane → guest agent directly, unchanged from roadmap 07</text>
+    <text x="310" y="220" textAnchor="middle" fontSize="10" fill="#405049">DB desired state is the only durable truth — hosts can be lost and rebuilt from it</text>
+    <text x="310" y="238" textAnchor="middle" fontSize="10" fill="#405049">workload ops (exec, files) still flow plane → hostd → guest, unchanged from roadmap 08</text>
   </svg>
 </Figure>
 
@@ -128,7 +128,7 @@ least-loaded. Every placement policy question becomes a table test. But the func
 runs on a snapshot of the hosts table, and between "I read that host A has one slot
 left" and "I inserted a sandbox on host A", another request can do the same read.
 Both pass the pure check; the host ends up over capacity. This is the classic
-check-then-act race, and the fix is the same one roadmap 08 used for quotas: fold the
+check-then-act race, and the fix is the same one roadmap 09 used for quotas: fold the
 check into the reservation by re-verifying capacity *inside* the transaction that
 inserts the sandbox row, with the host row locked (`SELECT ... FOR UPDATE`). The pure
 function remains the policy; the transaction is the arbiter.
@@ -161,27 +161,27 @@ sequenceDiagram
   it is read.
 </KeyPoint>
 
-### Concept: workers hold no durable truth
+### Concept: hosts hold no durable truth
 
 The split only works because of a state-ownership rule: the database's desired state
-is authoritative, and workerd is a stateless executor over its local runtime. Workerd
+is authoritative, and hostd is a stateless executor over its local runtime. hostd
 persists nothing it cannot rebuild — on boot it re-registers, reports what is actually
 running (discovered from labels, roadmap 02's rediscovery mechanism paying off across a
-process boundary), and takes orders. That is why `kill -9` on workerd is a legitimate
+process boundary), and takes orders. That is why `kill -9` on hostd is a legitimate
 test rather than a catastrophe, and why a dead host's sandboxes are *failed, not
 migrated*: the sandbox's memory and disk lived only on that host, so pretending to
 move it would be lying to the client. Failing fast with an event, and letting the
-client recreate from a roadmap 11 snapshot, is what honest platforms do. The same rule
+client recreate from a roadmap 10 snapshot, is what honest platforms do. The same rule
 explains `no_capacity` as a fast typed error rather than a queue: queueing is durable
 plane-side state with its own fairness and expiry semantics — real future work, not a
 default to back into.
 
-<StudyPrompt question="Why does the plane never SSH into a worker?">
+<StudyPrompt question="Why does the plane never SSH into a host?">
   SSH is a human's escape hatch, not a program's API: unversioned, untyped,
-  screen-scraped, and offering root. The moment the plane depends on SSH, worker
+  screen-scraped, and offering root. The moment the plane depends on SSH, host
   behavior can no longer be faked in a unit test, auth can't be scoped to specific
   verbs, and every operation has a hidden dependency on shell details of the host
-  image. Two typed HTTP surfaces (plane API and workerd API) keep every cross-process
+  image. Two typed HTTP surfaces (plane API and hostd API) keep every cross-process
   interaction testable with a fake client and revocable with a token — which is
   exactly what `TestDeadHostFailsItsSandboxes` and friends rely on.
 </StudyPrompt>
@@ -189,11 +189,10 @@ default to back into.
 ## Design and interfaces
 
 ```text
-quickspin-workerd (per host):
+quickspin-hostd (per host — the binary exists since roadmap 08; this roadmap adds):
   POST /register     at boot: host name, arch, backend(s), capacity (max sandboxes)
-  Serves the Runtime surface over HTTP: create/inspect/list/destroy per roadmap 02/14
-  (workload ops still go plane -> guest directly, unchanged from roadmap 07)
   POST /heartbeat    every 10s to the plane: running count, disk/mem headroom
+  (the Runtime surface and guest passthrough are unchanged from roadmap 08)
 
 Control plane:
   hosts(id, addr, arch, backend, capacity, state{ready,unready,draining,dead},
@@ -207,11 +206,13 @@ Control plane:
   sandboxes gains host_id.
 ```
 
-Committed decisions: the plane never SSHes to workers — everything flows through the
-two HTTP surfaces; worker tokens are minted per host and revocable; `drain` stops
-placement but leaves running sandboxes to finish or expire (the graceful-maintenance
-primitive roadmap 18 automates); local dev runs plane + one workerd in Lima so the split
-is exercised daily, not only in prod.
+Committed decisions: the plane never SSHes to hosts — everything flows through the
+two HTTP surfaces; roadmap 08's single shared token is replaced by per-host revocable
+tokens; the plane's static host address config is deleted — the hosts table is the
+only source of hosts; `drain` stops placement but leaves running sandboxes to finish
+or expire (the graceful-maintenance primitive roadmap 14 automates); local dev keeps
+roadmap 08's plane + hostd pair, now connected through registration instead of a
+static address, so the fleet path is exercised daily.
 
 <Callout tone="warning" title="Thresholds are compared against the DB clock you wrote, not wall time you remember">
   Every heartbeat handler writes `last_heartbeat_at`; every reconciler pass computes
@@ -224,7 +225,7 @@ is exercised daily, not only in prod.
 ## Tasks
 
 <TaskList>
-  <Task title="Extract quickspin-workerd with token auth">
+  <Task title="Extract quickspin-hostd with token auth">
     A thin HTTP shell over the existing runtime packages, serving the Runtime surface
     and checking a static per-host bearer token on every request.
   </Task>
@@ -234,7 +235,8 @@ is exercised daily, not only in prod.
   </Task>
   <Task title="Implement placement and wire it into async create">
     The pure `place` function, the transactional capacity re-check at insert, and the
-    typed `no_capacity` error surfaced through the API and both SDKs.
+    typed `no_capacity` error surfaced through the API (the SDKs pick it up in
+    roadmaps 22–23).
   </Task>
   <Task title="Extend the reconciler to host state">
     Unready and dead transitions from heartbeat age, failing a dead host's sandboxes,
@@ -243,13 +245,14 @@ is exercised daily, not only in prod.
   <Task title="Add admin verbs and the status host summary">
     `quickspin admin host list|drain|token`, and a host summary in `GET /v1/status`.
   </Task>
-  <Task title="Cut prod over to the split">
-    Run workerd on the Hetzner host beside the plane (still one machine — roadmap 18
-    adds more); update cloud-init and the deploy script for two units.
+  <Task title="Move prod to registration, then add a second host by hand">
+    The prod hostd registers at boot instead of being statically configured; then a
+    second Hetzner host is provisioned manually (cloud-init from roadmap 12), given
+    its own token, and placement spreads across both — roadmap 14 automates this.
   </Task>
   <Task title="Write hack/failure-suite.sh — the failure-injection suite">
-    Five deliberate injections against a real plane + workerd in Lima, each with an
-    asserted recovery: kill -9 workerd mid-create; SIGSTOP workerd so heartbeats
+    Five deliberate injections against a real plane + hostd in Lima, each with an
+    asserted recovery: kill -9 hostd mid-create; SIGSTOP hostd so heartbeats
     stop while sandboxes keep running (unready, never dead, recovers on SIGCONT);
     replay a create with the same idempotency key during and after placement; fill
     a host to capacity and assert typed no_capacity, then admission after a destroy
@@ -262,26 +265,24 @@ is exercised daily, not only in prod.
 
 <HintSteps>
   <Hint
-    title="Extract workerd as a shell, not a rewrite"
-    check="A second binary builds from cmd/quickspin-workerd, and curl against its create endpoint with a hardcoded token starts a sandbox on the local runtime."
+    title="Registration replaces configuration — delete the static address"
+    check="The plane boots with no host address configured, hostd registers at boot, and a create lands on the registered host."
   >
-    The first question is what workerd *doesn't* contain: no store, no reconciler, no
-    business rules — just `net/http` handlers that decode a request DTO, call the
-    existing `Runtime`, and encode `Info` or the shared `api.ErrorResponse`. Add
-    a `cmd/quickspin-workerd/main.go` and reuse the runtime packages untouched. Auth
-    is one middleware doing a constant-time compare
-    (`crypto/subtle.ConstantTimeCompare`) of the `Authorization: Bearer` value
-    against the configured token. If you find yourself copying plane logic into
-    workerd, stop — that logic belonged in a shared package or in the plane.
+    Start by removing roadmap 08's static host config from the plane so the hosts
+    table is the only path — leaving both means registration bugs hide behind the
+    fallback. hostd gains a startup call to `POST /register` and a `time.Ticker`
+    heartbeat loop; its token moves from the shared value to a per-host one checked
+    by the same middleware. The plane-side handlers are small: an upsert and a
+    single-row UPDATE (next hint).
   </Hint>
   <Hint
     title="Registration and heartbeat are upserts keyed on host identity"
-    check="Starting workerd twice produces one hosts row, and last_heartbeat_at visibly advances every ~10s while it runs."
+    check="Starting hostd twice produces one hosts row, and last_heartbeat_at visibly advances every ~10s while it runs."
   >
     Decide the host's stable identity (its name is fine at this scale) and make
     `/register` an upsert (`INSERT ... ON CONFLICT ... DO UPDATE`) so re-registration
     after a crash refreshes `addr`, capacity, and state rather than duplicating the
-    row — a workerd restart must be routine. The heartbeat loop in workerd is a
+    row — a hostd restart must be routine. The heartbeat loop in hostd is a
     `time.Ticker` posting the running count and headroom; on the plane it is a
     single-row UPDATE of `last_heartbeat_at` plus the reported gauges. Registration
     should also flip an unready host straight back to ready.
@@ -305,7 +306,7 @@ is exercised daily, not only in prod.
     recount that host's active sandboxes, and abort with `no_capacity` if the slot
     vanished between the pure choice and now. The concurrency test is N goroutines
     calling create against one host of capacity M through the real store (this is
-    what roadmap 15's Postgres is for), asserting exactly M successes and N−M typed
+    what roadmap 11's Postgres is for), asserting exactly M successes and N−M typed
     failures. Run it with `go test -race -count=10` — a race that shows up one run
     in five is still a race. Then do the deletion experiment in the check: a
     concurrency test that cannot fail proves nothing.
@@ -318,46 +319,46 @@ is exercised daily, not only in prod.
     of calling `time.Now` inline, and factor the decision into a pure function of
     `(host, now)` returning the target state. Then the threshold tests are tables:
     beat at t=0, advance to t=31s, expect unready; advance to t=2m1s, expect dead
-    plus the sandbox-failing side effects via a fake worker client.
+    plus the sandbox-failing side effects via a fake host client.
     `TestFlappingHostRecovers` is the same machinery with a heartbeat landing at
     t=90s — assert ready again and, critically, that no destroy call ever reached
     the fake client.
   </Hint>
   <Hint
-    title="Dead-host handling is a state change plus events, never a worker call"
-    check="TestDeadHostFailsItsSandboxes marks only that host's sandboxes failed, emits an event per sandbox, and the fake worker client records zero calls to the dead host."
+    title="Dead-host handling is a state change plus events, never a host call"
+    check="TestDeadHostFailsItsSandboxes marks only that host's sandboxes failed, emits an event per sandbox, and the fake host client records zero calls to the dead host."
   >
     When a host crosses the dead threshold: update its sandboxes to `failed`, emit
-    events, done. Do not try to destroy through the dead worker — it is unreachable
+    events, done. Do not try to destroy through the dead hostd — it is unreachable
     by definition, and the runtime-level orphan sweep (roadmap 06, now running inside
-    workerd) collects the corpses if the host ever returns. `drain` is the gentler
+    hostd) collects the corpses if the host ever returns. `drain` is the gentler
     sibling: a state that placement filters out while everything running continues —
     `TestDrainStopsPlacementKeepsRunning` pins both halves.
   </Hint>
   <Hint
-    title="Cut over Lima and prod to two processes"
-    check="hack/validate-17.sh boots plane + workerd in Lima, a sandbox lands via registration and placement, and on the Hetzner host systemctl shows both units green."
+    title="Prod: registration first, then the second host by hand"
+    check="hack/validate-13.sh boots plane + hostd in Lima and a sandbox lands via registration; in prod, /v1/status shows two ready hosts and consecutive creates land on both."
   >
-    Local first: a make target or script that starts both binaries with a dev token
-    so the split is exercised daily. For prod, roadmap 16's cloud-init gains a second
-    systemd unit (`quickspin-workerd.service`, `After=quickspin.service` if it
-    registers at boot) and the deploy script restarts both with the health gate
-    still keyed on `/v1/status` — which now also asserts one ready host. Mint the
-    worker token with `quickspin admin host token` and put it in the worker's env
-    file, mode 600, same discipline as roadmap 16.
+    Local first: the roadmap 08 make target now starts hostd with no address wired
+    into the plane, proving registration daily. In prod, mint a per-host token with
+    `quickspin admin host token` into each host's env file (mode 600, roadmap 12
+    discipline), restart, and confirm one ready host — then clone the cloud-init for
+    a second, hostd-only machine pointing at the plane's address. The health gate in
+    the deploy script now asserts at least one ready host; watching placement spread
+    across two machines is this roadmap's payoff moment.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: the kill -9 scenario misbehaves"
-    check="In hack/validate-17.sh, after kill -9 the host reaches dead within the thresholds, its sandbox is failed with an event, creates fail fast with no_capacity — and a workerd restart re-registers and garbage-collects the orphan container."
+    check="In hack/validate-13.sh, after kill -9 the host reaches dead within the thresholds, its sandbox is failed with an event, creates fail fast with no_capacity — and a hostd restart re-registers and garbage-collects the orphan container."
   >
     Three distinct bugs hide in this one scenario. If the host never goes dead: the
     reconciler is comparing against a stale `now` or the interval between reconciler
     passes exceeds the threshold window — log heartbeat age each pass and watch it
-    grow. If creates hang instead of failing fast: the plane's worker client lacks an
+    grow. If creates hang instead of failing fast: the plane's host client lacks an
     `http.Client` timeout and is waiting on a socket that will never answer — every
     cross-process client needs a deadline. If the orphan container survives the
-    workerd restart: the sweep is filtering by a label the plane-era create wrote but
-    the workerd-era create doesn't (or vice versa) — `docker ps -a --filter
+    hostd restart: the sweep is filtering by a label the plane-era create wrote but
+    the hostd-era create doesn't (or vice versa) — `docker ps -a --filter
     label=quickspin.managed=true` inside Lima shows the truth. Use generous
     test-config thresholds (say 3s/10s via env) so the script runs in seconds, but
     keep the 10s/30s/2m production values as the documented defaults.
@@ -366,7 +367,7 @@ is exercised daily, not only in prod.
 
 ## Definition of done
 
-Unit tests (`make test`, fake clock, fake worker client):
+Unit tests (`make test`, fake clock, fake host client):
 
 - `TestPlacementPrefersLeastLoaded`, `TestPlacementFiltersArchAndBackend`,
   `TestPlacementNoCapacityIsTypedError` (pure-function table tests).
@@ -377,23 +378,23 @@ Unit tests (`make test`, fake clock, fake worker client):
   again, nothing was killed.
 - `TestDrainStopsPlacementKeepsRunning`.
 - `TestConcurrentPlacementNeverOverfillsHost` — N concurrent creates against one
-  host with capacity M admit exactly M (the placement twin of roadmap 08's quota-race
+  host with capacity M admit exactly M (the placement twin of roadmap 09's quota-race
   test; must fail if the transactional re-check is removed).
 
-Integration `hack/validate-17.sh` (Lima, real plane + real workerd):
+Integration `hack/validate-13.sh` (Lima, real plane + real hostd):
 
-- Boot both; workerd registers; sandbox lands on it and works end-to-end.
-- `kill -9` workerd: within the thresholds the host goes dead, its sandbox is
+- Boot both; hostd registers; sandbox lands on it and works end-to-end.
+- `kill -9` hostd: within the thresholds the host goes dead, its sandbox is
   `failed` with an event, and creates now fail fast with `no_capacity`.
-- Restart workerd: re-registers, placement resumes; the killed sandbox's container
+- Restart hostd: re-registers, placement resumes; the killed sandbox's container
   is garbage-collected (the runtime-level orphan sweep from roadmap 06 still works
-  through the worker).
+  through the host agent).
 
-Failure-injection suite `hack/failure-suite.sh` (Lima, real plane + workerd) runs
+Failure-injection suite `hack/failure-suite.sh` (Lima, real plane + hostd) runs
 green end-to-end, covering all five injections:
 
-- Worker killed mid-create: the sandbox converges to `failed` (or `running` if the
-  create had completed on the worker side) with an event — never stuck in `pending`.
+- hostd killed mid-create: the sandbox converges to `failed` (or `running` if the
+  create had completed on the host side) with an event — never stuck in `pending`.
 - Heartbeats silenced via SIGSTOP: host reaches `unready` and placement stops, but
   nothing is killed; SIGCONT within the dead threshold returns it to `ready`
   (the live twin of `TestFlappingHostRecovers`).
@@ -403,7 +404,7 @@ green end-to-end, covering all five injections:
   destroying one sandbox makes the next create admit.
 - Abandoned resources: a hand-planted labeled container is collected by the sweep.
 
-Deliberately untested: two workerds racing one sandbox ID (single-owner-by-placement
+Deliberately untested: two hostds racing one sandbox ID (single-owner-by-placement
 is asserted by design, not by lease — recorded as the known gap vs the reference
 doc's ownership-lease stage), mTLS, placement under thousands of hosts.
 
@@ -427,7 +428,7 @@ the recovery story.
   >
     The definitive treatment of why "no heartbeat" is ambiguity, not death — partial
     failures, unbounded delays, and process pauses, each of which can silence a
-    perfectly healthy workerd.
+    perfectly healthy hostd.
   </Resource>
   <Resource
     kind="paper"

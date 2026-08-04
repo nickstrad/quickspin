@@ -1,6 +1,6 @@
-# 13 — Deep dive: a mini container runtime by hand
+# 25 — Deep dive: a mini container runtime by hand
 
-Depends on: 01 (independent of 05–12; can run in parallel with them).
+Depends on: 01 (independent of 05–24; can run in parallel with them).
 
 ## Summary
 
@@ -226,7 +226,7 @@ as root inside the VM (rootless/userns is stretch, noted below).
   <Task title="Drop capabilities">
     Reduce what root inside the sandbox can still do before execing the command.
   </Task>
-  <Task title="Write hack/validate-13.sh">
+  <Task title="Write hack/validate-25.sh">
     This roadmap is validated by script, not `go test` — the behaviors are cross-process
     and root-only. One printed check per claim in Definition of done.
   </Task>
@@ -308,7 +308,7 @@ as root inside the VM (rootless/userns is stretch, noted below).
   </Hint>
   <Hint
     title="Diagnosing the failure path: bogus rootfs and half-set-up state"
-    check="quickspin-mini run --rootfs /nonexistent prints one clear error, exits nonzero, and leaves no quickspin-* cgroup and an unchanged host mount table — the last checks in hack/validate-13.sh pass."
+    check="quickspin-mini run --rootfs /nonexistent prints one clear error, exits nonzero, and leaves no quickspin-* cgroup and an unchanged host mount table — the last checks in hack/validate-25.sh pass."
   >
     Validate the rootfs (exists, is a directory, contains `/bin/sh`) in the *parent*
     before cloning — a child that dies mid-setup after `Sethostname` but before
@@ -323,7 +323,7 @@ as root inside the VM (rootless/userns is stretch, noted below).
 
 ## Definition of done
 
-`hack/validate-13.sh` runs inside the VM as root, exits 0, printing a check per claim:
+`hack/validate-25.sh` runs inside the VM as root, exits 0, printing a check per claim:
 
 - Inside: `ps aux` shows the command as PID 1 with no host processes; `hostname` is
   `sandbox`; `/` is the alpine rootfs; host paths (e.g. the real `/home`) unreachable.

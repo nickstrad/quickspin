@@ -1,6 +1,6 @@
-# 12 — Capstone: agent harness on Quickspin
+# 24 — Capstone: agent harness on Quickspin
 
-Depends on: 09 (or 10), 11 recommended.
+Depends on: 22 (or 23), 10 recommended.
 
 ## Summary
 
@@ -24,9 +24,9 @@ This is the customer's-eyes view: it is exactly what E2B's "code interpreter" qu
 and Anthropic's tool-use loops do — the LLM never touches the host; every `write_file`
 / `run_command` tool call becomes an SDK call into an isolated sandbox. Platforms live
 or die on how this loop feels: sandbox startup latency shows up as user-visible agent
-latency (your roadmap 11 snapshots exist for exactly this), TTLs protect you from crashed
+latency (your roadmap 10 snapshots exist for exactly this), TTLs protect you from crashed
 harnesses (roadmap 06), and typed SDK errors decide whether the agent can recover or just
-dies (roadmaps 09/10). Dogfooding the platform through a real agent is how every platform
+dies (roadmaps 22/23). Dogfooding the platform through a real agent is how every platform
 team finds its actual API gaps.
 
 ## Key concepts
@@ -120,7 +120,7 @@ and should end with a clean "sandbox lost" verdict; an exec timeout is just a fa
 tool call the model should hear about via `is_error: true` and route around; a network
 blip against the plane is retryable. This mapping — which typed error becomes an
 agent-visible tool error, which aborts the task, which retries — is the harness's
-actual design content, and it only works because roadmaps 09/10 made the errors types
+actual design content, and it only works because roadmaps 22/23 made the errors types
 instead of message strings. The `--chaos` flag exists to prove the mapping under fire.
 
 <Mermaid
@@ -174,7 +174,7 @@ harness's verdict is only "did the task's check command exit 0".
   <Task title="Build the base snapshot">
     A small `setup.ts` using the SDK builds the snapshot the harness restores from.
     Make the starting point a config switch — snapshot name or plain image — because
-    roadmap 16 runs this same harness against Firecracker-backed prod, where snapshots
+    roadmap 12 runs this same harness against Firecracker-backed prod, where snapshots
     are unsupported and the harness must fall back to image-based creates.
   </Task>
   <Task title="Implement the tool loop">
@@ -214,7 +214,7 @@ harness's verdict is only "did the task's check command exit 0".
     `setup.ts`: create from the base image, exec the installs (toolchain, test
     runner, and task (a)'s pre-seeded repo), call `sbx.save(name)`. Read the start
     point from config (env var or a small JSON) into one function that returns create
-    options — that seam is what roadmap 16 flips when snapshots are unavailable. Rebuild
+    options — that seam is what roadmap 12 flips when snapshots are unavailable. Rebuild
     is rerun-the-script; snapshots are cattle.
   </Hint>
   <Hint
@@ -271,7 +271,7 @@ harness's verdict is only "did the task's check command exit 0".
     steps in). If the run *hangs*, some SDK call is waiting without a timeout —
     usually a streamed exec whose sandbox died; ensure exec paths carry `timeoutMs`
     and the SDK surfaces the 404 as `SandboxNotFoundError` (if it surfaces something
-    untyped, that is a roadmap 09 bug — file it, don't work around it). If a sandbox
+    untyped, that is a roadmap 22 bug — file it, don't work around it). If a sandbox
     *leaks* after Ctrl-C, note that `finally` does not run on SIGINT by default —
     either handle SIGINT to trigger cleanup or verify the TTL reaps it (watch
     `quickspin sandbox list` until it disappears) and record which mechanism covered

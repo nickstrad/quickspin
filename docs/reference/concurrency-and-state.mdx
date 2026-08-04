@@ -4,8 +4,8 @@ Part description of current code, part forward-looking guidance. The category-4 
 below — a WHERE-guarded write that re-checks its assumption around slow Docker I/O — is
 implemented as of roadmap 06: the reconciler uses it for every state transition, and
 `TestReconcilerDoesNotResurrectDestroyedSandbox` (internal/reconciler) pins the
-lost-update interleaving. The rest becomes load-bearing at roadmap 08 (quota admission),
-14 (the tap/IP allocator), and 17 (workers) — read it before writing any of those.
+lost-update interleaving. The rest becomes load-bearing at roadmap 09 (quota admission),
+17 (the tap/IP allocator), and 13 (hosts) — read it before writing any of those.
 Adapted from an earlier codebase that guarded exactly this shape of state — "read a
 record, do slow Docker I/O, write the result" — in real code.
 
@@ -13,8 +13,8 @@ One framing correction against the roadmaps: the sibling project held its record
 mutex-guarded maps, while Quickspin's roadmaps make the **database authoritative from roadmap
 05** (SQLite, later Postgres). That moves where each rule lands — the transaction plays
 the mutex's role for record state, and the map-and-mutex guidance below applies to the
-in-process mutable state that genuinely remains in memory: roadmap 14's tap/IP allocator,
-workerd's local bookkeeping (roadmap 17), and any future cache. The *failure modes* (rule 1,
+in-process mutable state that genuinely remains in memory: roadmap 17's tap/IP allocator,
+hostd's local bookkeeping (roadmaps 08, 13), and any future cache. The *failure modes* (rule 1,
 check-then-act, the category-4 lost update) are identical in both worlds and are the
 reason to read on; each section below notes its SQL translation where it differs.
 
@@ -36,8 +36,8 @@ database, guarded by transactions. What remains genuinely in-memory and mutex-gu
 
 | Component | Mutex | Guarded state (illustrative) | Concurrent goroutines |
 | --- | --- | --- | --- |
-| firecracker backend (roadmap 14) | allocator `mu` | tap/IP allocations | reconciler-driven creates and destroys |
-| worker (roadmap 17) | `Worker.mu` | local stats, in-flight operation table if one exists | run loop, heartbeat loop, HTTP API |
+| firecracker backend (roadmap 17) | allocator `mu` | tap/IP allocations | reconciler-driven creates and destroys |
+| hostd (roadmaps 08, 13) | `Hostd.mu` | local stats, in-flight operation table if one exists | run loop, heartbeat loop, HTTP API |
 
 Fields set once at construction and never written again — the Docker client, the logger,
 the reconcile interval, the backend `Runtime` — are **not** guarded. A value only ever
@@ -81,13 +81,13 @@ check-then-act bugs survive a mutex.
 
 In-memory, this is one helper under one lock; in the database it is one transaction —
 never a SELECT in one transaction and an UPDATE in another. The roadmaps hit this shape
-twice by name: roadmap 08's quota admission (count and insert in the same transaction) and
-roadmap 17's placement reservation (`FOR UPDATE` on the host row before recording the
+twice by name: roadmap 09's quota admission (count and insert in the same transaction) and
+roadmap 13's placement reservation (`FOR UPDATE` on the host row before recording the
 sandbox on it).
 
 > Do not check `hasCapacity()` and then reserve. Two goroutines can both pass the check and
 > both reserve the last slot. Fold the check into the reserving helper's return value —
-> or into the reserving transaction. Roadmaps 08 and 17 each carry a concurrency test
+> or into the reserving transaction. Roadmaps 09 and 17 each carry a concurrency test
 > (`TestQuotaRaceOnlyAdmitsCap`, `TestConcurrentPlacementNeverOverfillsHost`) that fails
 > if the fold is undone.
 
@@ -204,7 +204,7 @@ candidate order, so ties break the same way on every run rather than by completi
 ## Reading through a store
 
 The records live behind the store interface roadmap 05 defines (SQLite locally, Postgres in
-prod per roadmap 15 — the roadmaps skip the in-memory-store stage). Keep these properties:
+prod per roadmap 11 — the roadmaps skip the in-memory-store stage). Keep these properties:
 
 - **Typed reads.** A generic store returns a `SandboxRecord`, not an `any` to assert — the
   compiler rejects a mismatched write at the call site instead of panicking at read time.
@@ -216,7 +216,7 @@ prod per roadmap 15 — the roadmaps skip the in-memory-store stage). Keep these
 
 The store should impose **no concurrency policy of its own**. The control plane has
 invariants spanning more than one statement (state transition + event append in roadmap 06,
-quota check + insert in roadmap 08, capacity check + placement in roadmap 17), so the caller
+quota check + insert in roadmap 09, capacity check + placement in roadmap 13), so the caller
 owns the transaction that makes them atomic; a store that serialized or locked internally
 would make it pay twice and still not make a read-modify-write atomic.
 
@@ -240,7 +240,7 @@ Three failure modes are invisible to `-race` and need tests of their own:
 - **Lost updates.** `-race` cannot see the resurrect-a-destroyed-sandbox sequence above.
   Pin it by driving the exact interleaving — `TestReconcilerDoesNotResurrectDestroyedSandbox`
   (internal/reconciler) does this with a fake runtime whose `Create` blocks on a channel,
-  and is the template for the same test at future seams (roadmaps 08 and 17).
+  and is the template for the same test at future seams (roadmaps 09 and 17).
 - **Deadlock** shows up as the test binary's timeout, not a failure. A fan-out over many
   failing candidates with an under-sized error channel hangs instead of passing — write the
   test with more failing candidates than any plausible fixed buffer.

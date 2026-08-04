@@ -242,7 +242,7 @@ non-test files, so any package can import the double, but it never leaks into
 This is the piece designed for the project's future more than its present. A
 *conformance suite* (also called a contract test) is one reusable set of assertions
 encoding what an interface *promises*, run against every implementation of it. Today
-there is one real backend; roadmaps 14 and 21 add Firecracker and Kata/Kubernetes. Without a
+there is one real backend; roadmaps 17 and 21 add Firecracker and Kata/Kubernetes. Without a
 shared suite, each backend would accumulate its own slightly different idea of what
 `Destroy` means, and consumers written against one would subtly break on another. With
 it, "is this a valid Runtime?" is a single function call:

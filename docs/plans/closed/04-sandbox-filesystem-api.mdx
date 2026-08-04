@@ -122,7 +122,7 @@ typed, testable contract: stat the file first (`ContainerStatPath` reports size
 without transferring content), refuse with `ErrFileTooLarge` above the cap, and guard
 the actual read too (a `stat`-then-read race can still oversize). The alternative
 shape — `io.Reader` streaming — is strictly more capable and strictly more expensive:
-every caller must manage lifecycles and partial reads, and both SDKs (roadmaps 09/10)
+every caller must manage lifecycles and partial reads, and both SDKs (roadmaps 22/23)
 would inherit that burden. Committing to bytes-with-cap now, with the error in the
 signature, keeps the option to add a streaming method later without breaking anyone.
 

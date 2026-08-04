@@ -1,23 +1,24 @@
-# 16 — Production: one live host, Docker-backed, public API
+# 12 — Production: one live host, Docker-backed, public API
 
-Depends on: 15; 12 for the demo-against-prod check in the definition of done. Roadmap 14
+Depends on: 11. Roadmap 17
 is deliberately **not** a dependency: prod launches on the Docker backend, and roadmap
-14's final task cuts it over to Firecracker later.
+17's final task cuts it over to Firecracker later.
 
 ## Summary
 
 Put Quickspin on the public internet: one Hetzner Cloud host running the control plane
 and the Docker backend, state in Neon, TLS on a real domain
 (`api.quickspin.<yourdomain>`), managed by systemd, deployed by a script in the repo.
-The SDKs gain a base-URL knob so the roadmap 12 demo harness runs unchanged against prod
-— an agent on your Mac driving a sandbox in a datacenter. Local Lima remains the dev
+The CLI gains a base-URL knob so the same commands you run against Lima drive prod
+from your Mac — the manual acceptance pass this roadmap exists to enable. The SDK-era
+demo harness (roadmap 24) revisits prod at the end of the sequence. Local Lima remains the dev
 environment; this roadmap adds prod beside it, not instead of it.
 
-The sequencing is a deliberate career-evidence decision: the production track (16 →
-17 → 18) runs on Docker first so "multi-node, observable, failure-aware platform"
-lands as early as possible, and roadmap 14's guest-agent-based backend slides underneath
+The sequencing is a deliberate career-evidence decision: the production track (12 →
+13 → 14) runs on Docker first so "multi-node, observable, failure-aware platform"
+lands as early as possible, and roadmap 17's guest-agent-based backend slides underneath
 afterward without touching a workload code path (the roadmap 07 architecture guarantees
-it). Nothing in 16–18 requires Firecracker.
+it). Nothing in 12–14 requires Firecracker.
 
 <KeyPoint label="What changes and what doesn't">
   Nothing in the plane's code becomes "prod-only". The same binary runs in Lima and on
@@ -30,7 +31,7 @@ it). Nothing in 16–18 requires Firecracker.
 This is a platform's minimum viable production shape, and it is deliberately boring:
 binary + systemd + Caddy + managed Postgres is how many real single-team services run
 before Kubernetes is justified. The host choice is made for the *future*, not the
-present: roadmap 14's Firecracker cutover will need `/dev/kvm`, and most cloud VMs don't
+present: roadmap 17's Firecracker cutover will need `/dev/kvm`, and most cloud VMs don't
 expose it — the industry runs bare metal (E2B, Fly) or nitro `.metal` (AWS). Hetzner
 Cloud is the solo-scale loophole — ordinary cheap VMs with KVM enabled — so choosing
 it now means the cutover later is a software change, not a re-provisioning. Everything
@@ -88,8 +89,8 @@ from the internet) is the regression test for this boundary.
       </marker>
     </defs>
     <rect x="10" y="88" width="110" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
-    <text x="65" y="108" textAnchor="middle" fontSize="12" fill="#18231f">Mac / SDK</text>
-    <text x="65" y="123" textAnchor="middle" fontSize="10" fill="#405049">roadmap 12 harness</text>
+    <text x="65" y="108" textAnchor="middle" fontSize="12" fill="#18231f">Mac / CLI</text>
+    <text x="65" y="123" textAnchor="middle" fontSize="10" fill="#405049">quickspin CLI + curl</text>
     <rect x="180" y="20" width="430" height="180" fill="none" stroke="#405049" strokeWidth="1.5" strokeDasharray="6 4" />
     <text x="395" y="38" textAnchor="middle" fontSize="10" fill="#405049">Hetzner host — ufw allows 443 + SSH only</text>
     <rect x="200" y="66" width="110" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
@@ -161,7 +162,7 @@ flowchart TD
 ## Design and interfaces
 
 ```text
-Host: Hetzner CX-class (x86_64, /dev/kvm — unused until roadmap 14's cutover, but the
+Host: Hetzner CX-class (x86_64, /dev/kvm — unused until roadmap 17's cutover, but the
   reason this provider was picked), Ubuntu LTS.
 Provisioning: hack/cloud-init.yaml checked into the repo — creates a deploy user,
   installs Caddy + Docker, writes systemd units, ufw rules. The host must be
@@ -169,7 +170,7 @@ Provisioning: hack/cloud-init.yaml checked into the repo — creates a deploy us
 Processes: quickspin serve (localhost:8080) <- Caddy (:443, TLS) ; docker-backed
   sandboxes managed by the plane as in roadmaps 02-04.
 Secrets: /etc/quickspin/env (mode 600) — Neon URL, nothing else in the repo.
-SDKs: baseUrl option + QUICKSPIN_BASE_URL env var (default stays localhost).
+CLI: --base-url flag + QUICKSPIN_BASE_URL env var (default stays localhost).
 New endpoint: GET /v1/status (unauthenticated) — version, uptime, backend, DB ping.
 ```
 
@@ -178,7 +179,7 @@ binary makes Docker-for-deploy pure ceremony — Docker on the host is the sandb
 backend, not a deploy mechanism); deploys are brief-downtime restarts (seconds —
 acceptable and stated); the Lima path keeps working with SQLite so local dev never
 needs the internet; prod launches Docker-backed, with the Firecracker cutover owned
-by roadmap 14's final task rather than blocking this roadmap.
+by roadmap 17's final task rather than blocking this roadmap.
 
 <Callout tone="system" title="The host is reproducible from the repo or it doesn't count">
   Every package installed, unit written, and firewall rule added must originate from
@@ -206,17 +207,18 @@ by roadmap 14's final task rather than blocking this roadmap.
     Rsync the artifact, restart the unit, poll `/v1/status`, and restore the previous
     binary automatically on a red gate.
   </Task>
-  <Task title="Add /v1/status and the SDK base-URL option">
-    The unauthenticated status endpoint on the plane, plus `baseUrl` /
-    `QUICKSPIN_BASE_URL` in both SDKs with localhost as the default.
+  <Task title="Add /v1/status and the CLI base-URL option">
+    The unauthenticated status endpoint on the plane, plus `--base-url` /
+    `QUICKSPIN_BASE_URL` in the CLI with localhost as the default.
   </Task>
   <Task title="Mint a prod tenant and key">
     Over SSH with the admin CLI — the only manual step, and it produces a secret that
     lives on your Mac, not in the repo.
   </Task>
-  <Task title="Write hack/validate-16.sh and run the demo against prod">
-    The Mac-side validation script from the definition of done, then the roadmap 12
-    harness with only env-var changes.
+  <Task title="Write hack/validate-12.sh and accept prod by hand">
+    The Mac-side validation script from the definition of done, then a hand-driven
+    create → exec → files → destroy session against the public domain, recorded in
+    the closing note.
   </Task>
 </TaskList>
 
@@ -243,7 +245,7 @@ by roadmap 14's final task rather than blocking this roadmap.
     `ufw --force enable`) as `write_files` + `runcmd` entries. Debug a bad boot with
     `cloud-init status --long` and `/var/log/cloud-init-output.log` on the host. Pick
     a CX line explicitly and verify `/dev/kvm` exists even though nothing uses it
-    yet — it is why Hetzner was chosen, and discovering its absence during roadmap 14's
+    yet — it is why Hetzner was chosen, and discovering its absence during roadmap 17's
     cutover would mean re-provisioning the host.
   </Hint>
   <Hint
@@ -281,17 +283,17 @@ by roadmap 14's final task rather than blocking this roadmap.
     happy path is fresh.
   </Hint>
   <Hint
-    title="Thread the base URL through both SDKs without breaking local defaults"
-    check="The roadmap 12 harness runs against prod with only QUICKSPIN_BASE_URL and the prod API key exported, and still runs against Lima with neither set."
+    title="Thread the base URL through the CLI without breaking local defaults"
+    check="The CLI drives prod with only QUICKSPIN_BASE_URL and the prod API key exported, and still drives Lima with neither set."
   >
-    Precedence should be explicit option > env var > localhost default, resolved in
-    one place per SDK (the client constructor), not scattered. Add a contract test
-    per SDK that pins the precedence order. Then mint the prod tenant over SSH with
-    the admin CLI against the live DB.
+    Precedence should be explicit flag > env var > localhost default, resolved in
+    one place (the client constructor), not scattered — the same precedence the SDKs
+    will adopt in roadmaps 22–23, so pin it with a test now. Then mint the prod
+    tenant over SSH with the admin CLI against the live DB.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: a port that answers when it shouldn't"
-    check="From the Mac, nc -vz -w3 <host-ip> 8080 and a guest port both fail (refused or timed out), while 443 connects; hack/validate-16.sh asserts exactly this."
+    check="From the Mac, nc -vz -w3 <host-ip> 8080 and a guest port both fail (refused or timed out), while 443 connects; hack/validate-12.sh asserts exactly this."
   >
     If 8080 is reachable from the internet, check three suspects in order. One: the
     plane's listen address — `localhost:8080`, never `:8080`; confirm on the host
@@ -306,13 +308,13 @@ by roadmap 14's final task rather than blocking this roadmap.
 
 ## Definition of done
 
-`hack/validate-16.sh` runs **from the Mac** against the public URL, exits 0, checking:
+`hack/validate-12.sh` runs **from the Mac** against the public URL, exits 0, checking:
 
 - `/v1/status` over valid TLS reports the expected version and `db: ok`.
 - Full lifecycle with `backend: docker`: create → running, exec streams, file
   round-trip, destroy — all via the public API.
 - Save/restore works in prod: `save` a sandbox, create from the snapshot, and verify
-  the restored filesystem (roadmap 11's docker-commit snapshots run natively on this
+  the restored filesystem (roadmap 10's docker-commit snapshots run natively on this
   backend).
 - Auth is enforced (no key ⇒ 401) and the plane's plaintext port and a guest port are
   **not** reachable from the internet (probe and assert connection refused/filtered).
@@ -321,11 +323,11 @@ by roadmap 14's final task rather than blocking this roadmap.
 - Deploy safety: `hack/deploy.sh` with a deliberately broken binary rolls back and the
   API stays serving the old version.
 
-Plus: the roadmap 12 demo harness completes one task against prod with only env-var
-changes, and its latency table (in `docs/reference/demo-latency.mdx`) gains a prod
-column (Mac→Hetzner RTT now included). The harness runs unchanged because docker
-supports snapshot restore; the backend config switch it will need for Firecracker
-sandboxes belongs to roadmap 14's cutover task.
+Plus: the manual acceptance session — create, exec, files, destroy driven from the
+Mac against the public domain — recorded in the roadmap's closing note. The SDK-era
+demo harness (roadmap 24) repeats this against prod with only env-var changes at the
+end of the sequence; the backend config switch it will need for Firecracker sandboxes
+belongs to roadmap 17's cutover task.
 
 Deliberately untested: sustained load, disk-full behavior, Hetzner outages, multiple
 concurrent deploys.

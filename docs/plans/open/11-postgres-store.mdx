@@ -1,23 +1,24 @@
-# 15 — Postgres store (Neon) for production
+# 11 — Postgres store (Neon) for production
 
-Depends on: 08 (store shape final through tenants/quotas); 11's snapshot tables if
+Depends on: 09 (store shape final through tenants/quotas); 10's snapshot tables if
 already implemented.
 
 ## Summary
 
 Make the control plane's store backend pluggable in fact, not just in interface: the
-same store contract runs on SQLite (local dev, unchanged) or Postgres, selected by
-config (`QUICKSPIN_DB=sqlite:path` vs a `postgres://` URL). Production uses Neon —
-serverless Postgres with a free tier and instant database branching, which becomes the
-test isolation mechanism. Every store behavior you've built (state machine,
+same store contract runs on SQLite (kept for the fast unit lane) or Postgres,
+selected by config (`QUICKSPIN_DB=sqlite:path` vs a `postgres://` URL). Local
+development moves to Postgres running in Docker inside the Lima VM — the same engine
+as prod, so engine-specific bugs surface on your desk — while production uses Neon:
+serverless Postgres with a free tier and instant database branching. Every store behavior you've built (state machine,
 idempotency keys, admission-time quotas, events) must pass the same test suite on both
 backends before this roadmap closes.
 
 ## Industry context
 
 Every commercial control plane runs on Postgres or something stronger; SQLite's
-single-writer model dies the moment the plane has two instances or a worker split
-(roadmap 17). Neon specifically is what a solo developer would pick in 2026: scale-to-zero
+single-writer model dies the moment the plane has two instances or multi-host placement
+(roadmap 13). Neon specifically is what a solo developer would pick in 2026: scale-to-zero
 pricing, pooled connection strings via PgBouncer, and branch-per-test-run — the same
 "copy the prod schema in seconds" trick platform teams build internally with snapshots.
 The porting exercise itself is an industry rite: the bugs live exactly where SQLite was
@@ -30,7 +31,7 @@ Postgres is not.
   styles (`?` vs `$1`), and where to stop abstracting (two small store
   implementations beat one query-builder).
 - Real transaction semantics: Postgres isolation levels, `SELECT ... FOR UPDATE` for
-  the quota admission race (roadmap 08's `TestQuotaRaceOnlyAdmitsCap` gets interesting —
+  the quota admission race (roadmap 09's `TestQuotaRaceOnlyAdmitsCap` gets interesting —
   SQLite serialized writes for you; Postgres will not).
 - Migrations at startup under a Postgres advisory lock (`pg_advisory_lock`) so two
   racing planes cannot double-migrate — the files themselves exist since roadmap 05; what
@@ -74,7 +75,7 @@ scale: one contract, N implementations, zero per-implementation assertions.
     <text x="120" y="189" textAnchor="middle" fontSize="10" fill="#405049">factory: temp file, instant</text>
     <rect x="410" y="150" width="180" height="52" fill="none" stroke="#18231f" strokeWidth="1.5" />
     <text x="500" y="172" textAnchor="middle" fontSize="12" fill="#18231f">TestPostgres (this roadmap)</text>
-    <text x="500" y="189" textAnchor="middle" fontSize="10" fill="#405049">factory: Neon branch URL</text>
+    <text x="500" y="189" textAnchor="middle" fontSize="10" fill="#405049">factory: local Docker Postgres</text>
     <line x1="140" y1="148" x2="230" y2="92" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow15)" />
     <line x1="480" y1="148" x2="390" y2="92" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow15)" />
     <text x="140" y="118" textAnchor="middle" fontSize="10" fill="#8f3423">same assertions</text>
@@ -106,7 +107,7 @@ been physically unreachable until now. The port is less "translate the SQL" than
 
 ### Concept: `FOR UPDATE` — admission control needs a lock, not a read
 
-Roadmap 08's quota admission is a read-then-write: count the tenant's sandboxes, and
+Roadmap 09's quota admission is a read-then-write: count the tenant's sandboxes, and
 insert if under cap. Under Postgres's default `READ COMMITTED` isolation, two
 transactions can both run the count, both see `cap - 1`, and both insert — the cap is
 breached and no error is ever raised, because neither transaction did anything
@@ -114,7 +115,7 @@ individually wrong. The classic fix is to make the check-then-take atomic by
 serializing on a lock the data itself carries: `SELECT ... FROM tenants WHERE id = $1
 FOR UPDATE` takes a row lock on the tenant row, so the second transaction blocks at
 the select until the first commits, then counts again and sees the true total. The
-tenant row becomes the admission mutex — the same category-3 shape as roadmap 14's IP
+tenant row becomes the admission mutex — the same category-3 shape as roadmap 17's IP
 allocator, expressed in SQL. This is also why `TestQuotaRaceOnlyAdmitsCap` "gets
 interesting": on SQLite it passes vacuously (one writer at a time, always), so only
 the Postgres run tells you whether your admission logic is correct or was merely
@@ -143,7 +144,7 @@ sequenceDiagram
 
 ### Concept: advisory locks make startup migration safe to race
 
-The moment two control-plane instances exist (roadmap 17's whole premise), both may
+The moment two control-plane instances exist (roadmap 13's whole premise), both may
 start against the same fresh database and both will try to apply migrations —
 half-applied DDL from two racers is one of the classic ways teams corrupt a schema.
 Postgres advisory locks are the standard fix: `pg_advisory_lock(key)` is an
@@ -205,8 +206,10 @@ Committed decisions:
   way for exactly this moment); this roadmap adds the `TestPostgres` caller and extends
   the suite with the guard-clause write test: an UPDATE conditioned on current state
   (roadmap 06's don't-resurrect rule) must behave identically on both engines.
-- CI/local Postgres tests run against a Neon **branch** created and deleted by
-  `hack/testdb.sh` (fallback: a local `docker run postgres` in the Lima VM if offline).
+- CI/local Postgres tests run against a local `docker run postgres` in the Lima VM,
+  created and torn down by `hack/testdb.sh`. The same script can instead mint a
+  disposable Neon **branch** (`--neon`) to exercise the managed path — pooled URLs,
+  TLS, real latency — before a deploy.
 
 <KeyPoint label="Where to stop abstracting">
   Two small store implementations, one shared behavioral suite, zero query builders.
@@ -231,8 +234,9 @@ Committed decisions:
     `timestamptz`, `FOR UPDATE` admission.
   </Task>
   <Task title="Write hack/testdb.sh">
-    Create a Neon branch via `neonctl`/API, export the URL, delete the branch on
-    exit; fall back to a local `docker run postgres` in the Lima VM when offline.
+    Start a disposable local `docker run postgres` in the Lima VM and export its URL,
+    tearing it down on exit; a `--neon` mode creates and deletes a Neon branch via
+    `neonctl`/API instead, for pre-deploy runs against the managed path.
   </Task>
   <Task title="Fix everything the shared suite finds">
     Run `storetest.Run` against Postgres and work the failures; expect datetime and
@@ -249,7 +253,7 @@ Committed decisions:
 <HintSteps>
   <Hint
     title="Hunt the SQLite-isms in the migrations first"
-    check="psql against a scratch Neon branch applies every migration file by hand with no errors."
+    check="psql against the local Docker Postgres applies every migration file by hand with no errors."
   >
     Grep the migration files for the usual suspects: `AUTOINCREMENT`,
     `datetime('now')`, `strftime`, bare `TIMESTAMP`/`TEXT` time columns, and
@@ -341,7 +345,7 @@ Committed decisions:
   - `TestIdempotencyKeyReturnsSameSandbox` under concurrent duplicate creates.
   - `TestMigrationsAreIdempotent` — two planes starting simultaneously against one
     fresh database both come up healthy (advisory lock works).
-- `hack/validate-15.sh`: boots the full plane against a Neon branch, runs the roadmap 05
+- `hack/validate-11.sh`: boots the full plane against the local Docker Postgres (optionally a Neon branch via --neon), runs the roadmap 05
   end-to-end curl flow, kills and restarts the plane, confirms state survived in Neon.
 - Closing notes must list every behavior difference found between backends.
 

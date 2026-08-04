@@ -9,8 +9,11 @@ creation, exposing an HTTP API *from inside* the sandbox — exec (now with stre
 output), file read/write/list, and health. The control plane proxies
 `/v1/sandboxes/{id}/...` workload calls to the guest instead of using Docker exec and
 the tar copy API. The `Runtime` interface keeps lifecycle (create/destroy); workload
-operations move to the guest client. This is the architectural move that makes roadmap 14
-(Firecracker) possible, because a microVM has no `docker exec`.
+operations move to the guest client. This is the architectural move that makes roadmap 17
+(Firecracker) possible, because a microVM has no `docker exec`. A small schema rider
+comes along: sandboxes gain a `generation` counter incremented on every state
+transition and stamped onto each event row — optimistic-concurrency groundwork for the
+distributed-control-plane roadmaps (08, 13).
 
 ## Industry context
 
@@ -25,7 +28,7 @@ is a real design constraint from here on.
 <KeyPoint label="The ownership shift">
   After this roadmap the `Runtime` interface owns only lifecycle — create, inspect, list,
   destroy. Everything that happens *inside* a running sandbox goes through the guest.
-  That split is the whole reason roadmap 14 can swap the backend without touching a
+  That split is the whole reason roadmap 17 can swap the backend without touching a
   workload code path.
 </KeyPoint>
 
@@ -40,6 +43,8 @@ is a real design constraint from here on.
 - Readiness semantics: "container running" vs "guest answering" are different states —
   the control plane's `running` now means the latter.
 - Static binaries and injection via bind-mount.
+- Optimistic concurrency groundwork: a per-sandbox `generation` that counts
+  transitions, so later remote writers can detect that they are acting on stale state.
 
 ### Concept: streaming HTTP is fighting three buffers
 
@@ -107,6 +112,21 @@ stateDiagram-v2
     pending --> failed: readiness window expires
 `}
 />
+
+### Concept: the generation column counts change
+
+The `WHERE state = ?` guard from roadmap 05 already prevents lost updates, but it only
+answers "did the row still look the way I expected." A `generation` column — an integer
+incremented inside every successful transition — answers a stronger question: how many
+times has this sandbox changed, and am I acting on the latest version? Nothing in this
+roadmap *checks* it yet; it is added now because this roadmap introduces a second
+writer path (the readiness probe's pending→running transition) and the next roadmaps
+add remote ones (the host agent in 08, registration and placement in 13), where
+compare-and-swap on generation becomes the fencing primitive. Stamping each event row
+with the post-transition generation also makes the event log a gapless sequence per
+sandbox: if the generations in a sandbox's ordered events ever skip a number, some code
+path mutated state without recording a fact — roadmap 06's replay invariant, made
+numeric.
 
 ### Concept: errors do not cross process boundaries — DTOs do
 
@@ -199,6 +219,10 @@ Committed decisions:
   ndjson stream; the buffered mode remains for SDK simplicity.
 - `/healthz` reports the guest's version; the control plane logs a warning on skew with
   itself.
+- Schema: `sandboxes` gains `generation INTEGER NOT NULL DEFAULT 0`; every guarded
+  transition folds `generation = generation + 1` into its existing `SET` clause (the
+  `WHERE state = ?` validation stays). `events` gains a `generation` column recording
+  the post-transition value, written in the same transaction as the state change.
 
 <Callout tone="warning" title="Cross-compile for the sandbox, not for your laptop">
   The guest runs inside a Linux container on Lima's VM, so it must be built with
@@ -221,6 +245,11 @@ Committed decisions:
   <Task title="Gate running on readiness">
     After container start, the reconciler polls `/healthz` before marking `running`,
     with a bounded window before the sandbox goes to `failed`.
+  </Task>
+  <Task title="Add the generation column to sandboxes and events">
+    A migration adding `generation` to both tables, the increment folded into every
+    transition's guarded UPDATE, and the post-transition value stamped on the event row
+    in the same transaction.
   </Task>
   <Task title="Introduce guest.Client in the control plane">
     Define the interface mirroring the guest surface and switch workload handlers to
@@ -294,6 +323,16 @@ Committed decisions:
     is that the reconciler owns convergence.
   </Hint>
   <Hint
+    title="Generations ride the transitions you already have"
+    check="TestEventGenerationsAreGapless passes: a sandbox's ordered events carry generations 1..N with no gaps or repeats."
+  >
+    Do not read-increment-write: `SET generation = generation + 1` inside the guarded
+    UPDATE keeps the increment atomic with the transition, and SQLite's `RETURNING
+    generation` hands back the value to stamp on the event row without a second query.
+    If the gapless test ever fails, some transition path is writing state outside the
+    shared guarded-update helper — that path is the bug, not the test.
+  </Hint>
+  <Hint
     title="guest.Client mints fresh errors from the DTO"
     check="TestEndToEndStillPassesWithGuestBackend passes: roadmap 05's validate script runs unmodified, and a guest-side failure surfaces to the API caller with the plane's error shape, not a doubly wrapped guest error."
   >
@@ -330,6 +369,11 @@ Guest tests, no Docker needed — run the guest as a local process against `http
   ending with an exit event.
 - `TestGuestExecKillsOnClientDisconnect` — closing the response body kills the child.
 - `TestGuestFilesRoundTrip`, `TestGuestRejectsTraversal` (reused table).
+- `TestTransitionIncrementsGeneration` — every successful transition bumps
+  `generation` by exactly one; a transition whose `WHERE state = ?` guard misses
+  leaves it unchanged.
+- `TestEventGenerationsAreGapless` — a sandbox's ordered events carry generations
+  1..N with no gaps or repeats.
 
 Integration (`make test-docker`):
 
@@ -343,7 +387,7 @@ Integration (`make test-docker`):
   contract survived an internal rewrite.
 
 Deliberately untested: guest auto-upgrade, mutual auth between plane and guest (noted
-in roadmap 08's threat model), stdin/PTY.
+in roadmap 09's threat model), stdin/PTY.
 
 ## Solo-developer tradeoffs
 
@@ -351,7 +395,7 @@ E2B's envd speaks gRPC with generated clients and supports PTYs, port forwarding
 file watching; you ship one ndjson-over-HTTP binary because it is debuggable with curl
 and has zero codegen overhead. The plane→guest link is unauthenticated plaintext on a
 local interface — acceptable on a single trusted host, indefensible multi-tenant; roadmap
-08 records this in the threat model rather than fixing it, which is itself the
+09 records this in the threat model rather than fixing it, which is itself the
 commercial-vs-single-host tradeoff made explicit.
 
 ## Go deeper

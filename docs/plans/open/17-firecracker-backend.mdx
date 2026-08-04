@@ -1,7 +1,7 @@
-# 14 — Deep dive: a Firecracker microVM backend
+# 17 — Deep dive: a Firecracker microVM backend
 
-Depends on: 07; 13 recommended first. Recommended order: after the production track
-(16 → 17 → 18), so "multi-node, observable, failure-aware platform" lands before this
+Depends on: 07, 08; 25 (optional deep dive) is recommended background. Recommended order: after the production track
+(12 → 13 → 14), so "multi-node, observable, failure-aware platform" lands before this
 deep dive — the final task here then cuts prod over from the Docker backend to
 Firecracker.
 
@@ -11,14 +11,14 @@ The capstone taste of how the leaders actually run untrusted code: boot Firecrac
 microVMs inside the Lima VM (nested virtualization), get the `quickspin-guest` binary
 running inside them, and implement enough of a second `Runtime` backend
 (`firecracker`) that a sandbox created with `--backend firecracker` supports create /
-exec-via-guest / files / destroy through the same control plane and SDKs. The backend
+exec-via-guest / files / destroy through the same control plane and CLI. The backend
 also carries roadmap 03's binary egress contract across the VM boundary: every guest keeps
 its network device so the plane can reach it, while host firewall policy decides
 whether workload-initiated traffic may leave. Snapshots, warm pools, and production
 hardening are explicitly out of scope — this roadmap establishes the runtime model and
 proves the backend seam, not parity with Docker.
 
-The roadmap ends with the **prod cutover**: the roadmap 16 host (chosen for its `/dev/kvm`
+The roadmap ends with the **prod cutover**: the roadmap 12 host (chosen for its `/dev/kvm`
 precisely for this moment) gains the Firecracker backend beside Docker, and new prod
 sandboxes default to it. Because the production track ran Docker-backed first, this
 is the proof that the roadmap 07 architecture holds — the backend swaps underneath a
@@ -31,7 +31,7 @@ it for Lambda; E2B, and Vercel Sandbox run on it; Fly runs microVMs for the same
 reason. The architectural payoff of roadmap 07 lands here: because workload operations go
 through the guest agent over the network rather than through `docker exec`, a VM that
 merely (a) boots and (b) has a reachable guest is already a full Quickspin sandbox.
-What changes underneath is everything roadmap 13 made visible: instead of namespaces
+What changes underneath is everything roadmap 25 made visible: instead of namespaces
 sharing your kernel, each sandbox gets its own kernel behind KVM, and the isolation
 boundary moves from "syscall filtering" to "virtual hardware."
 
@@ -39,7 +39,7 @@ boundary moves from "syscall filtering" to "virtual hardware."
   <CompareItem eyebrow="Roadmaps 02–13" title="Container: shared kernel">
     Every sandbox syscall lands in the host kernel; isolation is namespaces, cgroups,
     and capability/seccomp filtering of that one shared attack surface. Fast and
-    dense, but one kernel bug is a full escape — the exact worry roadmap 13 made
+    dense, but one kernel bug is a full escape — the exact worry roadmap 25 made
     concrete.
   </CompareItem>
   <CompareItem eyebrow="This roadmap" title="MicroVM: separate kernel">
@@ -57,12 +57,12 @@ boundary moves from "syscall filtering" to "virtual hardware."
 - The Firecracker control model: an API socket per VM; configure boot source, drives,
   network; `InstanceStart` — driven from Go via its API (the SDK or plain HTTP).
 - Building a guest world: an uncompressed kernel image, a rootfs ext4 built from the
-  same alpine export as roadmap 13, and a tiny init that brings up networking and execs
+  same alpine export as roadmap 25, and a tiny init that brings up networking and execs
   `quickspin-guest` — closing the loop on why the guest is a static binary.
 - MicroVM networking: one tap device per VM, addresses, and why platforms obsess over
   this part; stateful host filtering that separates plane-to-guest management traffic
   from guest-initiated egress.
-- An honest boot-time measurement to place next to roadmap 11's numbers.
+- An honest boot-time measurement to place next to roadmap 10's numbers.
 
 ### Concept: Firecracker is a process, and the VM dies with it
 
@@ -147,7 +147,7 @@ artifacts and each teaches something. The **kernel** is a plain uncompressed ima
 (the Firecracker CI kernels work) — there is no distro, no initramfs, no modules; if
 virtio-net is not compiled in, networking silently does not exist. The **rootfs** is
 an ext4 *file*, not a directory: `dd` an empty file, `mkfs.ext4`, loop-mount, untar
-the same alpine export roadmap 13 used, drop in `quickspin-guest`. This is why the guest
+the same alpine export roadmap 25 used, drop in `quickspin-guest`. This is why the guest
 agent had to be a static binary all along — there is no glibc contract with a distro
 you control, and alpine is musl anyway. The **init** is the part most people have
 never written: the kernel execs exactly one program as PID 1, and until your shell
@@ -327,23 +327,23 @@ flowchart TD
     allocator with its race test and the egress-policy cleanup handle.
   </Task>
   <Task title="Route Backend through the stack">
-    Plumb `Spec.Backend` through the control plane, spec validation, and one SDK
-    field.
+    Plumb `Spec.Backend` through the control plane, spec validation, and the CLI
+    (the SDKs inherit the field from the OpenAPI document in roadmaps 22–23).
   </Task>
   <Task title="Validate and measure">
-    `hack/validate-14.sh`, plus the boot-time measurement recorded in
-    `docs/reference/demo-latency.mdx` under roadmap 11's benchmark rules (p50/p95,
+    `hack/validate-17.sh`, plus the boot-time measurement recorded in
+    `docs/reference/demo-latency.mdx` under roadmap 10's benchmark rules (p50/p95,
     per-phase timestamps, stated method) — that document is the single durable
     benchmark table: cold docker create, snapshot create, and Firecracker
     boot-to-guest-healthy, side by side.
   </Task>
   <Task title="Cut prod over to Firecracker">
-    Rerun the artifact scripts with ARCH=amd64, extend roadmap 16's cloud-init to
+    Rerun the artifact scripts with ARCH=amd64, extend roadmap 12's cloud-init to
     install firecracker, deploy, and register the backend beside docker on the
     Hetzner host; flip the prod default backend. Validate via the public API: full
     lifecycle with `backend: firecracker`; `save` on a Firecracker sandbox returns a
     typed `snapshot_unsupported` error, not a 500 (docker stays registered so
-    save/restore remains validated in prod); the roadmap 12 harness gains its backend
+    save/restore remains validated in prod); the roadmap 24 harness gains its backend
     config switch — snapshot-restore on docker, plain-image create on firecracker,
     stated in the latency table.
   </Task>
@@ -443,7 +443,7 @@ flowchart TD
   </Hint>
   <Hint
     title="Diagnosing the two likely failures: a guest that never gets healthy, and the crash check"
-    check="hack/validate-14.sh's crash check passes: after kill -9 of a firecracker process the reconciler marks the sandbox failed and the tap, socket, and rootfs copy are gone."
+    check="hack/validate-17.sh's crash check passes: after kill -9 of a firecracker process the reconciler marks the sandbox failed and the tap, socket, and rootfs copy are gone."
   >
     A never-healthy guest is debugged from the serial log file, bottom-up: no output
     at all means kernel path or missing `console=ttyS0`; kernel panic about VFS means
@@ -467,7 +467,7 @@ Unit tests (`make test`, no Firecracker process):
 - The allocator race test still proves concurrent creates receive distinct /30s, and
   policy identifiers are distinct for those allocations.
 
-`hack/validate-14.sh` runs inside the Lima VM, exits 0, checking:
+`hack/validate-17.sh` runs inside the Lima VM, exits 0, checking:
 
 - Environment: `/dev/kvm` present; firecracker binary runs.
 - Via the control plane API with `"backend": "firecracker"`: create reaches `running`
@@ -485,15 +485,15 @@ Unit tests (`make test`, no Firecracker process):
 - Crash check: `kill -9` the firecracker process; the reconciler marks the sandbox
   `failed` and cleans up the leftovers.
 - Boot-to-guest-healthy time is measured and recorded in
-  `docs/reference/demo-latency.mdx` alongside roadmap 11's cold-vs-snapshot numbers,
+  `docs/reference/demo-latency.mdx` alongside roadmap 10's cold-vs-snapshot numbers,
   with the method stated (target: observe the order of magnitude, not hit a number).
-- The roadmap 12 demo harness completes one task with `backend: firecracker` — the full
-  stack, SDK to microVM.
-- Prod cutover: `hack/validate-16.sh` reruns green against the public API with
+- Once the SDK-and-demo tail lands, the roadmap 24 harness completes one task with
+  `backend: firecracker` — the full stack, SDK to microVM (deferred, recorded here).
+- Prod cutover: `hack/validate-12.sh` reruns green against the public API with
   `backend: firecracker` as the default — full lifecycle works, `save` on a
   Firecracker sandbox returns typed `snapshot_unsupported` (docker-backed
   save/restore still passes), and the deploy that shipped the cutover rolled through
-  the roadmap 16 health gate.
+  the roadmap 12 health gate.
 
 Deliberately untested/out of scope: VM snapshots/resume (E2B's crown jewel — future
 roadmap set), jailer hardening, memory ballooning, CoW rootfs (overlay/reflink), running
@@ -505,7 +505,7 @@ metering.
 Production Firecracker stacks run the jailer, device-model hardening, snapshot trees,
 and CoW storage — multi-engineer territory. The jailer is worth understanding even
 unused: it wraps each firecracker process in a chroot, its own namespaces, cgroups,
-and a dropped-privilege uid — roadmap 13's exact toolkit, applied to the VMM itself,
+and a dropped-privilege uid — roadmap 25's exact toolkit, applied to the VMM itself,
 because a compromised device emulator is the remaining attack surface once guests
 have their own kernels. One unjailed VM with a copied rootfs is a bounded initial scope
 and still crosses the line that matters: your platform demonstrably runs the same

@@ -22,7 +22,7 @@ Each package owns its error type, named after the package, in that package's `er
 | `internal/runtime`       | `RuntimeError`      | roadmap 02         |
 | `internal/events`        | `EventError`        | roadmap 06         |
 | `internal/controlplane`  | `ControlPlaneError` | future (roadmap 05) |
-| `internal/worker`        | `WorkerError`       | future (roadmap 17) |
+| `internal/worker`        | `WorkerError`       | future (roadmap 13) |
 
 The envelope itself is defined once, in `internal/errs`, as a generic struct whose type
 parameter is a phantom tag naming the owning package:
@@ -116,8 +116,8 @@ Put the cause in `Err`, never formatted into `Message` — `Error()` appends it 
   log the underlying error once, then continue or mint a fresh error of your own
   package's type.
 
-The HTTP case arrives earlier than the worker split: the guest agent (roadmap 07) is the
-first separate process, and the worker daemon (roadmap 17) is the second. Either way, a Go
+The HTTP case arrives with the first process boundaries: the guest agent (roadmap 07) is the
+first separate process, and the host agent (roadmap 08) is the second. Either way, a Go
 error never crosses the wire — the remote side serializes the shared error DTO, and the
 client (`guest.Client`, the plane's worker client) logs what the DTO said and mints a
 fresh error of its own package's type rather than pretending to wrap an error it does not
@@ -169,7 +169,7 @@ across components.
 ## HTTP responses (once there is an HTTP surface)
 
 When the control plane grows an HTTP API (roadmap 05) and later clients (the guest client
-in roadmap 07, the worker client in roadmap 17), a shared `internal/httpapi` helper should own
+in roadmap 07, the worker client in roadmap 13), a shared `internal/httpapi` helper should own
 the status-plus-JSON dance rather than each handler hand-rolling it. An `ErrorResponse`
 DTO is a wire format shared by the server and the client, so it belongs to neither —
 roadmap 05 creates the package for exactly this reason.

@@ -78,8 +78,8 @@ Every seam that expects more than one implementation takes the same three-part s
    errors, and the limits that are part of the promise (`runtime.MaxFileSize` is the
    contract's cap, not Docker's).
 2. **One subpackage per implementation** — `runtime/docker` today; `runtime/firecracker`
-   (roadmap 14), `runtime/kata` (21), `runtime/mini` (13); `store/sqlite` today,
-   `store/postgres` (15). The constructor is `New` — `docker.New(...)`, `sqlite.New(...)`
+   (roadmap 17), `runtime/kata` (19), `runtime/mini` (25); `store/sqlite` today,
+   `store/postgres` (11). The constructor is `New` — `docker.New(...)`, `sqlite.New(...)`
    — because the package name already says which one it is.
 3. **A conformance suite in a `*test` subpackage of the contract** — `runtimetest`,
    `storetest`. Every implementation runs the same suite; that suite, not the interface
@@ -89,7 +89,7 @@ Every seam that expects more than one implementation takes the same three-part s
    where the pieces live.
 
 The roadmap reuses this triple beyond runtimes and stores: compute providers (roadmap
-20, shared provider conformance suite) and storage provisioners (roadmap 23, Turso/Neon
+20, shared provider conformance suite) and storage provisioners (roadmap 21, Turso/Neon
 adapters behind one interface) should land in the same shape rather than inventing a
 new one.
 

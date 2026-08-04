@@ -22,7 +22,7 @@ runs workloads on Linux hosts, because containers and microVMs are Linux kernel
 features (namespaces, cgroups, KVM). Their engineers develop on laptops but target
 fleet hosts; the Docker-socket-over-VM arrangement you build here is a one-machine
 miniature of that split. Docker Desktop hides this VM from you; Lima gives you the same
-thing with the hood open, which matters from roadmap 13 onward when you need to touch the
+thing with the hood open, which matters from roadmap 25 onward when you need to touch the
 kernel directly.
 
 ## Key concepts
@@ -107,10 +107,10 @@ all. A binary that runs when copied to an empty Alpine container is the standard
 hold `make build-linux` to.
 
 <StudyPrompt question="Why parameterize ARCH now, when the only target is arm64?">
-  Roadmap 16's production host is x86_64. Every artifact-producing script written between
+  Roadmap 12's production host is x86_64. Every artifact-producing script written between
   now and then (guest binary, rootfs, Firecracker kernel) will copy this Makefile's
-  pattern. If the arch is a variable from birth, roadmap 16 is `ARCH=amd64 make
-  build-linux`; if it is hardcoded, roadmap 16 starts with an archaeology dig through
+  pattern. If the arch is a variable from birth, roadmap 12 is `ARCH=amd64 make
+  build-linux`; if it is hardcoded, roadmap 12 starts with an archaeology dig through
   every script under deadline pressure.
 </StudyPrompt>
 
@@ -124,7 +124,7 @@ No Go interfaces. The contracts are environmental:
 - New Makefile targets:
   - `make build-linux` — cross-compiles `cmd/...` to `bin/linux-$(ARCH)/`, with
     `ARCH ?= arm64`. Parameterizing the arch now is deliberate: the production host in
-    roadmap 16 is x86_64, and every artifact script written later (guest binary, rootfs,
+    roadmap 12 is x86_64, and every artifact script written later (guest binary, rootfs,
     Firecracker kernel) should take the arch as a variable from birth rather than being
     un-hardcoded under deadline pressure.
   - `make validate-env` — runs `hack/validate-01.sh`.
@@ -257,7 +257,7 @@ A commercial platform provisions hosts with Terraform/cloud-init across a fleet 
 never depends on one laptop VM. One Lima VM costs nothing, keeps the edit-test loop
 local, and still gives you a real kernel. The cost: nothing here teaches multi-host
 networking, and arm64 (Apple Silicon) means your images differ from the x86_64 most
-clouds run — acceptable until roadmap 14, where Firecracker on arm64 works fine anyway.
+clouds run — acceptable until roadmap 17, where Firecracker on arm64 works fine anyway.
 
 ## Go deeper
 
@@ -276,7 +276,7 @@ clouds run — acceptable until roadmap 14, where Firecracker on arm64 works fin
     href="https://docs.docker.com/engine/manage-resources/contexts/"
   >
     The maintained alternative to a raw `DOCKER_HOST` export: named endpoints you can
-    switch between, useful once a second daemon (roadmap 16's real host) exists.
+    switch between, useful once a second daemon (roadmap 12's real host) exists.
   </Resource>
   <Resource
     kind="article"

@@ -1,6 +1,7 @@
-# 09 — TypeScript SDK
+# 22 — TypeScript SDK
 
-Depends on: 07, 08.
+Depends on: 07, 09 (the platform surface as finalized through roadmap 21 is what
+gets generated).
 
 ## Summary
 
@@ -26,7 +27,7 @@ resource-handle objects rather than bare functions, typed error subclasses
 (`QuotaExceededError`, `SandboxNotFoundError`) so harnesses can branch on failure type,
 and async iteration for streamed exec output. Serving an OpenAPI document is how
 commercial platforms keep N SDKs honest against one API; yours will do the same work
-in roadmap 10.
+in roadmap 23.
 
 <Compare>
   <CompareItem eyebrow="What you build" title="Spec-anchored, contract-tested">
@@ -58,7 +59,7 @@ the contract suite runs every generated method against a **real** control plane,
 spec's request and response shapes are exercised end to end, not assumed. Writing the
 spec is also where you discover your API's irregularities: the endpoint that returns a
 bare array where every other returns an envelope, the one field that is camelCase amid
-snake_case. Finding those now is the point — roadmap 10 ports the same contract to Python,
+snake_case. Finding those now is the point — roadmap 23 ports the same contract to Python,
 and every irregularity you keep costs twice.
 
 <Figure caption="One spec, three enforcement points: the route-sync test pins the server to the spec; the contract suite pins the generated SDK to the live server.">
@@ -195,7 +196,7 @@ flowchart TD
     M["make test-sdk-ts"] --> T["mktemp -d<br/>throwaway SQLite file"]
     T --> S["start control plane<br/>in the background"]
     S --> H["poll health endpoint<br/>until ready"]
-    H --> K["mint a key via the<br/>roadmap 08 admin CLI"]
+    H --> K["mint a key via the<br/>roadmap 09 admin CLI"]
     K --> V["export env vars,<br/>run npx vitest run"]
     V --> E["trap ... EXIT kills the<br/>server on every outcome"]
 `}
@@ -253,7 +254,7 @@ flowchart TD
   >
     Shell script shape: `mktemp -d` for the SQLite file, start the control plane in
     the background, poll its health endpoint until ready (curl in a loop with a
-    timeout), mint a key with the roadmap 08 admin CLI, export `QUICKSPIN_API_KEY` and
+    timeout), mint a key with the roadmap 09 admin CLI, export `QUICKSPIN_API_KEY` and
     the base URL, run `npx vitest run`, and kill the server in a `trap ... EXIT` so
     cleanup survives test failure. Vitest picks up the env vars without help.
   </Hint>
@@ -264,7 +265,7 @@ flowchart TD
     For liveness, stream a command that prints then sleeps (`sh -c 'echo hi; sleep
     2'`) and assert the first event arrives well before total elapsed time — a
     buffering SDK collapses the two. For errors, drive each failure for real: a
-    garbage key for `AuthenticationError`, a tenant quota of zero (roadmap 08 admin CLI)
+    garbage key for `AuthenticationError`, a tenant quota of zero (roadmap 09 admin CLI)
     for `QuotaExceededError`, exec after `kill()` for `SandboxNotFoundError`. Use
     Vitest's `rejects.toBeInstanceOf` so message wording stays out of the contract.
   </Hint>

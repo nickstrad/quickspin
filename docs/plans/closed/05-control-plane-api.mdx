@@ -140,7 +140,7 @@ table: on create, look the key up; a hit returns the existing sandbox's current 
 (making the retry a read), a miss creates and records the mapping. The subtle cases
 worth deciding consciously: a request with no key is a plain create every time, and
 the lookup-or-insert should share the create's transaction — though truly concurrent
-retries racing one key are explicitly out of scope until roadmap 08's quota work makes
+retries racing one key are explicitly out of scope until roadmap 09's quota work makes
 transactions load-bearing anyway.
 
 <Mermaid
@@ -181,7 +181,7 @@ place that inspects the chain with `errors.Is`, chooses a status (404, 422, 409)
 writes the envelope through `WriteError`, and logs the full diagnostic once. Nothing
 below it logs-and-returns (double logging), and nothing above it exists. Keeping the
 `ErrorResponse` DTO and the `WriteJSON`/`WriteError` helpers in `internal/httpapi` —
-owned by neither server nor client — is what lets roadmaps 09, 10, and 17 consume the
+owned by neither server nor client — is what lets roadmaps 22, 10, and 17 consume the
 same wire format instead of re-deriving it.
 
 ## Design and interfaces
@@ -221,13 +221,13 @@ Committed decisions:
   concurrency reference's store rules: typed reads, records by value in and out,
   `ErrNotFound` + zero value for missing keys, and **no locking or transaction policy
   of its own** — invariants that span calls (state transition + event append, quota
-  check + insert in roadmap 08) are the caller's transaction.
-- Now that roadmap 15 commits prod to Postgres, two of its costs move here where they are
+  check + insert in roadmap 09) are the caller's transaction.
+- Now that roadmap 11 commits prod to Postgres, two of its costs move here where they are
   nearly free: the schema ships as **versioned migration files** (`migrations/NNNN_*.sql`,
   embedded, applied at startup) rather than create-if-missing, and it avoids
   SQLite-isms Postgres will reject (app-generated string IDs, no serial PKs, ISO-8601
   UTC text timestamps mapping cleanly to `timestamptz`). The store test suite is
-  written as `storetest.Run(t, factory)` from day one so roadmap 15 adds a second caller
+  written as `storetest.Run(t, factory)` from day one so roadmap 11 adds a second caller
   instead of an extraction refactor.
 - State transitions happen in one place (a `transition(id, from, to)` helper inside a
   transaction) — never as scattered UPDATEs. The legality check itself is a pure
@@ -391,7 +391,7 @@ asserts on JSON with `jq`, kills the server mid-run and confirms a restart still
 the surviving sandbox record. Exits 0 only if all checks pass and no labeled containers
 leak.
 
-Deliberately untested: concurrent creates racing one idempotency key, auth (roadmap 08),
+Deliberately untested: concurrent creates racing one idempotency key, auth (roadmap 09),
 TLS, request body size limits.
 
 ## Solo-developer tradeoffs

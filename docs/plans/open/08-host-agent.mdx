@@ -1,0 +1,340 @@
+# 08 — Host agent: the host-side control point
+
+Depends on: 07.
+
+## Summary
+
+Build `quickspin-hostd`: a daemon that runs on every sandbox host and becomes the only
+thing the control plane talks to on that host. Both traffic classes converge on it —
+lifecycle calls (the `Runtime` surface: create, inspect, list, destroy) and workload
+calls (guest exec and files, proxied through to each sandbox's `quickspin-guest`). On
+today's single host, hostd is deliberately a thin proxy over the existing Docker
+runtime: behavior changes almost nothing, and that is the point. The deliverable is the
+*boundary*. It is the seam where Firecracker (roadmap 17) plugs in, the attachment
+point for remote hosts, registration, and placement (roadmap 13), and it removes the
+last reason the control plane needs a Docker socket — after this roadmap the plane
+could run on a different machine than every sandbox it manages.
+
+## Industry context
+
+Every serious platform has exactly one agent per host that the control plane
+addresses: Kubernetes' kubelet, Nomad's client agent, Fly's flyd, E2B's per-node
+orchestrator. None of them let the scheduler dial a container runtime or a workload
+port across the network directly. The reason is encapsulation of host-local detail:
+socket paths, port mappings, vsock addresses, and runtime quirks differ per host and
+per backend, and the agent is where they stop leaking. Quickspin adopts the same
+shape one host early — while the plane and hostd still share a machine — because
+retrofitting the boundary after multi-host and multi-runtime features exist means
+rewriting those features.
+
+<KeyPoint label="Mechanism below, policy above">
+  hostd executes; the plane decides. No reconciler, no store, no placement, no state
+  machine lives in hostd — it is a stateless executor that could be killed and
+  restarted at any moment and rebuild everything it knows from the runtime's labels.
+  If a piece of logic needs durable truth, it belongs in the plane's database, not on
+  the host.
+</KeyPoint>
+
+## Key concepts
+
+- The agent-per-host pattern: one addressable control point per machine, host-local
+  detail encapsulated behind it.
+- Interface re-implementation across a process boundary: `hostclient.Runtime`
+  satisfies the same Go `Runtime` interface the Docker adapter does, so the plane's
+  handlers and reconciler do not change.
+- Streaming through a second hop: roadmap 07's flush discipline now applies at every
+  proxy in the chain, and one buffering hop silently defeats all the others.
+- Failure domains: "plane cannot reach hostd," "hostd cannot reach Docker," and
+  "hostd cannot reach the guest" are three different facts that need three
+  distinguishable errors.
+- Statelessness as a design constraint: hostd persists nothing, so `kill -9` is a
+  legitimate test rather than a catastrophe.
+- Version skew across three binaries: plane, hostd, and guest now ship separately.
+
+### Concept: the boundary is measured by what the plane can no longer do
+
+Before this roadmap the plane holds a Docker client and a per-sandbox guest address;
+after it, the plane holds one hostd address and a token. That is a *removal* of
+capability, and it is verifiable: the plane's binary no longer imports the Docker SDK,
+and nothing in its store records a container port. Removals like this are how a
+boundary is kept honest — if the plane retains a side channel to the runtime "just for
+one call," every future backend must support that side channel too, and the seam is
+fiction. The test is grep, not sentiment: `internal/controlplane` (or equivalent) must
+not import `internal/runtime/docker` when this roadmap closes.
+
+### Concept: each hop mints its own errors, and says which side failed
+
+Roadmap 07 established the rule for one boundary: a Go error never crosses the wire;
+the far side serializes the shared `api.ErrorResponse` DTO and the near side mints a
+fresh, typed error. With hostd in the middle there are two boundaries, and a new
+failure ambiguity: when an exec fails, was the *host agent* unreachable (host down,
+token wrong — placement-relevant, roadmap 13 will care) or did hostd reach the sandbox
+and find the *guest* dead (sandbox-relevant — the reconciler should consider `failed`)?
+The DTO gains a `source` field (`runtime`, `guest`, `hostd`) so the plane can tell.
+Collapsing these into one opaque 502 is the classic proxy sin; debugging multi-host
+systems later depends on the distinction existing now.
+
+<Mermaid
+  caption="Both traffic classes converge on hostd. Lifecycle terminates at the runtime; workload passes through to the guest. The plane knows one address per host and zero addresses per sandbox."
+  code={`
+sequenceDiagram
+    participant P as control plane
+    participant H as quickspin-hostd
+    participant D as Docker runtime
+    participant G as quickspin-guest
+    P->>H: POST /v1/runtime/sandboxes (create)
+    H->>D: Runtime.Create — bind-mount guest, entrypoint, labels
+    D-->>H: container ID, guest address (host-local)
+    H-->>P: Info DTO — no port, no socket path
+    P->>H: POST /v1/guest/{id}/exec?stream=true
+    H->>G: proxied request, host-local dial
+    G-->>H: ndjson events
+    H-->>P: same events, flushed per line
+`}
+/>
+
+### Concept: cancellation must survive the extra hop
+
+Roadmap 07's kill-on-disconnect contract — caller goes away, child process dies — now
+has three links: caller→plane, plane→hostd, hostd→guest. Each link propagates
+cancellation the same way (the outbound request carries the inbound request's context,
+so a closed connection cancels the next hop), but the chain is only as good as its
+weakest link: one hop that uses `context.Background()` for its outbound call turns an
+abandoned exec into a process that runs to completion inside the sandbox. The same
+subtlety rules out the blunt timeout tool: `http.Client.Timeout` bounds the *entire
+response* including body reads, which kills legitimate long streams — deadlines on
+streaming paths must come from the request context, never from the client struct.
+
+## Design and interfaces
+
+hostd HTTP surface (listens on the host, e.g. `:8420`, bearer token required):
+
+```text
+GET    /healthz                       hostd version + whether the runtime answers
+POST   /v1/runtime/sandboxes          Runtime.Create
+GET    /v1/runtime/sandboxes          Runtime.List
+GET    /v1/runtime/sandboxes/{id}     Runtime.Inspect
+DELETE /v1/runtime/sandboxes/{id}     Runtime.Destroy
+ANY    /v1/guest/{id}/*               passthrough to that sandbox's guest API
+```
+
+Committed decisions:
+
+- The plane is configured with one static hostd address and token (env/flag). No
+  registration, heartbeats, or hosts table yet — that is roadmap 13's work, and doing
+  it now would mean building discovery before there is anything to discover.
+- `hostclient.Runtime` implements the existing `Runtime` Go interface over this HTTP
+  surface, asserted at compile time. The plane's handlers and reconciler are untouched
+  — swapping the concrete `Runtime` is the whole proof that roadmap 02's interface was
+  drawn correctly.
+- Guest addresses move out of the plane entirely. hostd resolves sandbox ID → guest
+  address per request (from `ContainerInspect`, cached in memory, rebuilt from labels
+  after a restart). The plane's store drops its guest-address column: host-local
+  detail now lives host-side.
+- `guest.Client`'s interface from roadmap 07 is unchanged; only its transport changes,
+  to the hostd passthrough. Workload handlers cannot tell the difference.
+- Auth is a static bearer token checked with a constant-time compare, minted by the
+  operator and injected into both processes' env. mTLS is named and deferred to the
+  threat model (roadmap 09).
+- Error DTO: hostd serves `api.ErrorResponse` with a `source` field distinguishing
+  `runtime`, `guest`, and `hostd` failures; the plane's clients mint typed errors per
+  the error reference's process-boundary rule.
+- Local dev runs the split every day: a make target boots plane + hostd as two
+  processes in Lima, and the roadmap 05 validate script runs against that pair.
+
+<Callout tone="warning" title="This roadmap will feel like pure indirection — that is correct">
+  On one host, every request gains a hop and no capability is gained. The payoff is
+  structural: roadmap 17 implements Firecracker *inside hostd* without the plane
+  noticing, and roadmap 13 turns "one static host address" into "a registered fleet"
+  without re-plumbing a single workload path. If the hop tempts you to shortcut the
+  plane back onto the Docker socket "temporarily," the seam is gone — see the grep
+  test above.
+</Callout>
+
+## Tasks
+
+<TaskList>
+  <Task title="Build cmd/quickspin-hostd serving the Runtime surface">
+    A thin HTTP shell over the existing runtime packages: decode request DTO, call
+    `Runtime`, encode `Info` or `api.ErrorResponse`. Token middleware on every route.
+  </Task>
+  <Task title="Add the guest passthrough">
+    `ANY /v1/guest/{id}/*` resolves the sandbox's guest address and proxies with
+    per-line flushing and context propagation, so streams stay live and disconnects
+    still kill.
+  </Task>
+  <Task title="Move guest-address resolution into hostd">
+    Resolve from the runtime per request with an in-memory cache rebuilt from labels;
+    drop the plane's stored guest address in a migration.
+  </Task>
+  <Task title="Introduce hostclient in the plane">
+    `hostclient.Runtime` (compile-time asserted against `Runtime`) and the hostd-backed
+    guest transport; delete the plane's direct Docker and guest dialing.
+  </Task>
+  <Task title="Wire the two-process dev flow">
+    Make target booting plane + hostd with a dev token in Lima; `hack/validate-08.sh`
+    drives the roadmap 05 script against the pair.
+  </Task>
+  <Task title="Distinguish the three failure domains">
+    The `source` field on the DTO, typed errors in the plane's clients, and `/healthz`
+    reporting runtime reachability.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="hostd is a shell — if you are copying plane logic into it, stop"
+    check="curl with the dev token against hostd's create endpoint starts a container via the existing runtime; without the token it gets 401."
+  >
+    Start from `cmd/quickspin-hostd/main.go`: `net/http` handlers that call the
+    existing `Runtime` implementation directly — no store, no reconciler, no policy.
+    Auth is one middleware doing `crypto/subtle.ConstantTimeCompare` on the
+    `Authorization: Bearer` value. The DTOs for create/inspect belong in
+    `internal/api` beside the error DTO — wire format owned by neither side.
+  </Hint>
+  <Hint
+    title="The passthrough is a ReverseProxy with flushing turned on"
+    check="An exec streamed through plane → hostd → guest delivers its first event before the command finishes."
+  >
+    `httputil.ReverseProxy` with `FlushInterval` set to a negative value flushes
+    immediately and handles chunked bodies; its `Rewrite` hook is where the sandbox ID
+    becomes a guest address. If you hand-roll instead: copy with a per-line flush and
+    make the outbound request with `r.Context()` so a caller disconnect cancels the
+    guest-side exec — roadmap 07's kill-on-disconnect test should still pass with the
+    extra hop in place.
+  </Hint>
+  <Hint
+    title="Resolve guest addresses from the runtime, not from a file"
+    check="Restarting hostd mid-session loses nothing: the next exec against an existing sandbox works without any re-registration step."
+  >
+    The address is derivable state: `ContainerInspect` gives the mapped port for any
+    labeled container. Cache in a map guarded per the concurrency reference, and treat
+    a miss as "inspect again," so a hostd restart rebuilds silently. Persisting this
+    map to disk would be the first durable host-side state — the design rule this
+    roadmap exists to keep false.
+  </Hint>
+  <Hint
+    title="hostclient.Runtime is conformance-tested, not trusted"
+    check="The runtime conformance suite from the testing reference passes against hostclient → hostd → a fake runtime, entirely in-process with httptest."
+  >
+    `var _ runtime.Runtime = (*hostclient.Runtime)(nil)` catches drift at compile
+    time; the conformance suite catches semantic drift (idempotent destroy, not-found
+    typing) across the HTTP hop. Non-2xx decodes the DTO, logs it, and mints the
+    client's own error type — never a fake wrap of an error this process never had.
+  </Hint>
+  <Hint
+    title="Make the split boring to run"
+    check="hack/validate-08.sh boots both processes, runs the roadmap 05 validate script unmodified, and tears down cleanly."
+  >
+    Two processes, one script: start hostd, wait on its `/healthz`, start the plane
+    pointed at it, run the existing end-to-end script, trap-kill both. The plane's
+    hostd address and token come from env so the same binaries run in prod later. If
+    the script only works with the plane started first, the plane is dialing Docker
+    somewhere — find it.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: hangs and lies at the boundaries"
+    check="TestHostdUnreachableIsTypedError and TestPassthroughKillsOnCallerDisconnect both pass; killing hostd mid-exec surfaces a typed error in bounded time rather than hanging."
+  >
+    Two traps share a symptom. If killing hostd makes API calls hang: the plane's
+    outbound requests lack deadlines — but do not reach for `http.Client.Timeout`,
+    which also kills healthy long streams; use `context.WithTimeout` on lifecycle
+    calls and rely on connection errors plus context cancellation on streaming ones.
+    If disconnects stop killing guest-side processes: some hop switched to
+    `context.Background()` for its outbound call and broke the cancellation chain —
+    check the proxy first.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Unit tests (`make test`, httptest servers, fake runtime and guest):
+
+- `TestHostdServesRuntimeConformance` — the existing runtime conformance suite passes
+  against `hostclient → hostd → fake runtime`.
+- `TestGuestPassthroughStreamsLive` — first ndjson event crosses both hops before the
+  command completes.
+- `TestPassthroughKillsOnCallerDisconnect` — canceling the top-level request
+  propagates through hostd; the fake guest observes the cancellation.
+- `TestHostdUnreachableIsTypedError` and `TestGuestDownIsDistinguishableFromHostDown`
+  — the three failure domains map to distinct typed errors via the DTO's `source`.
+- `TestHostdRejectsBadToken` — constant-time compare, 401 on mismatch.
+
+Integration (`make test-docker` / `hack/validate-08.sh` in Lima):
+
+- Plane + hostd as two processes: the roadmap 05 validate script (create, exec, files,
+  destroy) passes unmodified — the public contract survives its second internal
+  rewrite in two roadmaps.
+- `kill -9` hostd mid-exec: the caller gets a typed error in bounded time (no hang);
+  restarting hostd makes existing sandboxes usable again with no re-registration —
+  statelessness demonstrated, not asserted.
+- Grep gate: the plane's packages no longer import the Docker SDK or dial guest
+  addresses; only hostd does.
+
+Deliberately untested: registration, heartbeats, capacity, and placement (roadmap 13);
+more than one host; mTLS and token rotation (threat model in roadmap 09); hostd
+auto-upgrade — skew beyond a logged `/healthz` version warning.
+
+## Solo-developer tradeoffs
+
+Kubelet is an operating system's worth of agent — pod lifecycle, probes, cgroup and
+image management, device plugins; hostd is a proxy with a token because the seam, not
+the feature set, is this roadmap's deliverable, and every capability added to hostd now
+is one more thing roadmap 17 must reimplement for microVMs. One static host address is
+config-file discovery — honest at one host, replaced by registration in roadmap 13
+rather than half-built here. The plane→hostd link shares the guest link's weakness
+(plaintext bearer on a trusted host) and inherits its resolution path: recorded in
+roadmap 09's threat model, mTLS deferred deliberately. The extra hop costs real
+latency on a single host and buys nothing until there are two hosts or two backends —
+accepted, because both are on the roadmap.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="Kubernetes cluster architecture"
+    href="https://kubernetes.io/docs/concepts/architecture/"
+  >
+    The reference version of this split: apiserver as plane, kubelet as host agent,
+    CRI as the runtime seam behind it — the mature form of every boundary this roadmap
+    draws.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Nomad architecture"
+    href="https://developer.hashicorp.com/nomad/docs/architecture"
+  >
+    The leaner sibling: server/client split, what the client agent owns versus the
+    scheduler, and a vocabulary check for roadmap 13's registration and heartbeat
+    work.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Carving the Scheduler Out of Our Orchestrator"
+    href="https://fly.io/blog/carving-the-scheduler-out-of-our-orchestrator/"
+    by="Fly.io"
+  >
+    Fly's account of moving from Nomad to flyd, their per-host agent — a production
+    argument for why the host agent, not the scheduler, is the load-bearing component.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="httputil.ReverseProxy — net/http/httputil"
+    href="https://pkg.go.dev/net/http/httputil#ReverseProxy"
+  >
+    The passthrough's engine: `Rewrite`, `FlushInterval` semantics (negative flushes
+    immediately), and the streaming caveats the guest proxy depends on.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="e2b-dev/infra"
+    href="https://github.com/e2b-dev/infra"
+  >
+    E2B's open control plane: orchestrator-per-node talking to envd in each sandbox —
+    the commercial system whose shape (plane → node agent → guest agent) this roadmap
+    adopts at teaching scale.
+  </Resource>
+</Resources>

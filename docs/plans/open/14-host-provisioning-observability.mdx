@@ -1,6 +1,6 @@
-# 18 — Cloud host provisioning and fleet observability
+# 14 — Cloud host provisioning and fleet observability
 
-Depends on: 17.
+Depends on: 13.
 
 ## Summary
 
@@ -43,7 +43,7 @@ are the fleet-scale version of roadmap 02's orphan containers, except these cost
 - Alerting on symptoms not causes: "no ready hosts" and "sandbox failure rate" page;
   everything else is a dashboard.
 - Distributed tracing with OpenTelemetry: spans and context propagation across
-  process boundaries (plane → workerd over HTTP), and what a trace answers that
+  process boundaries (plane → hostd over HTTP), and what a trace answers that
   metrics cannot — *where* one slow create spent its time.
 - Cost-safety engineering: reconciling billing-relevant external state with strict
   "delete unknowns bearing our label" policy.
@@ -67,12 +67,12 @@ unable to touch servers Quickspin doesn't own.
 
 ### Concept: user-data is how a server joins the fleet without you
 
-Roadmap 16's cloud-init made one host reproducible; this roadmap makes it *parameterized*.
+Roadmap 12's cloud-init made one host reproducible; this roadmap makes it *parameterized*.
 When the provider creates a server it attaches user-data — a cloud-init document the
 machine executes on first boot. Template into it the three things a worker cannot
 invent: its per-host token, the plane URL, and the arch-appropriate artifacts. The
 boot then runs the whole join sequence unattended: cloud-init installs and starts
-workerd, workerd calls `POST /register` with its token, heartbeats begin, the host
+hostd, hostd calls `POST /register` with its token, heartbeats begin, the host
 turns `ready`, and placement starts using it. The moment any step needs SSH, you
 don't have fleet provisioning — you have a runbook with extra steps, and host number
 five will be subtly different from host number four. The failure mode that motivates
@@ -80,7 +80,7 @@ the "zero SSH interventions" assertion: a template bug (wrong token, unexpanded
 variable) produces a server that bills but never joins — which is precisely the
 orphan class the fleet reconciler exists to catch.
 
-<Figure caption="Host provisioning lifecycle: the admin verb drives the provider API; cloud-init user-data carries the token so the new server self-joins via roadmap 17's registration path.">
+<Figure caption="Host provisioning lifecycle: the admin verb drives the provider API; cloud-init user-data carries the token so the new server self-joins via roadmap 13's registration path.">
   <svg viewBox="0 0 620 240" role="img" aria-label="Provisioning lifecycle from admin host create through cloud-init boot to a ready registered host">
     <defs>
       <marker id="arrow18" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -100,11 +100,11 @@ orphan class the fleet reconciler exists to catch.
     <text x="535" y="44" textAnchor="middle" fontSize="12" fill="#18231f">first boot</text>
     <text x="535" y="60" textAnchor="middle" fontSize="10" fill="#405049">cloud-init runs user-data</text>
     <rect x="460" y="130" width="150" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
-    <text x="535" y="150" textAnchor="middle" fontSize="12" fill="#18231f">workerd starts</text>
+    <text x="535" y="150" textAnchor="middle" fontSize="12" fill="#18231f">hostd starts</text>
     <text x="535" y="166" textAnchor="middle" fontSize="10" fill="#405049">token + plane URL from env</text>
     <rect x="230" y="130" width="150" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
     <text x="305" y="150" textAnchor="middle" fontSize="12" fill="#18231f">POST /register</text>
-    <text x="305" y="166" textAnchor="middle" fontSize="10" fill="#405049">then heartbeats (roadmap 17)</text>
+    <text x="305" y="166" textAnchor="middle" fontSize="10" fill="#405049">then heartbeats (roadmap 13)</text>
     <rect x="10" y="130" width="140" height="48" rx="24" fill="none" stroke="#18231f" strokeWidth="1.5" />
     <text x="80" y="150" textAnchor="middle" fontSize="12" fill="#18231f">host ready</text>
     <text x="80" y="166" textAnchor="middle" fontSize="10" fill="#405049">placement may use it</text>
@@ -156,7 +156,7 @@ flowchart TD
 <Callout tone="warning" title="Orphaned servers are silent money">
   Every code path that calls `CreateServer` must assume it can crash on the next
   line. The label goes on at creation (atomically, in the create request — never a
-  second call), the reaper trusts only the label, and `hack/validate-18.sh` ends by
+  second call), the reaper trusts only the label, and `hack/validate-14.sh` ends by
   asserting the provider's labeled server list matches expectations exactly, failing
   loudly otherwise. A leaked container costs RAM; a leaked CX32 costs real money
   every hour until the invoice tells you about it.
@@ -185,14 +185,14 @@ type Provider interface {
 
 ```text
 Admin flow: host create → provider server w/ user-data(token, plane URL, arch)
-  → boots workerd → self-registers (roadmap 17) → ready. hosts row carries
+  → boots hostd → self-registers (roadmap 13) → ready. hosts row carries
   provider_server_id from birth; deletion refuses unless drained+empty (--force
   overrides, destroying remaining sandboxes first).
 Fleet reconciler: provider server with our label but no hosts row, older than a
   grace window ⇒ delete + loud event. hosts row whose server is gone ⇒ dead
   immediately (skip the heartbeat wait).
 Observability: GET /metrics on plane (auth-exempt, IP-restricted via Caddy) and
-  workerd; Grafana Cloud scrapes; dashboard JSON checked into hack/dashboard.json;
+  hostd; Grafana Cloud scrapes; dashboard JSON checked into hack/dashboard.json;
   alerts: zero-ready-hosts, failure-rate.
 ```
 
@@ -233,7 +233,7 @@ revoked on delete.
     idempotent delete, and a fake provider for every unit test.
   </Task>
   <Task title="Parameterize cloud-init into user-data templating">
-    A workerd-only variant of roadmap 16's cloud-init with the token, plane URL, and
+    A hostd-only variant of roadmap 12's cloud-init with the token, plane URL, and
     arch templated in at create time.
   </Task>
   <Task title="Add the admin verbs">
@@ -246,13 +246,13 @@ revoked on delete.
     table-tested, with `E` at the provider-SDK boundary per the error reference.
   </Task>
   <Task title="Instrument and wire the metrics stack">
-    `prometheus/client_golang` on plane and workerd, Caddy-restricted `/metrics`
+    `prometheus/client_golang` on plane and hostd, Caddy-restricted `/metrics`
     exposure, Grafana Cloud scrape, `hack/dashboard.json`, and the two alerts.
   </Task>
   <Task title="Trace the create path with OpenTelemetry">
     `go.opentelemetry.io/otel` spans from API accept through placement, the worker
     create call, and guest-ready, with W3C traceparent propagated over the
-    plane→workerd HTTP hop; export to Grafana Cloud Tempo. One create, one trace,
+    plane→hostd HTTP hop; export to Grafana Cloud Tempo. One create, one trace,
     every hop visible — resist instrumenting anything beyond the create path.
   </Task>
   <Task title="Write the runbook">
@@ -260,14 +260,14 @@ revoked on delete.
     "the bill looks wrong" checklist.
   </Task>
   <Task title="Run a game day; write the postmortem and capacity note">
-    Induce a real outage on purpose (stop every workerd until the zero-ready-hosts
+    Induce a real outage on purpose (stop every hostd until the zero-ready-hosts
     alert pages), respond using only the runbook, then write
     `docs/reference/postmortem-001.mdx` — timeline, detection, impact, contributing
     factors, follow-ups — and a one-page capacity note: sandboxes per host before
     what limit bites first (memory? disk? conntrack?), measured not guessed, and the
     approximate cost per sandbox-hour it implies.
   </Task>
-  <Task title="Write hack/validate-18.sh">
+  <Task title="Write hack/validate-14.sh">
     The live validation from the definition of done, ending with the loud
     no-leaked-servers assertion.
   </Task>
@@ -295,8 +295,8 @@ revoked on delete.
     title="Template user-data and test it without a cloud"
     check="TestUserDataContainsTokenAndPlaneURL renders the template and finds the token, plane URL, and arch in the output — and finds no unexpanded {{ markers."
   >
-    Use `text/template` over a workerd-only derivative of roadmap 16's
-    `hack/cloud-init.yaml` (no Caddy, no plane — just workerd, its env file, ufw).
+    Use `text/template` over a hostd-only derivative of roadmap 12's
+    `hack/cloud-init.yaml` (no Caddy, no plane — just hostd, its env file, ufw).
     The variables are exactly what a host cannot invent: token, plane URL, arch.
     Keep the template as a repo file rather than a Go string so it stays reviewable
     as cloud-init. The unit test renders and asserts on substrings; add a negative
@@ -307,7 +307,7 @@ revoked on delete.
     title="host create is: mint token, insert row, then call the provider"
     check="quickspin admin host create against the fake provider leaves a hosts row carrying provider_server_id, and the fake shows one labeled server whose user-data contains the row's token."
   >
-    Order matters for crash-safety: mint the per-host token (roadmap 17's machinery),
+    Order matters for crash-safety: mint the per-host token (roadmap 13's machinery),
     insert the hosts row in a provisioning state, then `CreateServer`, then write
     `provider_server_id` back to the row. A crash after the provider call but
     before the write-back leaves a labeled server with no linked row — which is
@@ -324,7 +324,7 @@ revoked on delete.
     server-only = orphan, compare `now.Sub(server.CreatedAt)` against the grace
     window, delete + loud event only after it; row-only = vanished, mark dead
     immediately (skip the heartbeat thresholds — the server cannot come back) and
-    fail its sandboxes via roadmap 17's existing path. Return a typed action from the
+    fail its sandboxes via roadmap 13's existing path. Return a typed action from the
     pure function and let the reconciler loop execute it; side effects in the
     decision function would drag the provider into every table row. Pick the grace
     window against your measured boot time — generous (10+ minutes) is fine; the
@@ -357,8 +357,8 @@ revoked on delete.
     so a single blip doesn't page.
   </Hint>
   <Hint
-    title="Diagnosing the likely failure: validate-18 ends with a server still billing"
-    check="The final assertion of hack/validate-18.sh — the provider's quickspin-labeled server list matches the expected set exactly — passes even on a run where you made an earlier step fail deliberately."
+    title="Diagnosing the likely failure: validate-14 ends with a server still billing"
+    check="The final assertion of hack/validate-14.sh — the provider's quickspin-labeled server list matches the expected set exactly — passes even on a run where you made an earlier step fail deliberately."
   >
     Structure the script so cleanup is unconditional: a shell `trap ... EXIT` that
     lists labeled servers and deletes stragglers, with the final assertion still
@@ -385,11 +385,11 @@ Unit tests with the fake provider (`make test`):
 - `TestDeleteRefusesUndrainedHost` and `--force` path destroys sandboxes first.
 - `TestUserDataContainsTokenAndPlaneURL` (templating, no live API).
 
-Live validation `hack/validate-18.sh` (spends real money — cents — and says so):
+Live validation `hack/validate-14.sh` (spends real money — cents — and says so):
 
 - `admin host create` → within a bounded window the hosts table shows a new ready
   host that came up with **zero SSH interventions**.
-- A sandbox (on whatever backend prod runs — docker until roadmap 14's cutover) is
+- A sandbox (on whatever backend prod runs — docker until roadmap 17's cutover) is
   placed on the new host and passes exec/files.
 - Drain → placement avoids it; delete → Hetzner API confirms the server is gone and
   the token is revoked. Final assertion: provider server list contains exactly the
@@ -398,7 +398,7 @@ Live validation `hack/validate-18.sh` (spends real money — cents — and says 
   create-to-ready histogram observed the new host's sandbox.
 - Traces: a create issued during the run appears in Tempo as one trace whose spans
   cover API accept → placement → worker create → guest-ready, across both processes.
-- Alert check (once, manually acknowledged in closing notes): stop all workerds and
+- Alert check (once, manually acknowledged in closing notes): stop all hostds and
   confirm the zero-ready-hosts alert fires in Grafana.
 
 Written artifacts exist and are linked from `docs/index.mdx`:

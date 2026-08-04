@@ -1,10 +1,10 @@
-# 20 — EC2 and DigitalOcean providers for Firecracker pools
+# 18 — EC2 and DigitalOcean providers for Firecracker pools
 
-Depends on: 14, 19 (the Firecracker guest artifacts from 14 are what these hosts run).
+Depends on: 17, 15 (the Firecracker guest artifacts from 17 are what these hosts run).
 
 ## Summary
 
-Fill the provider registry: implement roadmap 18's `Provider` interface twice more —
+Fill the provider registry: implement roadmap 14's `Provider` interface twice more —
 `internal/provider/ec2` over the AWS SDK and `internal/provider/digitalocean` over
 godo — so a Firecracker pool can be realized on either cloud with
 `quickspin admin pool create --provider ec2|digitalocean`. The roadmap's second
@@ -52,14 +52,14 @@ implementation detail of DO's platform rather than a documented guarantee.
   clouds.
 - Virtualization capability as a placement-time constraint: which instance shapes
   have `/dev/kvm`, checking it at pool create (static shape knowledge) and at host
-  join (a workerd preflight that reports the truth).
+  join (a hostd preflight that reports the truth).
 - Cost-tiered validation: structuring live tests so the cheap cloud runs routinely
   and the expensive one (`*.metal` at dollars per hour) runs rarely, deliberately,
   and with a teardown trap that cannot be skipped.
 
 ### Concept: the interface is portable; the semantics need proving
 
-Roadmap 18's `Provider` looks trivially portable — create, list, delete — but each verb
+Roadmap 14's `Provider` looks trivially portable — create, list, delete — but each verb
 hides a per-cloud judgment call, and the conformance suite exists to pin them:
 
 | Contract clause | Hetzner | EC2 | DigitalOcean |
@@ -75,7 +75,7 @@ The EC2 rows carry the two classic traps. Terminated instances remaining in
 corpses as orphans forever — the state filter is part of the *contract* ("list
 returns ours **and alive**"), so the conformance suite asserts it via the fake, and
 the EC2 adapter must implement it to pass. And tags applied in a second API call
-instead of atomically in `RunInstances` reintroduces roadmap 18's crash window where a
+instead of atomically in `RunInstances` reintroduces roadmap 14's crash window where a
 server exists that no reaper can ever find.
 
 <Mermaid
@@ -101,7 +101,7 @@ nested virt in practice — it works and is widely used, but it is undocumented
 behavior you re-verify rather than assume. That asymmetry produces the roadmap's
 two-layer defense. At `pool create`, a static table rejects shapes known not to
 carry KVM (`t3.micro` for a firecracker pool fails immediately with a message naming
-the constraint). At host join, workerd's registration payload gains a `kvm: bool`
+the constraint). At host join, hostd's registration payload gains a `kvm: bool`
 preflight (`test -c /dev/kvm` equivalent in Go) — the truth from the machine itself,
 which catches everything the static table cannot know, including DO quietly changing
 its platform someday. A firecracker-pool host registering with `kvm: false` goes
@@ -116,7 +116,7 @@ flowchart TD
     S -- "ec2 *.metal" --> OK["pool created"]
     S -- "digitalocean" --> WN["allowed, with a warning naming<br/>the undocumented nested-virt dependency"]
     WN --> OK
-    OK --> B["server boots; workerd preflight<br/>stats /dev/kvm on the machine itself"]
+    OK --> B["server boots; hostd preflight<br/>stats /dev/kvm on the machine itself"]
     B --> J{"kvm field in the<br/>register payload?"}
     J -- "true" --> RD["ready — placement may use it"]
     J -- "false" --> DG["degraded — registered,<br/>never placed on"]
@@ -143,7 +143,7 @@ flowchart TD
 
 ## Design and interfaces
 
-No new interface — both adapters implement roadmap 18's `internal/provider.Provider`
+No new interface — both adapters implement roadmap 14's `internal/provider.Provider`
 unchanged, which is the point. New surface:
 
 ```go
@@ -160,18 +160,18 @@ internal/provider/ec2:  aws-sdk-go-v2; RunInstances with TagSpecifications +
 internal/provider/digitalocean: godo; Droplets.Create with Tags + UserData;
   Droplets.ListByTag; Droplets.Delete with 404→nil.
 
-Registry (roadmap 19's main): providers registered only when credentials are present
+Registry (roadmap 15's main): providers registered only when credentials are present
   (AWS default chain; DIGITALOCEAN_TOKEN). Absent credentials ⇒ absent registry
-  entry ⇒ pools naming it show degraded, per roadmap 19.
+  entry ⇒ pools naming it show degraded, per roadmap 15.
 
 KVM constraint:
   pool create: static shape check per provider (ec2: *.metal only for backend
     firecracker; digitalocean: allowed with a warning naming the undocumented
-    dependency; hetzner: allowed, established in roadmap 16).
-  host join: registration payload gains kvm bool from a workerd preflight;
+    dependency; hetzner: allowed, established in roadmap 12).
+  host join: registration payload gains kvm bool from a hostd preflight;
     firecracker-pool host with kvm=false ⇒ degraded, never placed.
 
-Cloud-init: roadmap 18's template reused verbatim — both clouds execute standard
+Cloud-init: roadmap 14's template reused verbatim — both clouds execute standard
   cloud-init user-data; only the delivery encoding differs, inside each adapter.
 ```
 
@@ -187,7 +187,7 @@ the pool-create warning text itself, not only in this roadmap.
 <TaskList>
   <Task title="Write the conformance suite against the fake">
     `RunConformance` covering create-in-list, ours-only+alive list, labels at birth,
-    idempotent delete, and user-data round-trip; the roadmap 18 fake and hetzner
+    idempotent delete, and user-data round-trip; the roadmap 14 fake and hetzner
     provider pass it unchanged — or the suite found a real bug.
   </Task>
   <Task title="Implement the DigitalOcean provider">
@@ -204,9 +204,9 @@ the pool-create warning text itself, not only in this roadmap.
   </Task>
   <Task title="Wire credentials-gated registration into main">
     Registry entries appear only with credentials; `admin pool list` shows degraded
-    pools for missing providers (roadmap 19 behavior, now with three real entries).
+    pools for missing providers (roadmap 15 behavior, now with three real entries).
   </Task>
-  <Task title="Write hack/validate-20.sh">
+  <Task title="Write hack/validate-18.sh">
     The DO-tier live validation from the definition of done; the EC2 metal run is a
     separate documented manual procedure, not part of the script.
   </Task>
@@ -216,10 +216,10 @@ the pool-create warning text itself, not only in this roadmap.
 
 <HintSteps>
   <Hint
-    title="Extract the conformance suite from what roadmap 18 already asserts"
+    title="Extract the conformance suite from what roadmap 14 already asserts"
     check="RunConformance passes against the fake and the hetzner provider with no changes to either — or fails on a real divergence worth fixing first."
   >
-    Start by reading roadmap 18's fake-provider contract test and generalizing it into
+    Start by reading roadmap 14's fake-provider contract test and generalizing it into
     a function taking `provider.Provider`. Add the clause the fake probably missed:
     list must not return deleted servers (delete one, list, assert absence) — this
     is the clause EC2's terminated-instance lingering will trip if unhandled. Run it
@@ -236,7 +236,7 @@ the pool-create warning text itself, not only in this roadmap.
     `Droplets.ListByTag`, `Droplets.Delete` mapping 404 to nil. User-data goes in
     `UserData` as a plain string. The teardown trap: `t.Cleanup` that lists by tag
     and deletes anything remaining, but still fails the test if it found anything —
-    roadmap 18's mop-loudly rule.
+    roadmap 14's mop-loudly rule.
   </Hint>
   <Hint
     title="EC2: one RunInstances call, tags inside it, states filtered out"
@@ -252,12 +252,12 @@ the pool-create warning text itself, not only in this roadmap.
     exactly one instance or it is an `E`-wrapped internal error.
   </Hint>
   <Hint
-    title="The KVM preflight is five lines in workerd and one field in a DTO"
-    check="A firecracker-pool workerd on a machine without /dev/kvm registers, shows degraded in host list, and receives no placements; a docker-pool host on the same machine is unaffected."
+    title="The KVM preflight is five lines in hostd and one field in a DTO"
+    check="A firecracker-pool hostd on a machine without /dev/kvm registers, shows degraded in host list, and receives no placements; a docker-pool host on the same machine is unaffected."
   >
-    In workerd: `os.Stat("/dev/kvm")` and a char-device check, reported as `kvm`
+    In hostd: `os.Stat("/dev/kvm")` and a char-device check, reported as `kvm`
     in the register payload. On the plane: the degraded decision is a pure function
-    of (pool backend, host claims) — extend roadmap 17's registration handler, add the
+    of (pool backend, host claims) — extend roadmap 13's registration handler, add the
     state, and make placement's filter exclude it. The static shape table lives in
     each provider package (it is cloud knowledge), consulted by `pool create`
     validation with a typed error naming shape and constraint.
@@ -307,7 +307,7 @@ Gated live tests:
   (contract semantics need no KVM); zero tagged instances remain outside the
   lingering-terminated window, which the final assertion filters by state.
 
-Integration `hack/validate-20.sh` (spends cents on DO, says so):
+Integration `hack/validate-18.sh` (spends cents on DO, says so):
 
 - `admin pool create --provider digitalocean` + `scale --target 1` → a real droplet
   boots via cloud-init, self-joins with `kvm: true`, turns ready with zero SSH.
@@ -330,7 +330,7 @@ atop the registry + conformance seam. The honest tradeoff to sit with: this road
 Firecracker-on-EC2 story costs metal-instance money, which is exactly why the
 industry runs high-density fleets on metal rather than one microVM per small
 instance — density is the economic argument for Firecracker, and your latency table
-from roadmap 14 plus this roadmap's per-hour prices are the two numbers that argument
+from roadmap 17 plus this roadmap's per-hour prices are the two numbers that argument
 needs. DigitalOcean's undocumented nested virt is the opposite tradeoff: cheap and
 real, but a platform dependency no SLA backs — acceptable for a development fleet,
 explicitly unacceptable for a production provider.

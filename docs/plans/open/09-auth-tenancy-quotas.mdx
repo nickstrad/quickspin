@@ -1,4 +1,4 @@
-# 08 — API keys, tenants, and quotas
+# 09 — API keys, tenants, and quotas
 
 Depends on: 06 (07 recommended first).
 
@@ -207,10 +207,10 @@ handlers below it never see the raw key. Requested TTLs clamp to the tenant cap.
   </Task>
   <Task title="Write the threat model">
     `docs/reference/threat-model.mdx`, one page: assets, trust boundaries, what roadmaps
-    02–08 defend, what they explicitly do not (plane→guest link, host escape, egress).
+    02–09 defend, what they explicitly do not (plane→guest link, host escape, egress).
   </Task>
   <Task title="Write the tests and validation script">
-    The unit and API tests plus `hack/validate-08.sh` from Definition of done.
+    The unit and API tests plus `hack/validate-09.sh` from Definition of done.
   </Task>
 </TaskList>
 
@@ -284,7 +284,7 @@ handlers below it never see the raw key. Requested TTLs clamp to the tenant cap.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: the quota race admits more than the cap"
-    check="TestQuotaRaceOnlyAdmitsCap passes repeatedly (run with go test -race -count=10), and hack/validate-08.sh's log grep finds no raw key."
+    check="TestQuotaRaceOnlyAdmitsCap passes repeatedly (run with go test -race -count=10), and hack/validate-09.sh's log grep finds no raw key."
   >
     If N concurrent creates admit more than M, the count and insert are not atomic:
     the classic causes are counting outside the transaction, a read (deferred)
@@ -292,7 +292,7 @@ handlers below it never see the raw key. Requested TTLs clamp to the tenant cap.
     two transactions both read the old count — or checking quota before the
     middleware/handler retry re-runs the insert. Fix by making the transaction a
     write from the start or using the guarded-insert shape, then re-run the test with
-    `-count=10`; a race that passes once proves nothing. If the `validate-08.sh` grep
+    `-count=10`; a race that passes once proves nothing. If the `validate-09.sh` grep
     finds a raw key in the logs, the usual leak is a request-logging middleware
     printing the `Authorization` header — redact at the logging layer, not by hoping
     handlers stay quiet.
@@ -313,7 +313,7 @@ API tests with fake runtime (`make test`):
 - `TestQuotaExceededIs429WithCode`
 - `TestTTLClampedToTenantMax`
 
-Validation `hack/validate-08.sh`: mints two tenants' keys via the admin CLI, drives the
+Validation `hack/validate-09.sh`: mints two tenants' keys via the admin CLI, drives the
 real service proving isolation (tenant B cannot see or destroy tenant A's sandbox) and
 quota enforcement, and greps the server logs to prove no raw key was ever logged.
 

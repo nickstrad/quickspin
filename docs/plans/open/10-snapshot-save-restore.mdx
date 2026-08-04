@@ -1,4 +1,4 @@
-# 11 — Save, restore, and warm starts
+# 10 — Save, restore, and warm starts
 
 Depends on: 07 (06's reconciler assumed).
 
@@ -25,7 +25,7 @@ Your Docker-commit version preserves **filesystem only, not memory or running
 processes** — a real and useful capability (an agent's installed deps and written code
 survive), but a different promise than E2B's, and the roadmap requires naming that
 difference in your API docs rather than blurring it. Filesystem-vs-memory snapshotting
-is precisely the boundary where microVMs earn their keep, which sets up roadmap 14.
+is precisely the boundary where microVMs earn their keep, which sets up roadmap 17.
 
 ## Key concepts
 
@@ -175,22 +175,23 @@ quota; guest binary is re-injected on restore so snapshots never bake in a stale
   </Task>
   <Task title="Add schema, endpoints, scoping, and quota">
     The `snapshots` table, the three endpoints, tenant scoping, and the admission-time
-    byte quota in the style of roadmap 08.
+    byte quota in the style of roadmap 09.
   </Task>
   <Task title="Add snapshot GC to the reconciler">
     Unreferenced or over-quota snapshot images get garbage-collected by the roadmap 06
     loop.
   </Task>
-  <Task title="Extend both SDKs">
-    Generated additions: `sbx.save(name)`, `Sandbox.create({snapshot})`, and
-    `snapshots.list/delete` in TypeScript and Python.
+  <Task title="Extend the API and CLI">
+    `POST /v1/sandboxes/{id}/save`, `snapshot` in the create spec, and
+    `snapshots list/delete` verbs; the SDKs pick these up when they arrive in
+    roadmaps 22–23.
   </Task>
   <Task title="Write hack/bench-11.sh">
     20 iterations each of cold create vs snapshot create (with a heavyweight setup
     step, e.g. `pip install` of a few packages), reporting p50/p95 per phase to a CSV
     checked into the closing notes. The p50/p95 table and the method behind it also
     land in `docs/reference/demo-latency.mdx` — the single durable benchmark doc that
-    roadmap 12 extends with per-step agent timing and roadmap 14 with Firecracker boot
+    roadmap 24 extends with per-step agent timing and roadmap 17 with Firecracker boot
     numbers, so every latency claim the project makes lives on one page.
   </Task>
 </TaskList>
@@ -348,7 +349,7 @@ that silently consumes disk forever; commercial platforms meter and bill it, you
   >
     The technology behind the memory-inclusive snapshots E2B offers — reading it makes
     the filesystem-vs-memory promise in this roadmap's API docs concrete, and sets up
-    roadmap 14.
+    roadmap 17.
   </Resource>
   <Resource
     kind="video"

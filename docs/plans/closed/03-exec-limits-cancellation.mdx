@@ -86,7 +86,7 @@ guest-side concern the VMM API cannot set). A Kata pod expresses memory and frac
 CPU as Kubernetes resource limits, but has no standard pod-level field for a process
 count — `podPidsLimit` is a kubelet node setting. So validation is not one shared pure
 function: `validateSpec` checks that values are *sane*, and each backend additionally
-rejects the fields it cannot honor. Roadmaps 14 and 21 inherit that obligation.
+rejects the fields it cannot honor. Roadmaps 17 and 21 inherit that obligation.
 
 ### Concept: cancellation must cross the wire
 
@@ -105,7 +105,7 @@ timeout path is the same machinery with `context.WithTimeout` upstream, translat
 That machinery has a Docker-shaped lifetime; the behavior it produces does not. The
 kill-by-second-exec dance exists because Docker's API offers no handle on the exec'd
 process — roadmap 07's guest agent supervises its own children in their own pid namespace
-and kills them directly, and roadmaps 14 and 21 inherit that path rather than rebuilding
+and kills them directly, and roadmaps 17 and 21 inherit that path rather than rebuilding
 this one. What is permanent is the contract: cancellation kills the process, the call
 does not return before the reap, and a deadline is distinguishable from a plain cancel
 via `errors.Is`. Build the Docker version knowing it is scaffolding for the contract,
@@ -219,7 +219,7 @@ roadmap (07) so it is built once, in the right place.
 Committed decision: `AllowNetwork: false` means **no egress**, not "no network
 interface" — even though this roadmap implements it with Docker's `none` network, which
 happens to deliver both. The distinction matters one roadmap later. Roadmap 07 moves exec and
-files onto a guest agent the plane reaches over the network, and roadmap 21's Kata pods
+files onto a guest agent the plane reaches over the network, and roadmap 19's Kata pods
 always receive a pod IP; an interface-less sandbox and a reachable guest agent are
 mutually exclusive there. Fixing the *meaning* now keeps three backends from
 implementing three different flags: later backends satisfy it with a filter — firewall

@@ -207,8 +207,8 @@ Committed decisions:
   toward a desired value ("desired running, observed failed → retry"), which
   the current state machine deliberately treats as terminal. A separate
   `desired_state` column becomes worth adding when something needs that retry
-  loop (a restart/redeploy feature, or roadmap 17's worker-driven retries),
-  ideally before roadmap 15's Postgres migration so the column rides along.
+  loop (a restart/redeploy feature, or roadmap 13's worker-driven retries),
+  ideally before roadmap 11's Postgres migration so the column rides along.
 - The what-to-do branching is a pure function, straight from the code-structure
   reference: `decideReconcileAction(desired *SandboxRecord, observed *runtime.Info,
   now time.Time) ReconcileAction`. Every (desired, observed) pairing — including both
