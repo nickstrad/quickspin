@@ -1,7 +1,14 @@
-# 19 — Deep dive: a Kubernetes + Kata Containers backend
+# 27 — Deep dive: a Kubernetes + Kata Containers backend
 
-Depends on: 07, 15 (tasks 1–4 need only 07 and can run in parallel with 11–18;
+Depends on: 07, 16 (tasks 1–4 need only 07 and can run in parallel with 09–19;
 the pool integration in tasks 5–6 needs 19).
+
+This is an **optional deep dive**, alongside 25 and 26 — not part of the core arc,
+whose isolation upgrade is gVisor in roadmap 18 (gVisor). Two reasons it sits at the
+tail: it is the most expensive plan in the set (a managed cluster plus Kata-capable
+nodes, billed while it exists), and the affordable way to run it — single-node k3s —
+undercuts the delegation lesson that is its whole point, since a scheduler with one
+node to choose from is not the scheduler you are trying to learn to submit intent to.
 
 ## Summary
 
@@ -30,7 +37,7 @@ shrinks to "is the cluster reachable and does it admit kata pods."
 Kata is the industry's answer to "I want Kubernetes economics with VM isolation":
 an OCI runtime where each pod gets its own guest kernel under a lightweight VMM
 (QEMU by default, Firecracker as an option — the same VMM you drove by hand in roadmap
-17, one layer down the stack). Kubernetes selects it per-pod through the
+26, one layer down the stack). Kubernetes selects it per-pod through the
 RuntimeClass mechanism — the CRI generalization this project has been echoing since
 roadmap 02. Commercially this is the "bring your own cluster" deployment shape:
 platforms run sandbox workloads inside customers' or managed Kubernetes (AKS ships
@@ -41,7 +48,7 @@ and a capacity model that is a black box with knobs — which is exactly why thi
 roadmap's pool kind *delegates* instead of pretending to manage.
 
 <Compare>
-  <CompareItem eyebrow="Roadmaps 17, 20" title="You are the scheduler">
+  <CompareItem eyebrow="Roadmaps 13, 18" title="You are the scheduler">
     The plane picks a host, reserves a slot transactionally, and supervises a
     process. Total control, total responsibility — every crash branch in roadmaps
     13–14 is yours.
@@ -132,7 +139,7 @@ version of roadmap 13's full host); `ImagePullBackOff` inside container statuses
     <line x1="540" y1="72" x2="430" y2="118" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow21)" />
     <line x1="410" y1="158" x2="448" y2="158" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow21)" />
     <path d="M 530 196 L 530 222 L 85 222 L 85 76" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow21g)" />
-    <text x="300" y="214" textAnchor="middle" fontSize="10" fill="#7f5d43">GET /healthz on the pod IP — running means the guest answered, same as roadmaps 07/17</text>
+    <text x="300" y="214" textAnchor="middle" fontSize="10" fill="#7f5d43">GET /healthz on the pod IP — running means the guest answered, same as roadmaps 07/26</text>
   </svg>
 </Figure>
 
@@ -166,7 +173,7 @@ API object creation as enforcement.
 
 ### Concept: a kubernetes pool has no target size, and that is the design
 
-Roadmap 15's `PoolKind` split exists for this moment. A `kubernetes` pool row carries a
+Roadmap 16's `PoolKind` split exists for this moment. A `kubernetes` pool row carries a
 kubeconfig reference and a namespace instead of a provider and target size; `pool
 scale` on it returns the typed refusal (like `external` pools), because the honest
 scaling story is the one you named at the start: twist the node-pool knobs in the
@@ -180,7 +187,7 @@ is the backpressure signal, translated to `no_capacity` after a bounded pending
 window rather than modeled in advance.
 
 <Mermaid
-  caption="Pool create's admission test is a real kata pod through the backend's own Create/Destroy, and the pool row is written only after the smoke passes — the inverse of roadmap 14's row-first ordering, because here the remote resource is disposable and the row is the commitment."
+  caption="Pool create's admission test is a real kata pod through the backend's own Create/Destroy, and the pool row is written only after the smoke passes — the inverse of roadmap 15's row-first ordering, because here the remote resource is disposable and the row is the commitment."
   code={`
 sequenceDiagram
     participant O as operator
@@ -215,9 +222,9 @@ sequenceDiagram
 
 <Callout tone="warning" title="Kata needs virtualization on the nodes">
   Kata's VMM needs `/dev/kvm` on each node, so the cluster's nodes have the same
-  constraint as roadmap 18's hosts: bare-metal nodes, or VMs with nested
+  constraint as roadmap 19's hosts: bare-metal nodes, or VMs with nested
   virtualization. The committed lab environment is a single-node k3s on a
-  DigitalOcean droplet (nested virt per roadmap 18's finding) with kata installed via
+  DigitalOcean droplet (nested virt per roadmap 19's finding) with kata installed via
   kata-deploy; a managed cluster with kata support is an alternative if you accept
   its cost. Verify with a kata smoke pod comparing `uname -r` against the node
   kernel before writing any Go — if they match, kata is not actually engaged and
@@ -307,12 +314,12 @@ traffic is not sufficient.
     the boundary, and the pending-window timeout on create.
   </Task>
   <Task title="Add the kubernetes pool kind">
-    Roadmap 15 schema variant, scale refusal, reachability probe, and the smoke pod on
+    Roadmap 16 schema variant, scale refusal, reachability probe, and the smoke pod on
     pool create; the smoke must reach its guest while its outbound probe is denied.
   </Task>
   <Task title="Route backend kata through the stack and validate">
     Spec validation, placement's elastic-pool path, one SDK field value, and
-    `hack/validate-19.sh` covering both `AllowNetwork` values.
+    `hack/validate-27.sh` covering both `AllowNetwork` values.
   </Task>
 </TaskList>
 
@@ -394,13 +401,13 @@ traffic is not sufficient.
     ordinary orphan sweep. Use `AllowNetwork: false`, reach `/healthz`, then execute
     an outbound probe through the guest and require that it fail; this proves guest
     reachability and egress isolation coexist. Order matters for crash-safety: smoke
-    resources first, pool row only on success — the inverse of roadmap 14's row-first
+    resources first, pool row only on success — the inverse of roadmap 15's row-first
     ordering, because here the external resources are disposable and the row is the
     commitment.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: created pods stick in Pending"
-    check="hack/validate-19.sh's negative path — a pod requesting impossible resources — surfaces as typed no_capacity within the pending window, with the pod cleaned up."
+    check="hack/validate-27.sh's negative path — a pod requesting impossible resources — surfaces as typed no_capacity within the pending window, with the pod cleaned up."
   >
     `kubectl describe pod` is the oracle: an Unschedulable event names the reason
     (no kata nodes, insufficient memory, missing RuntimeClass). If your backend
@@ -429,7 +436,7 @@ Unit tests (`make test`, no cluster):
   sandbox selector and no allowed egress; `true` returns no Quickspin deny policy.
 - `TestKubernetesPoolRefusesScale`.
 
-Gated live tests + `hack/validate-19.sh` against the lab cluster:
+Gated live tests + `hack/validate-27.sh` against the lab cluster:
 
 - Isolation proof: `uname -r` in a sandbox differs from the node kernel.
 - Via the control plane with `"backend": "kata"`: create reaches running (guest
@@ -450,7 +457,7 @@ Gated live tests + `hack/validate-19.sh` against the lab cluster:
 Deliberately untested: multi-node clusters, informer-based watching, pod networking
 beyond the single-node reach commitment, egress allowlists, DNS filtering,
 protocol-aware policy, kata's Firecracker VMM variant (`kata-fc` — noted as the
-bridge between this roadmap and roadmap 17, left as an experiment), operators/CRDs.
+bridge between this roadmap and roadmap 26, left as an experiment), operators/CRDs.
 
 ## Solo-developer tradeoffs
 
@@ -471,7 +478,7 @@ debt that makes this roadmap honest rather than production-shaped.
     title="Kata Containers: architecture"
     href="https://github.com/kata-containers/kata-containers/blob/main/docs/design/architecture/README.md"
   >
-    The shim-to-VMM path under runtimeClassName — where roadmap 17's VMM concepts
+    The shim-to-VMM path under runtimeClassName — where roadmap 26's VMM concepts
     reappear one layer down, including the Firecracker option.
   </Resource>
   <Resource

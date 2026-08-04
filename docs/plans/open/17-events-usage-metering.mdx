@@ -1,21 +1,22 @@
-# 16 — Event enrichment and usage metering
+# 17 — Event enrichment and usage metering
 
-Depends on: 09 (tenants on every record); 13 recommended first (the `actor` field and
+Depends on: 11 (tenants on every record); 13 recommended first (the `actor` field and
 host attribution earn their place once placement exists). 07's `generation` column
 assumed.
 
 ## Summary
 
 Make the event log carry its full story, then build the pipeline that turns it into
-money-shaped numbers. Part one enriches the `events` table roadmap 06 created:
+measured quantities. Part one enriches the `events` table roadmap 06 created:
 structured reason codes, an `actor` column (api, reconciler, reaper, scheduler,
 admin), `tenant_id`, and the roadmap 07 `generation` — plus API and CLI surfaces for
 reading a sandbox's lifecycle history. Part two builds `internal/usage`: a usage
 processor that consumes lifecycle events through a checkpointed cursor and derives
-usage records (runtime minutes from Running→terminal intervals, billable API
-operations), daily rollup tables, and a pricing engine that turns rollups into a
-monthly invoice document per tenant. The controller never computes a price — it emits
-facts; everything downstream is derived, deletable, and rebuildable from the events.
+usage records (runtime seconds from Running→terminal intervals, billable API
+operations), exposed per tenant over the API and CLI. The roadmap ends at
+`usage_records`; rollups, pricing, and invoices are recorded as the sequel below. The
+controller never computes a quantity — it emits facts; everything downstream is
+derived, deletable, and rebuildable from the events.
 
 ## Industry context
 
@@ -23,18 +24,18 @@ Metering is a core control-plane responsibility alongside reconciliation, schedu
 and runtime management: AWS bills from usage records aggregated into the Cost and
 Usage Report, Modal and E2B meter per-second sandbox runtime, Stripe built an entire
 product line on ingesting usage events and applying pricing after the fact. The
-universal shape is the one this roadmap builds: immutable facts at the bottom, a
-processor deriving normalized usage, a pricing layer that is pure configuration, and
-aggregation tables so billing queries never scan raw events. Nobody serious computes
-invoices from live runtime state — state says what is true now; billing needs what was
-true across time, which only the event history knows.
+universal shape is the bottom of the one this roadmap builds: immutable facts at the
+bottom and a processor deriving normalized usage — with a pricing layer and
+aggregation tables above it, which this roadmap stops short of. Nobody serious
+computes usage from live runtime state — state says what is true now; metering needs
+what was true across time, which only the event history knows.
 
-<KeyPoint label="Facts flow down, money is derived">
-  events → usage processor → usage_records → daily rollups → pricing → invoice.
-  Every arrow is re-runnable: delete everything downstream of `events` and the
-  pipeline rebuilds it identically. That property — derivability — is the test of
-  whether the controller stayed a fact-emitter and the usage service stayed a pure
-  consumer.
+<KeyPoint label="Facts flow down, quantities are derived">
+  events → usage processor → usage_records. Every arrow is re-runnable: delete
+  everything downstream of `events` and the pipeline rebuilds it identically. That
+  property — derivability — is the test of whether the controller stayed a
+  fact-emitter and the usage service stayed a pure consumer, and it is testable at
+  the `usage_records` boundary without any pricing above it.
 </KeyPoint>
 
 ## Key concepts
@@ -52,8 +53,6 @@ true across time, which only the event history knows.
 - Facts versus derived state, again: roadmap 06 taught events-versus-row; this roadmap
   adds the second derivation layer and the discipline that derived tables are caches,
   never sources.
-- Aggregation as a query-shape decision: rollup tables exist because "this month's
-  invoice" must not scan every event ever written.
 
 ### Concept: billable time is an interval query over an append-only log
 
@@ -70,14 +69,14 @@ same clock second still have a total order, which is why the generation column w
 worth adding before the billing code that needs it.
 
 <Mermaid
-  caption="The pipeline as data flow. The controller only appends events; each downstream stage reads the previous one and is idempotent, so any stage can be wiped and re-derived."
+  caption="The pipeline as data flow, ending where this roadmap ends. The controller only appends events; each downstream stage reads the previous one and is idempotent, so any stage can be wiped and re-derived. The dashed stages are the recorded sequel."
   code={`
 flowchart LR
     A["events\n(immutable facts)"] --> B["usage processor\n(checkpointed cursor)"]
-    B --> C["usage_records\n(runtime minutes, ops)"]
-    C --> D["usage_daily\n(per-tenant rollups)"]
-    D --> E["pricing engine\n(static price list)"]
-    E --> F["invoice\n(monthly, per tenant)"]
+    B --> C["usage_records\n(runtime seconds, ops)"]
+    C -.-> D["usage_daily\n(per-tenant rollups)"]
+    D -.-> E["pricing engine\n(static price list)"]
+    E -.-> F["invoice\n(monthly, per tenant)"]
 `}
 />
 
@@ -93,16 +92,6 @@ interval start generation, metric), so the second processing attempt upserts the
 row instead of inserting a sibling. `TestUsageProcessorIsIdempotent` reprocesses the
 whole log from generation zero and asserts totals do not change; if that test needs
 special-case code to pass, the record keys are wrong.
-
-### Concept: pricing is configuration, so invoices are a pure function
-
-Everything upstream of the pricing engine is measurement; the engine itself is
-multiplication. Keeping it a pure function — `invoice(rollups, priceList) Invoice` —
-means price changes never touch the pipeline, currency rounding lives in exactly one
-place (integer cents, half-up, documented), and the invoice test is a table: rollups
-in, line items out. The temptation to let the processor "just apply the rate while
-it's there" recreates the coupling this roadmap exists to teach against: a rate change
-would then rewrite historical usage, and usage is supposed to be a fact.
 
 ## Design and interfaces
 
@@ -120,14 +109,12 @@ usage schema (new, internal/usage owns it):
                 period_end, source_generation, UNIQUE(sandbox_id, metric,
                 source_generation))
   usage_checkpoints(consumer, last_event_id)
-  usage_daily(tenant_id, day, metric, quantity, PRIMARY KEY(tenant_id, day, metric))
 
 API / CLI:
   GET /v1/sandboxes/{id}/events           now returns actor, reason, generation
-  GET /v1/usage?from=&to=                 tenant-scoped daily rollups
+  GET /v1/usage?from=&to=                 tenant-scoped usage records, summed by metric
   quickspin events <sandbox>              lifecycle history, human-readable
   quickspin admin usage show --tenant --month
-  quickspin admin invoice generate --tenant --month   → JSON (and rendered text)
 ```
 
 Committed decisions:
@@ -144,12 +131,15 @@ Committed decisions:
 - Billable API operations (create, exec, upload, download) are metered from events,
   which means those operations must emit events where they do not yet — the audit
   that closes that gap is part one's real work, not a side effect.
-- Invoices are documents (JSON plus rendered text), not payment integrations. Prices
-  live in a versioned file loaded at startup; the invoice records which price-list
-  version it used.
-- Money is integer cents end to end; floats never touch a quantity after the
-  runtime-seconds division, and that division's rounding rule (round up to the next
-  second, like every cloud) is a documented, tested decision.
+- The pipeline stops at `usage_records`: no rollup tables, no price list, no invoice
+  document. With one tenant, aggregation is a query-shape optimization for volume that
+  does not exist and pricing is a rate nobody charges — both are recorded as the sequel
+  below, and the derivability test that justifies the architecture already runs at this
+  boundary.
+- Quantities are integers end to end; floats never touch a quantity, and the
+  runtime-seconds rounding rule (round up to the next second, like every cloud) is a
+  documented, tested decision made here rather than deferred to whatever prices it
+  later.
 
 <Callout tone="warning" title="Do not meter from the sandboxes table">
   The row knows what is true now; it has already forgotten the three restarts this
@@ -174,17 +164,14 @@ Committed decisions:
     `internal/usage`: cursor over events, interval derivation for runtime seconds,
     operation counting, idempotent upserts keyed on deterministic record identity.
   </Task>
-  <Task title="Add daily rollups">
-    A rollup pass folding usage_records into usage_daily, idempotent per (tenant,
-    day, metric), plus `GET /v1/usage` serving from rollups only.
-  </Task>
-  <Task title="Write the pricing engine and invoice generation">
-    A pure `invoice(rollups, priceList)` function, the versioned price-list file, and
-    `quickspin admin invoice generate` emitting JSON + rendered text.
+  <Task title="Expose usage per tenant">
+    `GET /v1/usage?from=&to=` summing usage_records by metric for the caller's tenant,
+    plus `quickspin admin usage show --tenant --month`.
   </Task>
   <Task title="Validate the pipeline end to end">
-    `hack/validate-16.sh`: drive a sandbox through create/exec/stop, run the
-    processor, assert the invoice contains the expected runtime and operation lines.
+    `hack/validate-17.sh`: drive a sandbox through create/exec/stop, run the
+    processor, assert the usage records carry the expected runtime and operation
+    quantities, then wipe and replay for identical totals.
   </Task>
 </TaskList>
 
@@ -223,34 +210,14 @@ Committed decisions:
     source_generation)` pins a record to the event that opened it.
   </Hint>
   <Hint
-    title="Rollups are a second idempotent derivation, not a trigger"
-    check="TestDailyRollupMatchesRawRecords passes, and rerunning the rollup pass changes nothing."
-  >
-    Recompute each affected (tenant, day, metric) from usage_records with
-    `INSERT ... ON CONFLICT DO UPDATE` — full recompute per key, not incremental
-    addition, so replays converge instead of accumulating. Day boundaries in UTC,
-    stated in the docs; timezone choices are billing policy, and policy is written
-    down.
-  </Hint>
-  <Hint
-    title="Keep the pricing engine embarrassingly simple"
-    check="TestInvoiceTotalsMatchPriceList is a pure table test: rollups + price list in, line items and total out, integer cents everywhere."
-  >
-    A price list struct loaded from a versioned file, one function producing line
-    items, `math/big` unnecessary — int64 cents with explicit rounding at the
-    seconds→minutes edge only. Stamp the price-list version into the invoice; a
-    regenerated invoice for a closed month must reproduce byte-identical totals.
-  </Hint>
-  <Hint
     title="Diagnosing the likely failure: totals drift on replay"
-    check="hack/validate-16.sh wipes usage_records, usage_daily, and the checkpoint, reruns the processor from generation zero, and the regenerated invoice matches the original exactly."
+    check="hack/validate-17.sh wipes usage_records and the checkpoint, reruns the processor from generation zero, and the per-metric totals match the originals exactly."
   >
-    If replay changes totals, the bug is one of three: a record key that includes
-    something non-deterministic (a timestamp taken at processing time), an open
+    If replay changes totals, the bug is usually one of two: a record key that includes
+    something non-deterministic (a timestamp taken at processing time), or an open
     interval that was extended by insert instead of upsert (look for two rows per
-    running span), or rollups added incrementally instead of recomputed. The wipe-
-    and-replay check in the validate script is the pipeline's own conformance test —
-    run it after every processor change.
+    running span). The wipe-and-replay check in the validate script is the pipeline's
+    own conformance test — run it after every processor change.
   </Hint>
 </HintSteps>
 
@@ -262,22 +229,20 @@ Unit tests (`make test`):
   interval, restart pattern.
 - `TestUsageProcessorIsIdempotent` — replay from a stale checkpoint changes no
   totals.
-- `TestDailyRollupMatchesRawRecords` — rollups equal a direct aggregation, rerun
-  changes nothing.
-- `TestInvoiceTotalsMatchPriceList` — pure table test, integer cents.
 - `TestEventsCarryActorAndReason` — every emission site sets both; unknown reason
   codes fail closed.
 
-Integration (`hack/validate-16.sh`, Lima):
+Integration (`hack/validate-17.sh`, Lima):
 
-- A driven lifecycle (create, exec, sleep, stop) yields an invoice whose runtime line
-  matches the slept duration within one rounding unit and whose operation lines match
-  the exact call counts.
-- Wipe-and-replay: derived tables and checkpoint deleted, processor rerun, invoice
-  regenerated byte-identical.
+- A driven lifecycle (create, exec, sleep, stop) yields usage records whose runtime
+  quantity matches the slept duration within one rounding unit and whose operation
+  quantities match the exact call counts.
+- Wipe-and-replay: usage_records and checkpoint deleted, processor rerun from
+  generation zero, `GET /v1/usage` returns identical totals.
 
-Deliberately untested and deliberately absent: payment processing; resource-seconds
-(CPU-seconds, GB-seconds) — the usage-snapshot path is recorded as the extension for
+Deliberately untested and deliberately absent: rollups, pricing, and invoices (the
+recorded sequel below); payment processing; resource-seconds (CPU-seconds,
+GB-seconds) — the usage-snapshot path is recorded as the extension for
 when a runtime exposes cgroup stats; periodic metering ticks and explicit
 UsageStarted/UsageStopped events — both noted as the resilient-at-scale alternatives
 this scale does not need; host-level utilization economics (infrastructure cost vs
@@ -289,12 +254,43 @@ Commercial platforms run metering as separate services on a message bus with
 periodic-tick events, because at their scale a missed Stopped event is a certainty
 and ticks bound the loss; your events are rows in the same Postgres, the processor is
 a goroutine, and the checkpoint is a row — the same concepts with the operational
-surface of one binary. Stripe would hand you rating and invoicing as a product; doing
-the pricing engine by hand is the point here, and its output is a JSON document, not
-a charge. The single-process choice is reversible by design: the package boundary and
-own-tables rule mean "extract a usage service" is a deployment change, not a rewrite
-— which is exactly the claim the package-boundaries reference makes, tested against a
-real subsystem.
+surface of one binary. They also run rating and invoicing above this line; you stop
+at measurement, because a rate applied to one tenant's usage teaches nothing the
+sequel section does not already describe. The single-process choice is reversible by
+design: the package boundary and own-tables rule mean "extract a usage service" is a
+deployment change, not a rewrite — which is exactly the claim the package-boundaries
+reference makes, tested against a real subsystem.
+
+## Recorded sequel: rollups, pricing, and invoices
+
+Billing machinery is premature for a platform with one tenant, so the three stages
+above `usage_records` are recorded here rather than built. They cost nothing to defer:
+the wipe-and-replay derivability test — the property that proves the controller stayed
+a fact-emitter — already runs at the `usage_records` boundary, so the pipeline's
+correctness story is complete without a price attached to anything.
+
+What the sequel would add, in order:
+
+- **`usage_daily(tenant_id, day, metric, quantity)`** — a second idempotent
+  derivation, not a trigger: recompute each affected `(tenant, day, metric)` from
+  usage_records with `INSERT ... ON CONFLICT DO UPDATE`, full recompute per key rather
+  than incremental addition, so replays converge instead of accumulating. Day
+  boundaries in UTC, written down, because timezone choice is billing policy. The
+  motivation is query shape — "this month's invoice" must not scan every event ever
+  written — which is a volume problem this platform does not have yet.
+- **A pricing engine as pure configuration.** Everything upstream is measurement; the
+  engine itself is multiplication. Keeping it a pure `invoice(rollups, priceList)
+  Invoice` means price changes never touch the pipeline, currency rounding lives in
+  exactly one place (integer cents, half-up, documented), and the test is a table:
+  rollups in, line items out. The temptation to let the processor "just apply the rate
+  while it's there" recreates the coupling the whole design argues against — a rate
+  change would then rewrite historical usage, and usage is supposed to be a fact.
+- **Invoices as documents** (JSON plus rendered text), not payment integrations, from
+  a versioned price-list file stamped into each invoice so a regenerated invoice for a
+  closed month reproduces byte-identical totals.
+
+The trigger for building it: a second paying tenant, or any moment a number leaves
+this system as a charge rather than a measurement.
 
 ## Go deeper
 
@@ -333,6 +329,7 @@ real subsystem.
     href="https://docs.aws.amazon.com/cur/latest/userguide/what-is-cur.html"
   >
     The industrial endpoint of the aggregation idea: normalized usage lines by the
-    billion, rolled up by dimension — what usage_daily grows into at cloud scale.
+    billion, rolled up by dimension — what the sequel's rollup table grows into at
+    cloud scale.
   </Resource>
 </Resources>

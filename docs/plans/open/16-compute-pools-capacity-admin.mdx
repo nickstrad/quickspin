@@ -1,6 +1,6 @@
-# 15 — Compute pools and the capacity admin surface
+# 16 — Compute pools and the capacity admin surface
 
-Depends on: 13, 14.
+Depends on: 13, 15.
 
 ## Summary
 
@@ -12,8 +12,8 @@ surface — `quickspin admin pool create|list|scale|delete` and
 platform. `scale` records a desired host count that the fleet reconciler realizes
 through the pool's provider; `adopt` is the "I just gave the platform more EC2
 capacity" verb — it registers a machine that was provisioned outside Quickspin
-(cloud-console knob-twisting included) so placement can use it. Roadmap 14's
-Hetzner-only fleet logic becomes the first pool rather than a special case; roadmaps 18
+(cloud-console knob-twisting included) so placement can use it. Roadmap 15's
+Hetzner-only fleet logic becomes the first pool rather than a special case; roadmaps 19
 and 21 plug new providers and a Kubernetes-shaped pool into the seams built here.
 
 <KeyPoint label="Why this roadmap matters">
@@ -58,7 +58,7 @@ it, it needs the capacity to be registered, labeled, and heartbeating.
   populated at startup, looked up by name from data — and why the registry is
   constructed in `main`, not `init()`.
 - Desired-count reconciliation: `target_size` vs observed ready hosts as one more
-  desired/actual pair for the roadmap 14 reconciler, and why scale-*down* must drain
+  desired/actual pair for the roadmap 15 reconciler, and why scale-*down* must drain
   before delete while scale-*up* is fire-and-forget.
 - Adoption as a trust decision: what the platform must verify before treating an
   unknown machine as capacity (token possession, arch/backend claims, a first
@@ -73,7 +73,7 @@ it, it needs the capacity to be registered, labeled, and heartbeating.
 
 The pools table stores intent: "pool `fc-hetzner` should have 3 ready hosts of shape
 X." Nothing about that row makes machines exist. The fleet reconciler — the same loop
-roadmap 14 built — gains one comparison per pool: count ready+provisioning hosts, compare
+roadmap 15 built — gains one comparison per pool: count ready+provisioning hosts, compare
 to `target_size`, and issue provider creates or drain-then-deletes to close the gap.
 That framing keeps `scale` trivially safe: the admin verb writes a number and returns;
 all cloud calls happen in the reconciler with its existing crash-safety, labels, and
@@ -145,7 +145,7 @@ authorized this machine, and the claims placement filters on (pool, arch, backen
 through roadmap 13's ordinary registration path. Nothing else about the machine is
 trusted or inspected — if the operator lies about the arch, the first placed sandbox
 fails loudly, which is the honest outcome. The design consequence worth writing down:
-adopted hosts have no `provider_server_id`, so the roadmap 14 fleet reconciler must treat
+adopted hosts have no `provider_server_id`, so the roadmap 15 fleet reconciler must treat
 "no server id" as *not mine to reap or scale* — the platform uses adopted capacity but
 never bills-manages it. The `external` pool provider is a registry entry whose create
 and delete return typed errors, so a misconfigured `scale` on an adopted pool fails
@@ -162,7 +162,7 @@ flowchart TD
 />
 
 <StudyPrompt question="Why does scale-down drain the fewest-loaded host instead of the oldest?">
-  Oldest-first is the cattle-rotation answer and right for *rollouts* (roadmap 14's
+  Oldest-first is the cattle-rotation answer and right for *rollouts* (roadmap 15's
   runbook). Scale-down's goal is different: shed capacity while killing as little as
   possible. Draining the fewest-loaded host strands the fewest sandboxes waiting for
   natural expiry, so the pool converges to the new target fastest. Note what both
@@ -178,7 +178,7 @@ type PoolKind string
 
 const (
     PoolKindHost       PoolKind = "host"       // hostd fleet; capacity = hosts * slots
-    PoolKindKubernetes PoolKind = "kubernetes" // roadmap 19: capacity delegated to a cluster
+    PoolKindKubernetes PoolKind = "kubernetes" // roadmap 27: capacity delegated to a cluster
 )
 
 type Pool struct {
@@ -196,7 +196,7 @@ type Pool struct {
 ```text
 Schema: pools(id, name, kind, provider, backend, arch, target_size, server_type,
         created_at); hosts gains pool_id (backfill migration assigns existing hosts
-        to a default pool wrapping roadmap 14's fleet).
+        to a default pool wrapping roadmap 15's fleet).
 
 Provider registry: map[string]provider.Provider built in main; a pool row's
         Provider field is looked up at reconcile time; unknown name ⇒ typed error,
@@ -209,7 +209,7 @@ Admin surface:
   quickspin admin pool delete --name               # refuses while hosts remain
   quickspin admin host adopt --pool --addr         # mints token, prints join command
 
-Reconciler additions (per pool, inside roadmap 14's loop):
+Reconciler additions (per pool, inside roadmap 15's loop):
   ready+provisioning < target ⇒ provider create with pool labels
   ready > target              ⇒ drain fewest-loaded, delete when drained+empty
   provider == "external"      ⇒ no provider calls ever; adoption-only pool
@@ -229,7 +229,7 @@ exactly the knob it would turn.
 <Callout tone="warning" title="The backfill migration runs against live rows">
   Adding `hosts.pool_id NOT NULL` fails on existing rows unless the migration creates
   the default pool and backfills in the same transaction. Write the migration against
-  a copy of the prod schema with rows in it — the empty-database test that roadmap 11's
+  a copy of the prod schema with rows in it — the empty-database test that roadmap 09's
   suite runs by default cannot catch a backfill bug.
 </Callout>
 
@@ -260,7 +260,7 @@ exactly the knob it would turn.
     `Spec.Pool` optional field through the API and CLI; `place` filters pool → backend →
     arch → headroom; typed `no_capacity` now names the pool it failed in.
   </Task>
-  <Task title="Write hack/validate-15.sh">
+  <Task title="Write hack/validate-16.sh">
     The live check from the definition of done, including the adopt path exercised
     with a plain Lima-side hostd as the "external machine."
   </Task>
@@ -318,7 +318,7 @@ exactly the knob it would turn.
     Reuse roadmap 13's token minting and 18's user-data template for the printed
     snippet. The row is inserted in a `provisioning`-like state with `pool_id` set
     and `provider_server_id` NULL; registration flips it ready as usual. Then audit
-    the roadmap 14 reconciler for the NULL case: an adopted host must never match the
+    the roadmap 15 reconciler for the NULL case: an adopted host must never match the
     vanished-server branch (`decideFleetAction` needs a third input state), or the
     reconciler will mark every adopted host dead on its first pass.
   </Hint>
@@ -335,12 +335,12 @@ exactly the knob it would turn.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: the reconciler over-creates during scale-up"
-    check="hack/validate-15.sh's scale-up step creates exactly target-minus-ready servers even when boots are slow, verified against the fake provider's create count."
+    check="hack/validate-16.sh's scale-up step creates exactly target-minus-ready servers even when boots are slow, verified against the fake provider's create count."
   >
     If the fake provider records more creates than the gap: either `provisioning`
     hosts aren't counted as arriving (the gap function bug), or the hosts row is
     written *after* the provider call so a crash-free but slow pass can't see its own
-    in-flight work — roadmap 14's ordering (row first, then CreateServer, then
+    in-flight work — roadmap 15's ordering (row first, then CreateServer, then
     write-back) exists precisely so the next pass sees the provisioning row. Log the
     computed gap each pass; a gap that doesn't shrink as servers boot points at the
     row-visibility ordering.
@@ -362,7 +362,7 @@ Unit tests (`make test`, fake provider, fake clock):
   `no_capacity` carries the pool name.
 - Migration test: backfill against a seeded database leaves no NULL `pool_id`.
 
-Integration `hack/validate-15.sh` (Lima, plane + hostd, fake provider for cloud
+Integration `hack/validate-16.sh` (Lima, plane + hostd, fake provider for cloud
 calls):
 
 - `pool create` + `pool scale --target 2` → fake provider shows exactly 2 labeled
@@ -382,7 +382,7 @@ where placed; pools change *future* placement only).
 
 A commercial platform's pool layer adds bin-packing across instance shapes, spot/
 preemptible mixing, capacity forecasting, and per-pool pricing — all policy atop
-these primitives. You also skip pool-level quotas (roadmap 09's tenant quotas remain
+these primitives. You also skip pool-level quotas (roadmap 11's tenant quotas remain
 global): real platforms sell "dedicated pools" as an enterprise feature, and the
 seam for it (pool as a placement filter) now exists, which is the point. The one
 deliberate strictness: `external` pools refusing provider calls. It would be easy to

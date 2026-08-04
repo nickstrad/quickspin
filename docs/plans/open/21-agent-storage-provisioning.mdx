@@ -1,13 +1,23 @@
 # 21 — Per-agent persistent storage provisioning
 
-Depends on: 05, 09, 20 (the DSN is delivered on roadmap 20's secret rail).
+Depends on: 05, 11, 20 (the DSN is delivered on roadmap 20's secret rail).
+
+<Callout tone="note" title="Removed from the active roadmap — optional tail, snapshots first">
+  Durable agent state is served first by roadmap 12's snapshots: save/restore preserves
+  the filesystem, so installed dependencies, written code, and local SQLite files
+  survive a sandbox. Brokering cloud databases is premature until a real consumer
+  outgrows that. Revisit this plan when an agent appears whose state must outlive
+  snapshots or be shared across sandboxes. One idea is worth carrying forward either
+  way: DSN-on-the-secret-rail is the test of whether roadmap 20's `Secret` abstraction
+  was right, and a fake provisioner is enough to prove it.
+</Callout>
 
 ## Summary
 
 Give agents durable state that outlives any sandbox: a `StorageProvisioner` interface
 that turns a caller-chosen storage key into a real cloud database, with two
 implementations — Turso (SQLite-compatible) and Neon (Postgres) — behind the same
-contract, proven equivalent by a shared conformance suite in the style of roadmap 18. The
+contract, proven equivalent by a shared conformance suite in the style of roadmap 19. The
 control plane wires it in: a sandbox create request may name a storage key, the plane
 ensures the database exists (idempotently), and the connection string arrives inside
 the sandbox as a roadmap 20 secret file. Storage lifecycle is deliberately independent of
@@ -34,7 +44,7 @@ creation, scale-to-zero pricing makes thousands of small databases viable — Tu
 model is the same bet). The engineering pattern under it all is the twelve-factor
 "backing services" rule: the workload receives a DSN and treats the database as an
 attached resource, so swapping Turso for Neon — or either for anything else — changes
-provisioning, never workload code. Note what this is *not*: roadmap 11's Postgres is the
+provisioning, never workload code. Note what this is *not*: roadmap 09's Postgres is the
 platform's own control-plane store; this roadmap provisions databases the platform never
 reads, owned by tenants and touched only by their workloads.
 
@@ -45,21 +55,21 @@ reads, owned by tenants and touched only by their workloads.
 - Idempotency against someone else's cloud: `Ensure` semantics, deterministic naming
   as the reconciliation key, and the create-then-crash window that turns "create" into
   "create if not exists, then look it up."
-- A second rep of the conformance-suite pattern (after roadmap 18): one behavioral
+- A second rep of the conformance-suite pattern (after roadmap 19): one behavioral
   contract, N implementations plus a fake, one shared proof.
-- Quota and scoping composition: the new resource inherits roadmap 09's tenant predicate
+- Quota and scoping composition: the new resource inherits roadmap 11's tenant predicate
   and admission-time quota discipline without new mechanisms.
 - Credential handoff: composing this roadmap with roadmap 20 so a DSN — which embeds a
   password — never rides an env var or a log line.
 
 ### Concept: two databases with nothing in common but SQL
 
-Roadmap 11's Postgres and this roadmap's Neon databases can even live on the same vendor,
+Roadmap 09's Postgres and this roadmap's Neon databases can even live on the same vendor,
 which is exactly why the distinction must be explicit: the control-plane store is
 *platform* state (sandbox rows, tenants, leases) that quickspin reads on every
 request, while provisioned storage is *tenant* state the platform must never read —
 it creates the database, hands over the credential, and forgets. The boundary shows
-up concretely in the code: the store from roadmap 11 is a dependency injected into the
+up concretely in the code: the store from roadmap 09 is a dependency injected into the
 plane; provisioned databases appear only as rows *in* that store (ref, provider,
 remote name, created-at) plus a secret it explicitly does not retain in plaintext.
 Blurring this boundary is how platforms end up with support engineers who can read
@@ -70,7 +80,7 @@ customer data.
   code={`
 flowchart LR
     subgraph plane["platform state — the plane reads this on every request"]
-        S["roadmap 11 store<br/>sandbox rows, tenants, leases"]
+        S["roadmap 09 store<br/>sandbox rows, tenants, leases"]
         Rows["storage rows<br/>ref, provider, remote name<br/>no plaintext DSN"]
     end
     subgraph tenant["tenant state — the platform never reads this"]
@@ -88,13 +98,13 @@ because the plane *will* crash between the vendor's create call and its own comm
 and the caller *will* retry. Two mechanisms make it hold. First, deterministic naming:
 the remote database's name is derived from the ref (`qs-<tenant>-<hash-of-key>`), so a
 retry can find what a crashed attempt created — the name is the reconciliation key,
-the same role labels played for roadmap 14's servers. Second, treat the vendor's
+the same role labels played for roadmap 15's servers. Second, treat the vendor's
 "already exists" conflict as success-with-lookup, not failure: create, and on a 409
 (or vendor equivalent) fetch the existing database and proceed. The local row is then
 written after the remote resource exists, which means the crash window leaves an
 *unrecorded remote database* — found again by name on the next Ensure — rather than a
 recorded phantom. Orphans in the other direction (created remotely, key never used
-again) are swept by a list-by-prefix audit script, the cost-safety lesson from roadmap 14
+again) are swept by a list-by-prefix audit script, the cost-safety lesson from roadmap 15
 applied to databases.
 
 <Figure caption="Ensure converges from either side of a crash: the deterministic name links the vendor's world to the store's row.">
@@ -128,7 +138,7 @@ applied to databases.
 The API takes any reasonable string as a key (`agent-42`, `research-bot/prod`), but
 vendor names have charset and length limits the key must not inherit — hence the hash
 in the remote name, with the human-readable ref kept in the store row. Scoping is the
-roadmap 09 rule applied on day one: the ref is always (tenant, key), every store query
+roadmap 11 rule applied on day one: the ref is always (tenant, key), every store query
 carries the tenant predicate, and one tenant's `agent-42` is a different database from
 another tenant's `agent-42`. Quota follows the same admission pattern — a
 `max_databases` column on tenants, checked in the same transaction that inserts the
@@ -155,7 +165,7 @@ sequenceDiagram
     participant V as vendor API
     participant R as runtime backend
     C->>P: POST /v1/sandboxes with storage.key
-    P->>P: admission: quota check + storage row<br/>in one transaction (roadmap 09's shape)
+    P->>P: admission: quota check + storage row<br/>in one transaction (roadmap 11's shape)
     P->>V: Ensure(ref) — create, 409 means lookup
     alt Ensure fails
         P-->>C: error — no sandbox was created
@@ -194,7 +204,7 @@ type StorageProvisioner interface {
 }
 ```
 
-HTTP surface (all tenant-scoped per roadmap 09):
+HTTP surface (all tenant-scoped per roadmap 11):
 
 ```text
 POST /v1/sandboxes           body gains "storage": {"key": "agent-42"}  (optional)
@@ -212,7 +222,7 @@ Committed decisions:
   `storage_dsn`; the platform does not persist plaintext DSNs.
 - One region per provider, hardcoded in config; multi-region is out of scope.
 - Provider selection is per-request (`"provider": "turso"`) with a configured
-  default, mirroring the roadmap 15 pool/provider shape.
+  default, mirroring the roadmap 16 pool/provider shape.
 
 ## Tasks
 
@@ -296,10 +306,10 @@ Committed decisions:
     check="A create request with storage yields a sandbox whose /run/quickspin/secrets/storage_dsn connects; TestStorageQuotaRaceOnlyAdmitsCap passes; destroy leaves the database reachable on the next create with the same key."
   >
     Order inside the create path: admission (quota, in the same transaction as the
-    storage-row insert, roadmap 09's shape) → `Ensure` → put the DSN into the spec's
+    storage-row insert, roadmap 11's shape) → `Ensure` → put the DSN into the spec's
     secrets → the normal sandbox create. An Ensure failure fails the request cleanly
     — nothing was created yet. Sandbox destroy touches none of this. The 429 body
-    reuses roadmap 09's quota error shape with a distinct code.
+    reuses roadmap 11's quota error shape with a distinct code.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: databases you pay for and cannot explain"
@@ -325,7 +335,7 @@ Pure unit tests (in `make test`):
   table-driven.
 - `TestEnsureAfterPartialFailure` — the fake injects a crash between remote create
   and local record; the retried Ensure converges to one database.
-- `TestStorageQuotaRaceOnlyAdmitsCap` — roadmap 09's race shape for `max_databases`.
+- `TestStorageQuotaRaceOnlyAdmitsCap` — roadmap 11's race shape for `max_databases`.
 - `TestDSNIsRedacted` — the DSN rides the `Secret` type through logs and listings.
 
 Live tests (env-gated, one target per provider):

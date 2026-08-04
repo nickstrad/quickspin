@@ -1,0 +1,434 @@
+# 18 — gVisor: a second isolation level inside the same Docker backend
+
+Depends on: 08 (07's guest architecture assumed); 13 recommended first per the
+index's ordering, but nothing here needs the fleet — a single Lima hostd is enough.
+No `/dev/kvm`, no nested virtualization, no hardware gate of any kind: runs anywhere
+Lima runs. This is the core arc's isolation upgrade; the microVM alternatives
+(Firecracker, Kata) are the optional deep dives 26 and 27.
+
+## Summary
+
+Give every sandbox a choice of isolation level without adding a second `Runtime`
+implementation. gVisor's `runsc` is an OCI runtime, so it slots *under* the existing
+Docker backend: install `runsc` into the Lima VM's Docker daemon as a registered
+runtime, add an isolation field to `Spec`, and pass `--runtime=runsc` (the API's
+`HostConfig.Runtime`) at container create when the field asks for it. Everything
+already built keeps working unchanged, because a gVisor sandbox *is* a Docker
+container: guest-agent injection, port mapping, the exec and files paths through the
+guest, label-based rediscovery and the orphan sweep, and — the decisive difference
+from a microVM cutover — `docker commit` snapshots. Roadmap 12's save/restore works
+on day one; the regression where the default backend loses `save` never exists.
+
+The roadmap's engineering content is the compatibility and observability boundary:
+what the Sentry (gVisor's userspace kernel) does and does not implement, how to see
+which syscalls a workload actually needed, an isolation smoke check that proves the
+host kernel is no longer directly exposed, and an honest syscall-heavy vs. IO-heavy
+benchmark recorded next to roadmap 12's numbers.
+
+## Industry context
+
+gVisor is the competing production answer to Firecracker's threat model. Both start
+from the same fear — every container syscall lands in the shared host kernel, and one
+kernel bug is a full escape — and split on the remedy: Firecracker gives each sandbox
+its own kernel behind KVM's virtual hardware; gVisor interposes a *userspace* kernel
+(the Sentry) that implements Linux syscall semantics itself and touches the real host
+kernel through a deliberately narrow, seccomp-confined surface. Modal runs gVisor for
+its sandboxes; Google Cloud Run and GKE Sandbox run it under customer workloads;
+App Engine's second-generation runtimes ran on it before either existed. The
+strategic property for a platform like Quickspin is that it is *packaged as an OCI
+runtime*: adopting it is a create-time flag on the container stack you already
+operate, not a new lifecycle model — which is exactly why this roadmap is small and
+roadmap 26 is not.
+
+<Compare>
+  <CompareItem eyebrow="runc (roadmaps 02–16)" title="Syscalls land in the host kernel">
+    Isolation is namespaces, cgroups, and seccomp filtering of the one shared kernel.
+    Fast and dense; the attack surface is every syscall the filter admits, and one
+    host-kernel bug behind that filter is an escape.
+  </CompareItem>
+  <CompareItem eyebrow="runsc (this roadmap)" title="Syscalls land in a userspace kernel">
+    The Sentry implements Linux semantics itself — its own syscall table, its own
+    /proc, its own network stack — and calls the host kernel only through a small
+    seccomp-pinned set. A workload exploit must first break the Sentry, then escape
+    a second, much narrower boundary. The cost is syscall-interception overhead and
+    a compatibility surface you must respect.
+  </CompareItem>
+</Compare>
+
+## Key concepts
+
+- The Sentry as an application kernel: a Go program that fields the workload's
+  syscalls, backed by its own implementations of /proc, futexes, epoll, and a
+  userspace network stack (netstack) — and what "defense in depth" concretely means
+  when the Sentry itself still runs on the host kernel.
+- Platforms — how syscalls are intercepted: **systrap** (the default: seccomp +
+  a stub process, no virtualization needed) vs. **KVM** (uses /dev/kvm for address
+  space switching) vs. legacy ptrace. Why this roadmap pins systrap and thereby
+  needs no hardware at all.
+- The Gofer split: file access leaves the sandbox through a separate per-container
+  `gofer` process speaking a 9P-derived protocol, so the Sentry never holds host
+  file descriptors it could be tricked into misusing.
+- The OCI runtime seam: what `runc` and `runsc` have in common (the OCI runtime
+  spec, config.json, the same image format), how Docker's daemon `runtimes` map and
+  the create-time `HostConfig.Runtime` field select one per container, and why that
+  makes isolation a *per-sandbox spec field* rather than a backend.
+- Compatibility as a tested surface: the Sentry does not implement every syscall
+  and flag; how to observe what a workload needed (`runsc debug` logs, strace-style
+  logging) and how to write the incompatibility down instead of discovering it in
+  prod.
+- Honest measurement: why gVisor's overhead concentrates on syscall-heavy work and
+  roughly disappears for compute-bound work, benchmarked rather than asserted.
+
+### Concept: a second kernel between the workload and yours
+
+Trace one `open()`. Under runc: the workload traps into the host kernel, the host
+kernel walks its dentry cache, done — one kernel involved. Under runsc with systrap:
+the seccomp filter installed in the workload's stub process turns the syscall into a
+message to the Sentry; the Sentry — a Go program — looks up its *own* implementation
+of `open`, decides what it means for the sandbox's view of the filesystem, and if
+real file data is needed, asks the Gofer over its 9P channel; only the Gofer (or the
+Sentry's narrow allowed set) ever syscalls into the host kernel. The workload's
+100-syscall repertoire has been re-terminated in userspace, and the host kernel now
+sees only the Sentry's ~70-call, argument-constrained subset. That is the security
+claim in one sentence: the host kernel's attack surface is no longer the workload's
+syscall table but the Sentry's, and the Sentry is memory-safe Go rather than a
+million lines of C. The honesty clause belongs beside it: the Sentry still *runs on*
+the host kernel, so this is defense in depth — a second kernel to break, not the
+absence of the first.
+
+<Mermaid
+  caption="One open() under each runtime. Under runsc the workload's syscalls terminate in the Sentry's own Linux implementation, and only the narrow Sentry/Gofer surface — seccomp-pinned — ever reaches the host kernel."
+  code={`
+flowchart LR
+    subgraph runc["runc container"]
+        W1["workload syscall"] --> HK1["host kernel<br/>full syscall table exposed"]
+    end
+    subgraph runsc["runsc sandbox"]
+        W2["workload syscall"] -->|"systrap intercept"| S["Sentry: userspace kernel<br/>own /proc, netstack, futex, epoll"]
+        S -->|"9P: file ops only"| G["Gofer process"]
+        S -->|"~70 allowed syscalls,<br/>seccomp-confined"| HK2["host kernel<br/>narrow surface"]
+        G --> HK2
+    end
+`}
+/>
+
+### Concept: isolation becomes a spec field because OCI made runtimes fungible
+
+The reason this roadmap does not add a `Runtime` implementation is worth
+internalizing, because it is the payoff of a standard doing its job. Docker's daemon
+does not "run containers"; it prepares an OCI bundle (rootfs + config.json) and
+invokes a registered OCI runtime binary to realize it. `runc` is merely the default
+entry in that `runtimes` map. Registering `runsc` beside it
+(`/etc/docker/daemon.json`, one JSON stanza, restart the daemon) means every Docker
+API feature that operates on *containers* — labels, port publishing, inspect,
+commit, logs — continues to work, because the daemon's object model never changed;
+only the binary that assembles the sandbox did. So the seam Quickspin needs is not
+at the backend layer at all: it is one string on the create call
+(`HostConfig.Runtime`), which is why `Spec` gains an `Isolation` field routed
+through plane → hostd → the same Docker client code, and why two sandboxes with
+different isolation levels coexist on one daemon. The contrast writes the lesson:
+Firecracker (26) sits *outside* the Docker object model, so adopting it means
+reimplementing lifecycle, networking, and snapshots; runsc sits *inside* it, so
+adopting it means a field.
+
+<KeyPoint label="The invariant this roadmap must not break">
+  A gVisor sandbox is a Docker container. Every existing behavior — guest
+  injection, ports, exec/files through the guest, rediscovery by label, TTL reap,
+  orphan sweep, and `docker commit` snapshots — must pass unchanged with
+  `isolation: gvisor`. The definition of done runs the existing conformance
+  surface under runsc precisely to enforce that sentence.
+</KeyPoint>
+
+### Concept: the compatibility boundary is observable, not guessable
+
+The Sentry implements most of Linux, not all of it: the syscall table has gaps, some
+flags of implemented syscalls are unsupported, and parts of /proc and /sys are
+stubbed. Most real workloads never notice — Python, Node, Go toolchains, package
+managers and build tools are well inside the supported surface — but "most" is not a
+contract, and the failure mode is a workload dying with `ENOSYS` or `EPERM` deep
+inside a library that never expected it. The engineering answer is to make the
+boundary observable instead of folklore: `runsc --debug --strace` logging shows
+every syscall the Sentry fielded and how it answered, so when something breaks you
+get the exact unsupported call, and the roadmap's compatibility check runs the
+platform's own representative workloads (the image builds and demo flows the
+roadmap set already uses) under runsc and records the result in the plan's closing
+note. What this roadmap deliberately does not do is chase general compatibility —
+the tested claim is "Quickspin's supported workloads run", not "Linux runs".
+
+<StudyPrompt question="Why does gVisor need its own network stack in the Sentry?">
+  If the Sentry handed workload sockets straight to the host kernel, every packet
+  and socket option would be host-kernel attack surface again — precisely what the
+  design removes. netstack terminates TCP/IP in userspace, so a malicious packet
+  stream can at worst corrupt the Sentry's Go heap, not the host's sk_buffs. The
+  price is TCP throughput below native, which is measurable and belongs in this
+  roadmap's benchmark rather than in marketing either direction.
+</StudyPrompt>
+
+## Design and interfaces
+
+```text
+Spec gains:  Isolation string   — "container" (default) | "gvisor"
+             validated at the roadmap 05 boundary; unknown values are a typed
+             validation error, not a deep runtime failure.
+
+sandboxes gains an isolation column; events and GET responses carry it.
+
+Docker daemon (inside the Lima VM), /etc/docker/daemon.json:
+  "runtimes": { "runsc": { "path": "/usr/local/bin/runsc",
+                           "runtimeArgs": ["--platform=systrap"] } }
+
+Create path: plane validates -> hostd -> Docker client sets HostConfig.Runtime =
+  "runsc" when Isolation == "gvisor"; every other create/exec/files/port/commit
+  call is byte-identical to the container path.
+
+CLI: quickspin sandbox create --isolation gvisor
+hack/setup-gvisor.sh: install runsc + containerd-shim into the Lima VM, patch
+  daemon.json idempotently, restart dockerd, prove `docker run --runtime=runsc`.
+```
+
+Committed decisions: **systrap platform, pinned** — no `/dev/kvm` requirement, no
+nested-virt requirement, no M3 requirement; the KVM platform is a recorded
+possibility for hosts that have it, not a configuration this roadmap supports.
+**No second Runtime implementation** — if a change here needs a new method on the
+`Runtime` interface, the seam is being put at the wrong layer. **Snapshots are in
+scope and must work** — `docker commit` of a runsc container is an ordinary image;
+restore may land on either isolation level because the image is just a filesystem
+(roadmap 12 already strips config at commit time to keep that true). **Isolation is
+per-sandbox, not per-host** — both values coexist on one daemon, so there is no
+cutover event locally. For prod, whenever a roadmap 14 spin-up is live, gVisor
+arrives there as the same daemon.json change plus a default-isolation config knob on
+the plane: flipping the default runtime handler, reversible in one deploy, with
+snapshots still working — a config change, not a migration.
+
+## Tasks
+
+<TaskList>
+  <Task title="Write hack/setup-gvisor.sh">
+    Install the runsc release binary and containerd shim into the Lima VM, register
+    the runtime in /etc/docker/daemon.json (idempotently — jq-merge, don't
+    clobber), restart dockerd, and prove it: `docker run --rm --runtime=runsc
+    alpine uname -a` reports the Sentry's kernel identity, not Lima's.
+  </Task>
+  <Task title="Poke the boundary by hand">
+    No Go yet. Run a shell under runsc and look around: `uname -r`, `dmesg`,
+    `cat /proc/version`, mount table, `ip addr` under netstack. Then run the same
+    under runc and diff the worldview. This is the isolation smoke check performed
+    manually before it is automated.
+  </Task>
+  <Task title="Add Spec.Isolation and route it">
+    The field, validation with a typed error for unknown values, the sandboxes
+    column, plane → hostd plumbing, HostConfig.Runtime in the Docker client, and
+    the CLI flag. The SDKs inherit the field from the OpenAPI document in 22–23.
+  </Task>
+  <Task title="Run the existing behavior surface under gVisor">
+    Guest injection, exec streams and exit codes, file round-trip, port mapping,
+    TTL reap, label rediscovery, orphan sweep, and save/restore — the already-built
+    validation flows re-run with isolation: gvisor. The deliverable is the list of
+    anything that behaves differently, which the closing note records even if the
+    answer is "nothing".
+  </Task>
+  <Task title="Automate the isolation smoke check">
+    Assertions that the sandbox's kernel identity differs from the host's, that
+    host resources (Docker socket, plane DB, Lima-side services) are unreachable
+    from inside, and that a runc sibling co-exists on the same daemon.
+  </Task>
+  <Task title="Observe the compatibility boundary">
+    Run one representative syscall-heavy workload under `runsc --debug --strace`,
+    keep the log, and write the observed-surface note: what the platform's
+    supported workloads actually need, and the diagnosis path for a future ENOSYS.
+  </Task>
+  <Task title="Benchmark and record">
+    Syscall-heavy vs. IO-heavy vs. compute-bound, runc vs. runsc, recorded in
+    docs/reference/demo-latency.mdx under roadmap 12's benchmark rules — p50/p95,
+    stated method, no cherry-picking. Sandbox start latency joins the same table.
+  </Task>
+  <Task title="Write hack/validate-18.sh">
+    The definition-of-done script: both isolation values end-to-end, the smoke
+    check, snapshots across the boundary, and the negative validation-error case.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Install runsc and prove the daemon sees it before touching Go"
+    check="docker info lists runsc under Runtimes, and docker run --rm --runtime=runsc alpine uname -a prints a kernel string that is not Lima's."
+  >
+    gVisor ships static binaries — `runsc` and `containerd-shim-runsc-v1` — via
+    its apt repo or direct download; both go in the VM's PATH. The daemon learns
+    about runsc only from `daemon.json`'s `runtimes` map, and only on restart
+    (`sudo systemctl restart docker` inside Lima). If `docker run` fails with
+    "unknown runtime", the daemon didn't restart or the JSON didn't merge; check
+    `docker info` first, always.
+  </Hint>
+  <Hint
+    title="Learn the Sentry's worldview interactively"
+    check="Inside a runsc shell, uname -r reports a gVisor version string, dmesg shows the Sentry's own boot lines, and /proc is visibly sparser than the host's."
+  >
+    `docker run --rm -it --runtime=runsc alpine sh`, then poke: `uname -a`,
+    `dmesg`, `ls /proc`, `cat /proc/cpuinfo`. Everything you see is Sentry-
+    synthesized — that dmesg has never been near Lima's kernel. Keep a note of the
+    differences; the smoke-check assertions in the validation script are exactly
+    these observations turned into greps.
+  </Hint>
+  <Hint
+    title="The spec field is small; put the validation at the boundary"
+    check="A create with isolation: sideways returns the roadmap 05 typed validation error from the API, and TestIsolationRoutesRuntime shows runsc in the fake Docker client's captured HostConfig."
+  >
+    Follow `AllowNetwork`'s existing path through the codebase — Spec field,
+    validation, column, hostd, Docker client — and add `Isolation` beside it at
+    each stop. The only genuinely new line is setting `HostConfig.Runtime` in the
+    create call. A table test against the fake Docker daemon pins the routing
+    without gVisor anywhere near the test.
+  </Hint>
+  <Hint
+    title="Re-run what exists before writing anything new"
+    check="The existing end-to-end validation flow passes with isolation: gvisor for every stage except any you can name and explain."
+  >
+    Resist writing gVisor-specific behavior tests first. The claim under test is
+    "a gVisor sandbox is a Docker container", so the strongest evidence is the
+    unmodified existing surface passing under the new runtime. Where something
+    does differ, that difference is the roadmap's real finding — write it down
+    before deciding whether to fix, work around, or record it.
+  </Hint>
+  <Hint
+    title="Snapshots across the isolation boundary"
+    check="save a runsc sandbox, restore it as runc and as runsc; both restores boot and contain the saved filesystem."
+  >
+    `docker commit` reads the container's filesystem layers; it neither knows nor
+    cares which runtime assembled them, and roadmap 12 already strips run-config
+    at commit. So restores may legitimately cross isolation levels — the image is
+    a filesystem, isolation is a create-time property. Assert both directions once
+    and you have proven the property that made gVisor the core-arc choice.
+  </Hint>
+  <Hint
+    title="Benchmark honestly: three workload shapes, both runtimes"
+    check="demo-latency.mdx gains a table where compute-bound is near parity, syscall-heavy shows a real gap, and the method line says exactly what ran."
+  >
+    Syscall-heavy: untar a large archive or run a many-small-files build. IO
+    throughput: dd through the filesystem and a TCP transfer (netstack's cost
+    shows here). Compute-bound: any tight loop. Run each N times under both
+    runtimes via the platform's own exec path, p50/p95, same rules as roadmap
+    10's table. The point is a defensible sentence about *where* the overhead
+    lives, not a verdict.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: a workload dies only under gVisor"
+    check="Given a deliberately unsupported operation, you can produce the runsc strace line naming the syscall and errno within a few minutes."
+  >
+    The signature is a process that works under runc and exits strangely under
+    runsc — often ENOSYS or EPERM surfaced as a cryptic library error. Re-run
+    with debug logging: add `--debug --debug-log=/tmp/runsc/ --strace` to the
+    runtime args (a second daemon.json runtime entry, e.g. runsc-debug, keeps
+    the fast path clean), reproduce, and read the strace log from the bottom.
+    The last unsupported syscall before death is your answer; gvisor.dev's
+    compatibility docs say whether it is missing, partial, or intentional.
+    Check /proc and /sys expectations too — configuration probes that read
+    stubbed files fail quieter than syscalls.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+Unit tests (`make test`, fake Docker daemon, no gVisor required):
+
+- `TestIsolationRoutesRuntime` — `gvisor` sets `HostConfig.Runtime = "runsc"`,
+  `container`/empty leaves it unset.
+- `TestIsolationUnknownValueRejected` — typed validation error at the API
+  boundary, per the roadmap 05 error shape.
+- `TestIsolationPersistsAndLists` — the column round-trips and appears in GET
+  responses and events.
+
+`hack/validate-18.sh` (Lima, real daemon with runsc registered) exits 0, checking:
+
+- Full lifecycle at both isolation values, concurrently on one daemon: create →
+  running (guest `/healthz` answered), exec streams and exit codes, file
+  round-trip, port reachability, destroy; destroy twice exits 0.
+- Isolation smoke check: kernel identity inside the gvisor sandbox differs from
+  the host's; Docker socket and plane DB unreachable from inside; the runc
+  sibling still reports the host kernel (the contrast is the check).
+- Snapshots: save a gvisor sandbox; restore lands and verifies under both
+  isolation values.
+- Negative: unknown isolation value is a typed API error; the runsc-debug
+  diagnosis path produces a strace log naming a deliberately provoked
+  unsupported operation.
+- The benchmark table exists in `docs/reference/demo-latency.mdx` with method
+  stated.
+
+Deliberately untested/out of scope: the KVM platform, runsc flag hardening
+(`--network=host` variants, overlay tuning, directfs toggles), GPU/device
+passthrough, general Linux compatibility beyond the platform's own supported
+workloads, and any prod default flip (recorded as a config-change note against 12's
+spin-up, performed whenever a live host exists to flip).
+
+## Solo-developer tradeoffs
+
+Modal, Cloud Run, and GKE Sandbox run gVisor with layers this roadmap skips:
+pinned/patched runsc releases tracking CVEs, platform tuning per host generation,
+compatibility fleets that run customer-shaped workloads against every upgrade, and
+node pools that segregate sandboxed from trusted workloads. Skipping them is
+informed: one runsc version installed by one script, one platform (systrap), and a
+compatibility claim scoped to the workloads this platform actually runs. What is
+deliberately *not* skipped is the observability of the boundary — the strace
+diagnosis path and the written observed-surface note — because "it mysteriously
+breaks under gVisor" is the failure mode that turns an isolation upgrade back off,
+and the difference between that and "ENOSYS on statx, known, workaround recorded"
+is one afternoon of discipline here.
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="gVisor: What is gVisor? and Architecture Guide"
+    href="https://gvisor.dev/docs/"
+  >
+    The Sentry/Gofer split, the security model, and the "defense in depth" claim
+    from the source — the conceptual half of this roadmap in the project's own
+    words.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="gVisor Platform Guide"
+    href="https://gvisor.dev/docs/architecture_guide/platforms/"
+  >
+    systrap vs. KVM vs. ptrace — exactly what the pinned-platform decision trades
+    away and what a KVM-capable host would buy back.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="gVisor Performance Guide"
+    href="https://gvisor.dev/docs/architecture_guide/performance/"
+  >
+    The project's own statement of where overhead concentrates — structure your
+    benchmark to confirm or contradict it, not to duplicate it.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="Docker Quick Start — gVisor"
+    href="https://gvisor.dev/docs/user_guide/quick_start/docker/"
+  >
+    The daemon.json runtimes stanza and smoke commands hack/setup-gvisor.sh
+    automates.
+  </Resource>
+  <Resource
+    kind="paper"
+    title="The True Cost of Containing: A gVisor Case Study (HotCloud '19)"
+    href="https://www.usenix.org/conference/hotcloud19/presentation/young"
+    by="Young et al., University of Wisconsin–Madison"
+  >
+    Independent measurements of gVisor's syscall, memory, and network overheads —
+    the academic counterweight to vendor claims, and a model for honest
+    measurement writing.
+  </Resource>
+  <Resource
+    kind="article"
+    title="Open-sourcing gVisor, a sandboxed container runtime"
+    href="https://cloud.google.com/blog/products/identity-security/open-sourcing-gvisor-a-sandboxed-container-runtime"
+    by="Google Cloud"
+  >
+    The launch framing: why Google built a userspace kernel instead of adopting
+    microVMs for App Engine-shaped multitenancy.
+  </Resource>
+</Resources>

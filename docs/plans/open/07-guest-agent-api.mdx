@@ -9,11 +9,11 @@ creation, exposing an HTTP API *from inside* the sandbox — exec (now with stre
 output), file read/write/list, and health. The control plane proxies
 `/v1/sandboxes/{id}/...` workload calls to the guest instead of using Docker exec and
 the tar copy API. The `Runtime` interface keeps lifecycle (create/destroy); workload
-operations move to the guest client. This is the architectural move that makes roadmap 17
-(Firecracker) possible, because a microVM has no `docker exec`. A small schema rider
+operations move to the guest client. This is the architectural move that makes a microVM backend
+(roadmap 26, optional) possible, because a microVM has no `docker exec`. A small schema rider
 comes along: sandboxes gain a `generation` counter incremented on every state
-transition and stamped onto each event row — optimistic-concurrency groundwork for the
-distributed-control-plane roadmaps (08, 13).
+transition and stamped onto each event row, which gives the event log a total order per
+sandbox even within one clock second — the ordering roadmap 17's consumers read.
 
 ## Industry context
 
@@ -28,7 +28,7 @@ is a real design constraint from here on.
 <KeyPoint label="The ownership shift">
   After this roadmap the `Runtime` interface owns only lifecycle — create, inspect, list,
   destroy. Everything that happens *inside* a running sandbox goes through the guest.
-  That split is the whole reason roadmap 17 can swap the backend without touching a
+  That split is the whole reason roadmap 26 can swap the backend without touching a
   workload code path.
 </KeyPoint>
 
@@ -43,8 +43,8 @@ is a real design constraint from here on.
 - Readiness semantics: "container running" vs "guest answering" are different states —
   the control plane's `running` now means the latter.
 - Static binaries and injection via bind-mount.
-- Optimistic concurrency groundwork: a per-sandbox `generation` that counts
-  transitions, so later remote writers can detect that they are acting on stale state.
+- Event ordering: a per-sandbox `generation` that counts transitions, giving the event
+  log a gapless sequence and a total order that timestamps alone cannot provide.
 
 ### Concept: streaming HTTP is fighting three buffers
 
@@ -115,18 +115,19 @@ stateDiagram-v2
 
 ### Concept: the generation column counts change
 
-The `WHERE state = ?` guard from roadmap 05 already prevents lost updates, but it only
-answers "did the row still look the way I expected." A `generation` column — an integer
-incremented inside every successful transition — answers a stronger question: how many
-times has this sandbox changed, and am I acting on the latest version? Nothing in this
-roadmap *checks* it yet; it is added now because this roadmap introduces a second
-writer path (the readiness probe's pending→running transition) and the next roadmaps
-add remote ones (the host agent in 08, registration and placement in 13), where
-compare-and-swap on generation becomes the fencing primitive. Stamping each event row
-with the post-transition generation also makes the event log a gapless sequence per
-sandbox: if the generations in a sandbox's ordered events ever skip a number, some code
-path mutated state without recording a fact — roadmap 06's replay invariant, made
-numeric.
+Roadmap 06's events carry timestamps, and timestamps are a bad sort key: two transitions
+inside the same clock second are indistinguishable, and a reader cannot tell whether it
+has seen every fact or only most of them. A `generation` column — an integer incremented
+inside every successful transition and stamped onto the event row written in the same
+transaction — fixes both. It gives each sandbox's events a total order independent of
+the clock, and it makes completeness checkable: if the generations in a sandbox's
+ordered events ever skip a number, some code path mutated state without recording a
+fact, which is roadmap 06's replay invariant made numeric. Roadmap 17's usage processor
+is the consumer that depends on this, and it is added now because this roadmap
+introduces a second writer path (the readiness probe's pending→running transition), so
+the increment has to be built into the shared guarded update rather than retrofitted
+across scattered ones. A possible future use, not planned by any roadmap here:
+compare-and-swap on generation as a fencing primitive for remote writers.
 
 ### Concept: errors do not cross process boundaries — DTOs do
 
@@ -387,7 +388,7 @@ Integration (`make test-docker`):
   contract survived an internal rewrite.
 
 Deliberately untested: guest auto-upgrade, mutual auth between plane and guest (noted
-in roadmap 09's threat model), stdin/PTY.
+in roadmap 11's threat model), stdin/PTY.
 
 ## Solo-developer tradeoffs
 

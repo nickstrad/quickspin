@@ -1,0 +1,363 @@
+# 10 — Web console: the platform's first real consumer
+
+Depends on: 05 (the HTTP API), 09 (Postgres — better-auth's tables live in the same
+local instance). 08's hostd-backed plane is assumed running in Lima.
+
+**Development-mode exception.** Unlike the Go roadmaps, this plan is implemented
+**AI-driven**: the user has a decade of full-stack web experience, so the learning
+target here is not React — it is the platform seen through a consumer's eyes. The
+same exception the SDK roadmaps (22–23) carry applies: the agent may generate the
+application code; the user's job is direction, review, and making the definition of
+done pass. The Go rule (user hand-writes first) does not apply inside `console/`.
+
+## Summary
+
+Build the web console every sandbox platform has — E2B, Modal, Daytona all lead with
+one — as a Next.js app in a `console/` workspace inside this repo. Version one is
+deliberately scoped to what the platform can already do: email/password accounts via
+**better-auth**, then a dashboard over the plane's existing API — sandbox list,
+create, detail with a streaming exec console and file browser, and the event feed.
+The console talks to the plane **only through its public HTTP API**, never its
+database: it is the platform's first standing consumer, and every awkward response
+shape or missing endpoint it exposes is the same class of finding the tracer harness
+and roadmap 24's friction log hunt — arriving even earlier, while everything is
+cheap to change.
+
+Auth comes in two phases by design. In this roadmap the plane has no auth yet
+(tenancy is roadmap 11), so better-auth gates the *console* — sessions, sign-in,
+protected routes — while the console's server talks to the plane unauthenticated
+over localhost. Roadmap 11 then closes the loop: tenants map onto console accounts,
+the console gains an API-keys page, and every console→plane call starts carrying a
+key. Nothing in this roadmap is throwaway under that plan; the seam where the key
+gets attached (one plane-client constructor) is built here on purpose.
+
+<KeyPoint label="The console is a client, not a second control plane">
+  One rule survives every screen: the console reads and writes platform state only
+  via the plane's HTTP API. Reading the plane's Postgres tables directly would be
+  faster to build and would silently fork the contract — the moment the console
+  knows things the API cannot express, the API stops being the product. better-auth
+  owns its own tables (users, sessions) in the console's schema; sandbox truth
+  lives behind the API.
+</KeyPoint>
+
+## Industry context
+
+Every commercial platform pairs its API with a console, and the console is usually
+the first thing a prospect touches: E2B's dashboard (sandbox list, live usage,
+key management), Modal's app/run views, Daytona's workspace UI. Two industry
+patterns matter here. First, consoles are *API consumers with a session*, not
+privileged internal tools — vendors dogfood their public API precisely because it
+keeps the API honest. Second, the auth split this roadmap uses is the standard
+shape: humans get session auth (cookies, email/password, later OAuth), machines get
+bearer keys, and the console is where a session-holder mints machine keys. The
+stack is the current mainstream for this class of app: Next.js App Router,
+TypeScript, Tailwind + shadcn/ui, tRPC with TanStack Query on the client, TanStack
+Table for data grids, better-auth for sessions.
+
+## Key concepts
+
+- Two auth planes, one app: session auth (better-auth cookies) for humans at the
+  console boundary vs. bearer keys for the plane API — and why conflating them
+  (e.g. forwarding cookies to the plane) is an anti-pattern.
+- The BFF (backend-for-frontend) shape: the browser never talks to the plane;
+  tRPC procedures on the console server do, through one typed plane client. The
+  browser's contract is tRPC + TanStack Query; the server's contract is the
+  plane's OpenAPI-documented HTTP.
+- Server Components and Suspense boundaries as the loading model: initial data
+  streamed on the server, live data via TanStack Query polling on the client —
+  and where each belongs.
+- Streaming in the UI: piping the plane's exec stream through a route handler to
+  the browser without buffering — the one place tRPC's request/response model is
+  deliberately bypassed.
+- Theming as tokens, not scattered classes: shadcn's CSS-variable convention as
+  the single point of style adjustment, light/dark from day one.
+- End-to-end tests as the definition of done: Playwright driving real flows
+  against a real plane in Lima.
+
+### Concept: the console is a BFF, and the seam is one client
+
+The browser holds a better-auth session cookie and calls tRPC procedures; each
+procedure checks the session, then calls the plane through a single hand-written
+`planeClient` (base URL from env, typed request/response shapes, typed error
+mapping per roadmap 05's error taxonomy). That client is the load-bearing seam:
+in this roadmap it attaches no credentials (localhost, pre-auth plane); in roadmap
+11 it gains one line — the tenant's API key — and no screen changes; in roadmap 22
+its hand-written internals can be swapped for the generated TypeScript SDK, which
+is itself a useful test of that SDK. Procedures stay thin: validate input, call the
+client, shape the response for the screen. Business rules live in the plane; the
+console renders truth, it does not create it.
+
+<Mermaid
+  caption="Request path for every screen: session-checked tRPC procedures on the console server fan into one typed plane client. Only the exec stream bypasses tRPC, flowing through a streaming route handler."
+  code={`
+flowchart LR
+    B["browser<br/>React + TanStack Query"] -->|"tRPC (session cookie)"| S["console server<br/>Next.js route handlers"]
+    B -.->|"exec stream (fetch)"| RH["streaming route handler"]
+    S --> PC["planeClient<br/>typed, one place for base URL + (later) API key"]
+    RH --> PC
+    PC -->|"HTTP :8080 (Lima)"| P["control plane"]
+    S --> BA["better-auth<br/>users/sessions in Postgres (09)"]
+`}
+/>
+
+### Concept: UX flows are the spec — screens are derived
+
+Version one commits to these flows; each maps to plane endpoints that already
+exist. Anything needing a missing endpoint is a *finding to file*, not a reason to
+touch the plane's DB.
+
+| Flow | What the user does | Plane surface |
+|---|---|---|
+| Sign up / in / out | email + password, session cookie, protected routes redirect | none (better-auth only) |
+| Overview | status card, counts by state, recent events | `GET /v1/status`, list, events |
+| Sandbox list | TanStack Table: id, state, image, TTL, age; sort/filter/search; destroy action; auto-refresh | list, delete |
+| Create sandbox | form: image, TTL, limits, network toggle; typed validation errors surfaced inline | create (idempotency key per submission) |
+| Sandbox detail | spec + state timeline from events; exec console with streamed output; file browser (list/read/write/delete); port links | inspect, events, exec, files |
+| Events | global feed, filter by sandbox/type | events |
+| Settings | profile, theme; **(11 adds: API keys — mint, copy-once, revoke; tenant view)** | none yet |
+
+Later roadmaps grow the console the way they grow the CLI — a screen or control
+per capability: snapshots gallery and restore-from (12), hosts page with heartbeat
+age (13), pool controls (16), usage view (17), isolation picker on create (18).
+Those are riders on those roadmaps, not scope here.
+
+### Concept: theming is a token contract
+
+The requirement is "easily adjustable style," and the mechanism is discipline, not
+a library: every color, radius, and font flows from CSS variables declared once
+(shadcn's `:root` / `.dark` convention over Tailwind theme tokens), components
+consume only semantic tokens (`bg-background`, `text-muted-foreground`), and no
+screen hard-codes a palette value. Prove it the same way the platform proves
+everything — with a check: restyling the whole console must be a one-file diff
+(tokens + font import), and the definition of done includes doing exactly that
+once. Light/dark ships from the start (`next-themes` class strategy) because
+retrofitting dark mode into leaked hard-coded colors is the classic failure.
+
+<Callout tone="warning" title="Streaming dies quietly in dev proxies and buffered handlers">
+  The exec console is the only latency-honest widget in the app: it must render
+  bytes as the sandbox produces them. tRPC's request/response procedures buffer;
+  use a plain route handler returning a streamed <code>Response</code> whose body
+  pipes the plane's stream through, and consume it in the browser with
+  <code>fetch</code> + reader. Test it against a command that prints then sleeps
+  then prints — if both lines arrive together, something in the chain buffered.
+</Callout>
+
+## Design and interfaces
+
+```text
+console/                      pnpm workspace inside this repo (first TS workspace;
+  src/app/                    Next.js App Router, Server Components + Suspense
+  src/server/trpc/            routers: status, sandboxes, files, events
+  src/server/plane-client.ts  the one typed plane client (env: PLANE_BASE_URL)
+  src/app/api/exec/route.ts   streaming passthrough route handler
+  src/components/             shadcn/ui components; tokens in globals.css
+  e2e/                        Playwright specs
+Env: PLANE_BASE_URL, DATABASE_URL (better-auth, local Postgres from 09),
+     BETTER_AUTH_SECRET, BETTER_AUTH_URL.
+Auth: better-auth, email/password only for now; sessions in Postgres; middleware
+     protects everything except /sign-in, /sign-up.
+Data: tRPC v11 + TanStack Query (polling for liveness; SSE/subscriptions deferred);
+     TanStack Table for grids; zod at every tRPC input boundary.
+Make: `make console-dev` (plane + hostd + console against Lima),
+     `hack/validate-10.sh` (build, typecheck, lint, Playwright headless).
+```
+
+Committed decisions: the console lives in this repo as a workspace (`console/`),
+not a separate repo — it versions with the API it consumes; pnpm is the package
+manager (recorded in CLAUDE.md when the workspace lands). better-auth's tables
+live in the local Postgres from 09 under the console's own schema — same instance,
+separate ownership, and the plane never reads them. Plane access is server-side
+only; `PLANE_BASE_URL` is never exposed to the browser. Polling over SSE for v1
+liveness (an SSE/events upgrade is a natural rider on 17). Email/password only;
+OAuth providers are a better-auth config addition later, deliberately deferred.
+
+## Tasks
+
+<TaskList>
+  <Task title="Scaffold the workspace">
+    Next.js + TypeScript + Tailwind + shadcn/ui + tRPC + TanStack Query under
+    `console/`, pnpm, ESLint/Prettier, `make console-dev`. Theme tokens and
+    light/dark toggle wired before any screen exists.
+  </Task>
+  <Task title="Wire better-auth">
+    Email/password sign-up/in/out, session middleware, protected routes, its
+    schema migrated into the 09 Postgres. A signed-out visitor can reach only the
+    auth pages.
+  </Task>
+  <Task title="Write the plane client and tRPC skeleton">
+    `plane-client.ts` with typed shapes and error mapping for status, list,
+    create, inspect, destroy, files, events; tRPC routers exposing them behind
+    session checks.
+  </Task>
+  <Task title="Overview and sandbox list">
+    Status card, state counts, events feed; the TanStack Table list with
+    sort/filter/search, destroy with confirmation, auto-refresh.
+  </Task>
+  <Task title="Create flow">
+    The form with zod validation mirroring spec validation, idempotency key per
+    submission, plane validation errors surfaced inline (typed, not toast-blobbed).
+  </Task>
+  <Task title="Sandbox detail: exec console and file browser">
+    State timeline from events; the streaming exec widget through the route
+    handler; file list/read/write/delete with path validation errors shown
+    honestly.
+  </Task>
+  <Task title="Prove the theme contract">
+    Restyle the console (palette + font) as a one-file token diff, verify both
+    themes, revert. Record the diff in the closing note as the proof.
+  </Task>
+  <Task title="Playwright suite and hack/validate-10.sh">
+    The end-to-end flows from the definition of done, headless against a real
+    plane + hostd in Lima.
+  </Task>
+</TaskList>
+
+## Hint steps
+
+<HintSteps>
+  <Hint
+    title="Scaffold with the boring defaults and commit before customizing"
+    check="pnpm dev serves the shadcn starter with the theme toggle working; pnpm build and typecheck are green."
+  >
+    `pnpm create next-app` (TS, Tailwind, App Router), then `pnpm dlx shadcn@latest
+    init` and add components as screens need them. Set up the token file and
+    next-themes first — every component added later inherits them for free.
+  </Hint>
+  <Hint
+    title="better-auth wants three things: an adapter, a secret, and a mounted handler"
+    check="Sign-up creates a row in the console schema of the 09 Postgres; a signed-out fetch of any app page redirects to /sign-in."
+  >
+    Point better-auth's database adapter at DATABASE_URL, mount its handler under
+    `app/api/auth/[...all]/route.ts`, run its migration, and enforce sessions in
+    middleware (protect-by-default; allowlist the auth pages). Keep its schema
+    separate from the plane's — a distinct Postgres schema makes the ownership
+    boundary visible in `\dn`.
+  </Hint>
+  <Hint
+    title="Build the plane client as if roadmap 11 already happened"
+    check="Every tRPC procedure goes through planeClient; grep finds no fetch to PLANE_BASE_URL outside plane-client.ts; typed plane errors surface with their code intact."
+  >
+    One constructor taking `{baseURL, apiKey?}` — apiKey unused today, threaded
+    tomorrow. Map the plane's error taxonomy (roadmap 05 shapes) into a typed
+    error the UI can switch on; do not flatten to strings. This file is also the
+    one roadmap 22 will try to replace with the generated SDK — the fewer places
+    it leaks, the cheaper that swap.
+  </Hint>
+  <Hint
+    title="Lists poll; initial paint streams"
+    check="The sandbox list renders server-side data on first paint (Suspense fallback visible on a cold load), then updates every few seconds without user action."
+  >
+    Server Component fetches the first page for fast paint; hydrate into a client
+    component where TanStack Query polls (`refetchInterval`) and TanStack Table
+    renders. Destroy is a mutation that invalidates the list query — no manual
+    refresh buttons.
+  </Hint>
+  <Hint
+    title="Stream exec through a route handler, not a procedure"
+    check="Running sh -c 'echo one; sleep 2; echo two' shows 'one' two seconds before 'two' in the browser."
+  >
+    The handler authenticates the session, calls the plane's exec endpoint with
+    fetch, and returns a `Response` wrapping the upstream body (or a TransformStream
+    if you need to reframe events). Client side: `fetch` + `res.body.getReader()`
+    appending chunks to state. If chunks batch, hunt buffering top-down: dev proxy,
+    compression middleware, or reading the body with `.text()` somewhere.
+  </Hint>
+  <Hint
+    title="Diagnosing the likely failure: auth works, data screens are empty"
+    check="With the plane stopped, every screen shows a distinct 'plane unreachable' state (not a spinner, not a crash) and recovers without reload when the plane returns."
+  >
+    The console has two upstreams that fail independently: its own Postgres
+    (better-auth) and the plane. A dead plane must degrade to an explicit error
+    state per screen — TanStack Query's error state rendered as a card with the
+    typed error's message — never an infinite spinner. Test by killing the plane
+    mid-session; polling should surface recovery automatically. If instead you see
+    hydration errors, a Server Component fetched from the plane without a
+    try/catch and took the whole route down with it.
+  </Hint>
+</HintSteps>
+
+## Definition of done
+
+`hack/validate-10.sh` exits 0: `pnpm typecheck`, `pnpm lint`, `pnpm build`, then
+Playwright headless against a real plane + hostd in Lima:
+
+- Sign-up → sign-in → sign-out round-trip; signed-out access to an app page
+  redirects; sign-in with a wrong password fails visibly.
+- Create a sandbox from the form → it appears in the list → detail shows it
+  `running` with its spec.
+- Exec `echo one; sleep 2; echo two` in the detail console — the spec asserts the
+  chunks arrive separately (streaming, not buffering).
+- File round-trip through the browser: write, read back, delete.
+- Destroy from the list; the row leaves without a manual reload.
+- Create with an invalid spec shows the plane's typed validation error inline.
+- Plane-down negative: with the plane stopped, the list screen shows the
+  unreachable state, not a spinner or crash.
+- The theme-contract proof has been performed once and recorded (one-file restyle
+  diff in the closing note).
+
+Deliberately untested: visual regression, mobile layouts, accessibility beyond
+shadcn defaults, concurrent multi-user behavior (one account is assumed until 11),
+SSE/live push, and OAuth flows.
+
+## Solo-developer tradeoffs
+
+Commercial consoles carry orgs/RBAC, SSO, audit UI, billing screens, live socket
+feeds, and design-system teams. This one deliberately ships: one auth method,
+polling, a single implicit tenant (until 11), and shadcn defaults under a strict
+token contract instead of a bespoke design system. The one place it refuses to cut
+the corner platforms also refuse to cut: the console consumes only the public API.
+That rule is cheap today and is the difference between "a UI that documents the
+platform's real contract" and "a second, secret contract that rots".
+
+## Go deeper
+
+<Resources>
+  <Resource
+    kind="docs"
+    title="Next.js App Router documentation"
+    href="https://nextjs.org/docs/app"
+  >
+    Server Components, streaming with Suspense, and route handlers — the three
+    Next.js mechanisms this plan's loading and exec-stream design leans on.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="better-auth documentation"
+    href="https://www.better-auth.com/docs"
+  >
+    Email/password setup, the database adapter and migrations, session middleware
+    — plus the organization/API-key plugins roadmap 11 will evaluate.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="tRPC documentation"
+    href="https://trpc.io/docs"
+  >
+    Procedures, context (where the session check lives), and the TanStack Query
+    integration used for all non-streaming data.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="TanStack Query — Important Defaults"
+    href="https://tanstack.com/query/latest/docs/framework/react/guides/important-defaults"
+  >
+    Staleness, refetching, and invalidation semantics — the difference between a
+    dashboard that feels live and one that spams the plane.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="TanStack Table documentation"
+    href="https://tanstack.com/table/latest"
+  >
+    The headless table model behind the sandbox list — column defs, sorting,
+    filtering — with shadcn's data-table recipe as the styling layer.
+  </Resource>
+  <Resource
+    kind="docs"
+    title="shadcn/ui — Theming"
+    href="https://ui.shadcn.com/docs/theming"
+  >
+    The CSS-variable token convention the theme contract is built on, including
+    the dark-mode class strategy.
+  </Resource>
+</Resources>

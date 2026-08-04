@@ -1,7 +1,8 @@
-# 11 — Postgres store (Neon) for production
+# 09 — Postgres store (Neon) for production
 
-Depends on: 09 (store shape final through tenants/quotas); 10's snapshot tables if
-already implemented.
+Depends on: 06 (the store and reconciler exist). Runs immediately after 08 in
+execution order, and deliberately precedes tenancy (11), the web console (10), and
+snapshots (12).
 
 ## Summary
 
@@ -10,9 +11,17 @@ same store contract runs on SQLite (kept for the fast unit lane) or Postgres,
 selected by config (`QUICKSPIN_DB=sqlite:path` vs a `postgres://` URL). Local
 development moves to Postgres running in Docker inside the Lima VM — the same engine
 as prod, so engine-specific bugs surface on your desk — while production uses Neon:
-serverless Postgres with a free tier and instant database branching. Every store behavior you've built (state machine,
-idempotency keys, admission-time quotas, events) must pass the same test suite on both
-backends before this roadmap closes.
+serverless Postgres with a free tier and instant database branching. Every store behavior
+built so far by roadmaps 01–08 (the sandbox state machine, idempotency keys, events,
+TTL and leases, the reconciler's queries) must pass the same test suite on both backends
+before this roadmap closes.
+
+The port happens *early*, not late. Everything the store still has to grow — the
+auth and tenant tables of roadmap 11, better-auth's console tables in roadmap 10 (which
+live in this same local Postgres), snapshot metadata in 12, hosts in 13, events and usage
+rollups in 17 — is then born on the migration rail and exercised by the conformance suite
+against both engines from its first day, instead of being written against SQLite and
+ported afterwards.
 
 ## Industry context
 
@@ -25,14 +34,25 @@ The porting exercise itself is an industry rite: the bugs live exactly where SQL
 forgiving (type affinity, `datetime` as text, implicit transaction behavior) and
 Postgres is not.
 
+Doing it now rather than after the schema stops moving is the deliberate inversion.
+Teams that port late pay twice — once writing SQLite-shaped SQL, once discovering which
+of it Postgres rejects — and they pay it on a schema large enough that nobody wants to
+touch it. Porting on a five-table schema is cheap, and it buys real Postgres concurrency
+*before* the roadmaps that depend on it: roadmap 11's quota-admission race and roadmap
+13's placement `FOR UPDATE` race are only meaningful against an engine with concurrent
+writers. Under SQLite's single writer both tests pass without proving anything. This
+ordering exists partly so those tests can be written against the engine that can fail
+them.
+
 ## Key concepts
 
 - Writing Go SQL against two engines: `pgx` vs `database/sql`+sqlite, placeholder
   styles (`?` vs `$1`), and where to stop abstracting (two small store
   implementations beat one query-builder).
-- Real transaction semantics: Postgres isolation levels, `SELECT ... FOR UPDATE` for
-  the quota admission race (roadmap 09's `TestQuotaRaceOnlyAdmitsCap` gets interesting —
-  SQLite serialized writes for you; Postgres will not).
+- Real transaction semantics: Postgres isolation levels and `SELECT ... FOR UPDATE`,
+  learned here on the tables that already exist so that roadmap 11's quota admission and
+  roadmap 13's placement can be written against them directly (SQLite serialized writes
+  for you; Postgres will not).
 - Migrations at startup under a Postgres advisory lock (`pg_advisory_lock`) so two
   racing planes cannot double-migrate — the files themselves exist since roadmap 05; what
   is new is dialect porting and the lock.
@@ -56,6 +76,13 @@ same on both backends". This is also the industry shape — Kubernetes' storage
 conformance tests and database driver compatibility suites are the same idea at
 scale: one contract, N implementations, zero per-implementation assertions.
 
+Because Postgres arrives now, the suite stops being a one-time port harness and becomes
+a *living* contract. Every later roadmap that adds a table or a query — tenants and
+quotas, snapshot metadata, hosts, usage rollups — has to keep both engines green, and
+SQLite stays in the tree precisely so that pressure never lifts: it is the offline, fast
+unit lane that roadmap 14's Lima-first invariant depends on. Portable SQL is then
+enforced by a test run rather than by remembering to write it.
+
 <Figure caption="One behavioral contract, two implementations: storetest.Run takes a factory and never learns which engine it is exercising. Each backend adds only a caller.">
   <svg viewBox="0 0 620 250" role="img" aria-label="The shared storetest suite exercises SQLite and Postgres stores through factories against the same assertions">
     <defs>
@@ -69,7 +96,7 @@ scale: one contract, N implementations, zero per-implementation assertions.
     <rect x="200" y="20" width="220" height="70" fill="none" stroke="#18231f" strokeWidth="1.5" />
     <text x="310" y="44" textAnchor="middle" fontSize="13" fill="#18231f">storetest.Run(t, factory)</text>
     <text x="310" y="62" textAnchor="middle" fontSize="10" fill="#405049">state machine · idempotency keys</text>
-    <text x="310" y="76" textAnchor="middle" fontSize="10" fill="#405049">quota race · guarded writes · events</text>
+    <text x="310" y="76" textAnchor="middle" fontSize="10" fill="#405049">lease claims · guarded writes · events</text>
     <rect x="30" y="150" width="180" height="52" fill="none" stroke="#18231f" strokeWidth="1.5" />
     <text x="120" y="172" textAnchor="middle" fontSize="12" fill="#18231f">TestSQLite (roadmap 05)</text>
     <text x="120" y="189" textAnchor="middle" fontSize="10" fill="#405049">factory: temp file, instant</text>
@@ -107,7 +134,9 @@ been physically unreachable until now. The port is less "translate the SQL" than
 
 ### Concept: `FOR UPDATE` — admission control needs a lock, not a read
 
-Roadmap 09's quota admission is a read-then-write: count the tenant's sandboxes, and
+There is no tenants table yet — 11 builds it — but the pattern is worth fixing in your
+head now, because this ordering exists so that 11 can be written straight onto it.
+Quota admission is a read-then-write: count the tenant's sandboxes, and
 insert if under cap. Under Postgres's default `READ COMMITTED` isolation, two
 transactions can both run the count, both see `cap - 1`, and both insert — the cap is
 breached and no error is ever raised, because neither transaction did anything
@@ -115,13 +144,15 @@ individually wrong. The classic fix is to make the check-then-take atomic by
 serializing on a lock the data itself carries: `SELECT ... FROM tenants WHERE id = $1
 FOR UPDATE` takes a row lock on the tenant row, so the second transaction blocks at
 the select until the first commits, then counts again and sees the true total. The
-tenant row becomes the admission mutex — the same category-3 shape as roadmap 17's IP
-allocator, expressed in SQL. This is also why `TestQuotaRaceOnlyAdmitsCap` "gets
-interesting": on SQLite it passes vacuously (one writer at a time, always), so only
-the Postgres run tells you whether your admission logic is correct or was merely
-being escorted. The alternative fixes — `SERIALIZABLE` isolation with retry loops, or
-a unique-index trick — are worth knowing and rejecting in the closing notes: row-lock
-admission is the smallest change that makes the race test meaningful.
+tenant row becomes the admission mutex — the same category-3 shape as roadmap 26's IP
+allocator, expressed in SQL. This is also why `TestQuotaRaceOnlyAdmitsCap`, when 11
+writes it, "gets interesting": on SQLite it would pass vacuously (one writer at a time,
+always), so only a Postgres run tells you whether the admission logic is correct or was
+merely being escorted — and after this roadmap, a Postgres run is available. Roadmap
+13's placement `FOR UPDATE` race has the same shape and the same dependency. The
+alternative fixes — `SERIALIZABLE` isolation with retry loops, or a unique-index trick —
+are worth knowing and rejecting: row-lock admission is the smallest change that makes a
+race test meaningful.
 
 <Mermaid
   caption="Under READ COMMITTED neither transaction does anything individually wrong — the fix is making the tenant row the admission mutex, so the loser recounts after the winner commits and sees the true total."
@@ -199,9 +230,11 @@ Committed decisions:
 
 - Time columns become `timestamptz`; IDs stay app-generated strings (no serial PKs to
   keep backends symmetric).
-- Quota admission uses `SELECT count(*) ... FOR UPDATE` on the tenant row in Postgres;
-  the store test suite gains a cross-backend concurrency test that would have caught
-  the difference.
+- The row-lock admission pattern (`SELECT ... FOR UPDATE` on the owning row) is settled
+  here as the house style for check-then-take, so roadmap 11's quota admission and
+  roadmap 13's placement are written on it rather than retrofitted onto it. What this
+  roadmap actually ships is a cross-backend concurrency test over the tables 01–08 built,
+  proving the suite can catch a difference SQLite hides.
 - The shared suite already lives as `storetest.Run(t, factory)` (roadmap 05 wrote it that
   way for exactly this moment); this roadmap adds the `TestPostgres` caller and extends
   the suite with the guard-clause write test: an UPDATE conditioned on current state
@@ -230,8 +263,8 @@ Committed decisions:
     after; SQLite path unchanged.
   </Task>
   <Task title="Implement the Postgres store with pgx">
-    A second small implementation of the roadmap 05 store interface — `$1` placeholders,
-    `timestamptz`, `FOR UPDATE` admission.
+    A second small implementation of the roadmap 05 store interface, covering only what
+    01–08 built — `$1` placeholders, `timestamptz`, guarded writes, lease claims.
   </Task>
   <Task title="Write hack/testdb.sh">
     Start a disposable local `docker run postgres` in the Lima VM and export its URL,
@@ -297,16 +330,18 @@ Committed decisions:
     API key outside the repo — env var or a git-ignored file.
   </Hint>
   <Hint
-    title="Make the quota race real, then win it with a row lock"
-    check="TestQuotaRaceOnlyAdmitsCap passes repeatedly under go test -race -count=10 against Postgres, admitting exactly cap sandboxes."
+    title="Make a real race, then win it with a row lock"
+    check="The contended lease-claim test passes repeatedly under go test -race -count=10 against Postgres, with exactly one claimant per sandbox."
   >
-    First confirm the race exists: run the ported-but-unfixed admission at
-    concurrency and watch the cap breach — a failure worth seeing once. Then wrap
-    admission in a transaction: `SELECT id FROM tenants WHERE id = $1 FOR UPDATE`,
-    count within the same transaction, insert or reject, commit. The tenant row is
-    now the admission mutex. If the test deadlocks instead of passing, look for a
-    second code path locking tenant rows in a different order, or an admission
-    transaction left open across a network call.
+    You have no tenants yet, so rehearse the pattern on the contended row you do
+    have: roadmap 06's lease claim. First confirm the race exists — run concurrent
+    claimants against one Postgres database and watch two of them win, a failure
+    worth seeing once. Then wrap the claim in a transaction: `SELECT ... WHERE id =
+    $1 FOR UPDATE`, re-read within the same transaction, write or bail, commit. The
+    row is now the mutex. Roadmap 11 reuses this recipe verbatim on the tenant row
+    for quota admission, and roadmap 13 on the host row for placement; if either
+    later deadlocks, look for a second code path locking the same rows in a
+    different order, or a transaction left open across a network call.
   </Hint>
   <Hint
     title="Guard-clause writes: assert on RowsAffected, identically"
@@ -340,14 +375,16 @@ Committed decisions:
 - `make test` — SQLite suite still green, untouched behavior.
 - `make test-store-pg` — the identical `storetest.Run` suite green against a Neon
   branch (or local Postgres), including:
-  - `TestQuotaRaceOnlyAdmitsCap` at meaningful concurrency (this is the test that
+  - the contended lease-claim test at meaningful concurrency (this is the test that
     proves Postgres-correctness, not just Postgres-compatibility).
   - `TestIdempotencyKeyReturnsSameSandbox` under concurrent duplicate creates.
   - `TestMigrationsAreIdempotent` — two planes starting simultaneously against one
     fresh database both come up healthy (advisory lock works).
-- `hack/validate-11.sh`: boots the full plane against the local Docker Postgres (optionally a Neon branch via --neon), runs the roadmap 05
+- `hack/validate-09.sh`: boots the full plane against the local Docker Postgres (optionally a Neon branch via --neon), runs the roadmap 05
   end-to-end curl flow, kills and restarts the plane, confirms state survived in Neon.
-- Closing notes must list every behavior difference found between backends.
+- Closing notes must list every behavior difference found between backends, and state
+  the standing rule the later roadmaps inherit: any new table or query keeps both
+  engines green.
 
 Deliberately untested: failover/read replicas, connection-storm behavior, Neon
 scale-to-zero cold-start latency under load (worth *measuring* once and noting).
@@ -357,7 +394,9 @@ scale-to-zero cold-start latency under load (worth *measuring* once and noting).
 A commercial platform would run HA Postgres with PITR, schema-change review, and a
 data-access layer team. You get managed HA from Neon for free-tier money and keep two
 hand-written store implementations, accepting the double-maintenance cost because the
-SQLite path is what keeps local dev and `make test` instant and offline. The discipline
+SQLite path is what keeps local dev and `make test` instant and offline. Paying that cost
+from roadmap 09 rather than at the end is the trade: more roadmaps carry two
+implementations, but no roadmap ever carries a port. The discipline
 kept from industry: one conformance suite, versioned migrations, and no ORM — the SQL
 you debug at 2am is the SQL you wrote.
 

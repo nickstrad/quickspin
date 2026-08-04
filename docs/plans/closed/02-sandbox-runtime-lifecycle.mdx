@@ -23,7 +23,7 @@ Every platform has this layer. In E2B it's the code behind `Sandbox.create()`; i
 Daytona, the workspace provisioner; in Kubernetes, the kubelet's container-runtime
 calls. The industry pattern worth copying is the **backend-neutral interface**: the
 caller speaks in sandbox specs and sandbox IDs, never in Docker terms. That is what
-lets roadmap 17 slide Firecracker underneath without rewriting the control plane — exactly
+lets roadmap 26 slide Firecracker underneath without rewriting the control plane — exactly
 how Daytona supports multiple providers and how Kubernetes swapped Docker for
 containerd behind the CRI.
 
@@ -206,7 +206,7 @@ flowchart LR
 />
 
 <StudyPrompt question="Why not just use the container ID as the sandbox ID?">
-  Ask what happens in roadmap 17 when the same sandbox is backed by a Firecracker
+  Ask what happens in roadmap 26 when the same sandbox is backed by a Firecracker
   microVM — there is no container ID. Any identity minted by the backend ties
   every caller to that backend. Identity that must outlive a backend has to be
   minted above it, which is why quickspin generates its own IDs and demotes the
@@ -753,7 +753,7 @@ Commercial platforms start at containerd or a microVM for isolation and density;
 is a fat dependency with a root daemon. You start with Docker because its API is the
 best-documented on-ramp and the interface above quarantines the choice. Also deferred:
 image distribution (you pull public images by hand), and any notion of pools or reuse —
-one create equals one cold container, measured honestly, until roadmap 10.
+one create equals one cold container, measured honestly, until roadmap 12.
 
 ## Go deeper
 

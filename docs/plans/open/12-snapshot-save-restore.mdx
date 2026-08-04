@@ -1,6 +1,6 @@
-# 10 — Save, restore, and warm starts
+# 12 — Save, restore, and warm starts
 
-Depends on: 07 (06's reconciler assumed).
+Depends on: 07, 09 (06's reconciler assumed; snapshot tables are born as Postgres-rail migrations).
 
 ## Summary
 
@@ -25,7 +25,7 @@ Your Docker-commit version preserves **filesystem only, not memory or running
 processes** — a real and useful capability (an agent's installed deps and written code
 survive), but a different promise than E2B's, and the roadmap requires naming that
 difference in your API docs rather than blurring it. Filesystem-vs-memory snapshotting
-is precisely the boundary where microVMs earn their keep, which sets up roadmap 17.
+is precisely the boundary where microVMs earn their keep, which sets up the optional microVM deep dive (roadmap 26).
 
 ## Key concepts
 
@@ -158,8 +158,10 @@ POST /v1/sandboxes             spec gains {"snapshot": "deps-installed"} as an
 ```
 
 Schema: `snapshots(id, tenant_id, name, image_ref, size_bytes, created_at,
-source_sandbox_id)`. Runtime interface gains `Snapshot(ctx, id) (imageRef, error)`;
-`Spec` gains `Snapshot string`.
+source_sandbox_id)`. The table is born as a migration on roadmap 09's rail and must
+keep both engines green in the conformance suite — the first new table to pay the
+standing rule 09 established. Runtime interface gains
+`Snapshot(ctx, id) (imageRef, error)`; `Spec` gains `Snapshot string`.
 
 Committed decisions: save destroys the source sandbox (a snapshot is a checkpoint you
 resume *from*, not a paused thing you resume — E2B-style pause is out of scope and the
@@ -175,7 +177,7 @@ quota; guest binary is re-injected on restore so snapshots never bake in a stale
   </Task>
   <Task title="Add schema, endpoints, scoping, and quota">
     The `snapshots` table, the three endpoints, tenant scoping, and the admission-time
-    byte quota in the style of roadmap 09.
+    byte quota in the style of roadmap 11.
   </Task>
   <Task title="Add snapshot GC to the reconciler">
     Unreferenced or over-quota snapshot images get garbage-collected by the roadmap 06
@@ -191,7 +193,8 @@ quota; guest binary is re-injected on restore so snapshots never bake in a stale
     step, e.g. `pip install` of a few packages), reporting p50/p95 per phase to a CSV
     checked into the closing notes. The p50/p95 table and the method behind it also
     land in `docs/reference/demo-latency.mdx` — the single durable benchmark doc that
-    roadmap 24 extends with per-step agent timing and roadmap 17 with Firecracker boot
+    roadmap 24 extends with per-step agent timing, roadmap 18 with gVisor-vs-runc
+    numbers, and roadmap 26 with Firecracker boot
     numbers, so every latency claim the project makes lives on one page.
   </Task>
 </TaskList>
@@ -349,7 +352,7 @@ that silently consumes disk forever; commercial platforms meter and bill it, you
   >
     The technology behind the memory-inclusive snapshots E2B offers — reading it makes
     the filesystem-vs-memory promise in this roadmap's API docs concrete, and sets up
-    roadmap 17.
+    roadmap 18.
   </Resource>
   <Resource
     kind="video"

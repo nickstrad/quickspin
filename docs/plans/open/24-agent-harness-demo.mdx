@@ -1,6 +1,6 @@
 # 24 — Capstone: agent harness on Quickspin
 
-Depends on: 22 (or 23), 10 recommended.
+Depends on: 22 (or 23), 12 recommended.
 
 ## Summary
 
@@ -24,7 +24,7 @@ This is the customer's-eyes view: it is exactly what E2B's "code interpreter" qu
 and Anthropic's tool-use loops do — the LLM never touches the host; every `write_file`
 / `run_command` tool call becomes an SDK call into an isolated sandbox. Platforms live
 or die on how this loop feels: sandbox startup latency shows up as user-visible agent
-latency (your roadmap 10 snapshots exist for exactly this), TTLs protect you from crashed
+latency (your roadmap 12 snapshots exist for exactly this), TTLs protect you from crashed
 harnesses (roadmap 06), and typed SDK errors decide whether the agent can recover or just
 dies (roadmaps 22/23). Dogfooding the platform through a real agent is how every platform
 team finds its actual API gaps.
@@ -54,7 +54,7 @@ loop needs a hard iteration cap so a confused model cannot burn tokens forever. 
 `task_done` tool is the model's way of ending the loop deliberately — the harness
 treats it as a claim to verify, not a verdict.
 
-<Figure caption="One agent step: the model roadmaps against the transcript, the harness translates tool calls into SDK calls, the sandbox does the work, and results flow back as the next user message.">
+<Figure caption="One agent step: the model reasons against the transcript, the harness translates tool calls into SDK calls, the sandbox does the work, and results flow back as the next user message.">
   <svg viewBox="0 0 640 200" role="img" aria-label="Loop between the Anthropic API, the harness, the quickspin SDK, and the sandbox">
     <defs>
       <marker id="arrow12" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -173,9 +173,10 @@ harness's verdict is only "did the task's check command exit 0".
   </Task>
   <Task title="Build the base snapshot">
     A small `setup.ts` using the SDK builds the snapshot the harness restores from.
-    Make the starting point a config switch — snapshot name or plain image — because
-    roadmap 12 runs this same harness against Firecracker-backed prod, where snapshots
-    are unsupported and the harness must fall back to image-based creates.
+    Make the starting point a config switch — snapshot name or plain image — as
+    plain config hygiene: it keeps the harness runnable against a fresh environment
+    that has no snapshots yet, and against any future backend where snapshots are
+    unsupported.
   </Task>
   <Task title="Implement the tool loop">
     `harness.ts` + `tools.ts`: tool schemas, the stop-reason loop, dispatch into the
@@ -214,7 +215,7 @@ harness's verdict is only "did the task's check command exit 0".
     `setup.ts`: create from the base image, exec the installs (toolchain, test
     runner, and task (a)'s pre-seeded repo), call `sbx.save(name)`. Read the start
     point from config (env var or a small JSON) into one function that returns create
-    options — that seam is what roadmap 12 flips when snapshots are unavailable. Rebuild
+    options — that seam is what roadmap 14 flips when snapshots are unavailable. Rebuild
     is rerun-the-script; snapshots are cattle.
   </Hint>
   <Hint

@@ -1,6 +1,6 @@
 # 22 — TypeScript SDK
 
-Depends on: 07, 09 (the platform surface as finalized through roadmap 21 is what
+Depends on: 07, 11 (the platform surface as finalized through roadmap 21 is what
 gets generated).
 
 ## Summary
@@ -196,7 +196,7 @@ flowchart TD
     M["make test-sdk-ts"] --> T["mktemp -d<br/>throwaway SQLite file"]
     T --> S["start control plane<br/>in the background"]
     S --> H["poll health endpoint<br/>until ready"]
-    H --> K["mint a key via the<br/>roadmap 09 admin CLI"]
+    H --> K["mint a key via the<br/>roadmap 11 admin CLI"]
     K --> V["export env vars,<br/>run npx vitest run"]
     V --> E["trap ... EXIT kills the<br/>server on every outcome"]
 `}
@@ -254,7 +254,7 @@ flowchart TD
   >
     Shell script shape: `mktemp -d` for the SQLite file, start the control plane in
     the background, poll its health endpoint until ready (curl in a loop with a
-    timeout), mint a key with the roadmap 09 admin CLI, export `QUICKSPIN_API_KEY` and
+    timeout), mint a key with the roadmap 11 admin CLI, export `QUICKSPIN_API_KEY` and
     the base URL, run `npx vitest run`, and kill the server in a `trap ... EXIT` so
     cleanup survives test failure. Vitest picks up the env vars without help.
   </Hint>
@@ -265,7 +265,7 @@ flowchart TD
     For liveness, stream a command that prints then sleeps (`sh -c 'echo hi; sleep
     2'`) and assert the first event arrives well before total elapsed time — a
     buffering SDK collapses the two. For errors, drive each failure for real: a
-    garbage key for `AuthenticationError`, a tenant quota of zero (roadmap 09 admin CLI)
+    garbage key for `AuthenticationError`, a tenant quota of zero (roadmap 11 admin CLI)
     for `QuotaExceededError`, exec after `kill()` for `SandboxNotFoundError`. Use
     Vitest's `rejects.toBeInstanceOf` so message wording stays out of the contract.
   </Hint>

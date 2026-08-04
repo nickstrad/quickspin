@@ -1,6 +1,16 @@
-# 14 — Cloud host provisioning and fleet observability
+# 15 — Cloud host provisioning and fleet observability
 
-Depends on: 13.
+Depends on: 13; the provisioning half also needs 14 (there is no cloud account
+wiring to automate before the spin-up roadmap exists).
+
+This roadmap has two separable halves that need not be done together. The
+**observability half** — `/metrics`, Grafana, the two alerts, tracing, the runbook
+and game day — has no cloud dependency and can run against the Lima fleet any time
+after 13. The **provisioning half** — the Hetzner `Provider`, `admin host
+create|delete`, cloud-init joining, the cost-safety reconciler — follows 12, and is
+also where multi-host-in-the-cloud gets its cheap proof: `admin host create` →
+validate placement across two hosts → `admin host delete`, at hourly cost rather
+than a standing bill.
 
 ## Summary
 
@@ -67,7 +77,7 @@ unable to touch servers Quickspin doesn't own.
 
 ### Concept: user-data is how a server joins the fleet without you
 
-Roadmap 12's cloud-init made one host reproducible; this roadmap makes it *parameterized*.
+Roadmap 14's cloud-init made one host reproducible; this roadmap makes it *parameterized*.
 When the provider creates a server it attaches user-data — a cloud-init document the
 machine executes on first boot. Template into it the three things a worker cannot
 invent: its per-host token, the plane URL, and the arch-appropriate artifacts. The
@@ -156,7 +166,7 @@ flowchart TD
 <Callout tone="warning" title="Orphaned servers are silent money">
   Every code path that calls `CreateServer` must assume it can crash on the next
   line. The label goes on at creation (atomically, in the create request — never a
-  second call), the reaper trusts only the label, and `hack/validate-14.sh` ends by
+  second call), the reaper trusts only the label, and `hack/validate-15.sh` ends by
   asserting the provider's labeled server list matches expectations exactly, failing
   loudly otherwise. A leaked container costs RAM; a leaked CX32 costs real money
   every hour until the invoice tells you about it.
@@ -233,7 +243,7 @@ revoked on delete.
     idempotent delete, and a fake provider for every unit test.
   </Task>
   <Task title="Parameterize cloud-init into user-data templating">
-    A hostd-only variant of roadmap 12's cloud-init with the token, plane URL, and
+    A hostd-only variant of roadmap 14's cloud-init with the token, plane URL, and
     arch templated in at create time.
   </Task>
   <Task title="Add the admin verbs">
@@ -267,7 +277,7 @@ revoked on delete.
     what limit bites first (memory? disk? conntrack?), measured not guessed, and the
     approximate cost per sandbox-hour it implies.
   </Task>
-  <Task title="Write hack/validate-14.sh">
+  <Task title="Write hack/validate-15.sh">
     The live validation from the definition of done, ending with the loud
     no-leaked-servers assertion.
   </Task>
@@ -295,7 +305,7 @@ revoked on delete.
     title="Template user-data and test it without a cloud"
     check="TestUserDataContainsTokenAndPlaneURL renders the template and finds the token, plane URL, and arch in the output — and finds no unexpanded {{ markers."
   >
-    Use `text/template` over a hostd-only derivative of roadmap 12's
+    Use `text/template` over a hostd-only derivative of roadmap 14's
     `hack/cloud-init.yaml` (no Caddy, no plane — just hostd, its env file, ufw).
     The variables are exactly what a host cannot invent: token, plane URL, arch.
     Keep the template as a repo file rather than a Go string so it stays reviewable
@@ -358,7 +368,7 @@ revoked on delete.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: validate-14 ends with a server still billing"
-    check="The final assertion of hack/validate-14.sh — the provider's quickspin-labeled server list matches the expected set exactly — passes even on a run where you made an earlier step fail deliberately."
+    check="The final assertion of hack/validate-15.sh — the provider's quickspin-labeled server list matches the expected set exactly — passes even on a run where you made an earlier step fail deliberately."
   >
     Structure the script so cleanup is unconditional: a shell `trap ... EXIT` that
     lists labeled servers and deletes stragglers, with the final assertion still
@@ -385,11 +395,12 @@ Unit tests with the fake provider (`make test`):
 - `TestDeleteRefusesUndrainedHost` and `--force` path destroys sandboxes first.
 - `TestUserDataContainsTokenAndPlaneURL` (templating, no live API).
 
-Live validation `hack/validate-14.sh` (spends real money — cents — and says so):
+Live validation `hack/validate-15.sh` (spends real money — cents — and says so):
 
 - `admin host create` → within a bounded window the hosts table shows a new ready
   host that came up with **zero SSH interventions**.
-- A sandbox (on whatever backend prod runs — docker until roadmap 17's cutover) is
+- A sandbox (on whatever backend prod runs — docker, at either isolation level once
+  roadmap 18 lands) is
   placed on the new host and passes exec/files.
 - Drain → placement avoids it; delete → Hetzner API confirms the server is gone and
   the token is revoked. Final assertion: provider server list contains exactly the

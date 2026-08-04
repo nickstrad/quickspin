@@ -99,7 +99,9 @@ Every roadmap must define completion as something a machine can check, not a fee
   earlier ones; state dependencies explicitly at the top (`Depends on: 03, 05`).
 - Roadmaps define interfaces; the user writes the Go implementations. SDK roadmaps (TypeScript,
   Python) are the exception: there the agent may generate client code and the user's job
-  is review plus making the contract tests pass.
+  is review plus making the contract tests pass. The web console (roadmap 10) carries the
+  same exception: it is implemented AI-driven — the user directs and reviews rather than
+  hand-writing the TypeScript — because the learning target is the platform, not React.
 - When a roadmap completes, move it to `closed/`, add
   `{/* Completed YYYY-MM-DD. <deviation note> */}` below its dependency line, and update
   `docs/index.mdx`. This note is not optional decoration: the reader

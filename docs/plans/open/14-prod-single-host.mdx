@@ -1,41 +1,43 @@
-# 12 — Production: one live host, Docker-backed, public API
+# 14 — Production spin-up: one cloud host, on demand
 
-Depends on: 11. Roadmap 17
-is deliberately **not** a dependency: prod launches on the Docker backend, and roadmap
-17's final task cuts it over to Firecracker later.
+Depends on: 09, 11, 13. Runs *after* the fleet track's registration work: by the time
+this roadmap starts, hosts join the plane by registering, and this roadmap simply
+runs that same path on a machine that isn't your laptop.
 
 ## Summary
 
-Put Quickspin on the public internet: one Hetzner Cloud host running the control plane
-and the Docker backend, state in Neon, TLS on a real domain
-(`api.quickspin.<yourdomain>`), managed by systemd, deployed by a script in the repo.
-The CLI gains a base-URL knob so the same commands you run against Lima drive prod
-from your Mac — the manual acceptance pass this roadmap exists to enable. The SDK-era
-demo harness (roadmap 24) revisits prod at the end of the sequence. Local Lima remains the dev
-environment; this roadmap adds prod beside it, not instead of it.
+Deploy the already-multi-host-capable plane to one cloud host, as a repeatable
+capability rather than a standing milestone: one Hetzner Cloud host running the
+control plane and `quickspin-hostd` (which registers with the plane exactly as the
+Lima hostds do — no static-config prod fork exists to build), state in Neon, TLS on
+a real domain (`api.quickspin.<yourdomain>`), managed by systemd, deployed by a
+script in the repo — and torn down by one, so a full spin-up → accept → tear-down
+cycle costs hours of billing, not a monthly bill. The CLI gains a base-URL knob so
+the same commands you run against Lima drive prod from your Mac — the manual
+acceptance pass this roadmap exists to enable. Local Lima remains the dev
+environment; prod is a mode you can enter any time, not a gate the roadmap passes
+through once.
 
-The sequencing is a deliberate career-evidence decision: the production track (12 →
-13 → 14) runs on Docker first so "multi-node, observable, failure-aware platform"
-lands as early as possible, and roadmap 17's guest-agent-based backend slides underneath
-afterward without touching a workload code path (the roadmap 07 architecture guarantees
-it). Nothing in 12–14 requires Firecracker.
-
-<KeyPoint label="What changes and what doesn't">
-  Nothing in the plane's code becomes "prod-only". The same binary runs in Lima and on
-  Hetzner; only the environment differs. If a behavior needs an `if prod` branch,
-  something upstream is mis-designed.
+<KeyPoint label="The Lima-first invariant">
+  Every roadmap's definition of done validates in Lima; the cloud host runs the
+  identical registration and deploy path, so nothing later forks on "local vs
+  prod". Nothing in the plane's code becomes "prod-only" — the same binaries run in
+  Lima and on Hetzner; only the environment differs. If a behavior needs an
+  `if prod` branch, something upstream is mis-designed, and if the spin-up script
+  stops working against the current tree, a roadmap has broken the shared path —
+  that is a bug, not drift to accept.
 </KeyPoint>
 
 ## Industry context
 
 This is a platform's minimum viable production shape, and it is deliberately boring:
 binary + systemd + Caddy + managed Postgres is how many real single-team services run
-before Kubernetes is justified. The host choice is made for the *future*, not the
-present: roadmap 17's Firecracker cutover will need `/dev/kvm`, and most cloud VMs don't
-expose it — the industry runs bare metal (E2B, Fly) or nitro `.metal` (AWS). Hetzner
-Cloud is the solo-scale loophole — ordinary cheap VMs with KVM enabled — so choosing
-it now means the cutover later is a software change, not a re-provisioning. Everything
-else here (TLS termination in front of the plane, secrets
+before Kubernetes is justified. Hetzner Cloud is the provider because it is cheap
+with a simple API — and, as a free option, its ordinary VMs expose `/dev/kvm`, which
+most cloud VMs don't, so the optional microVM track (roadmaps 26/19) needs no
+re-provisioning if it is ever picked up. The core arc's isolation upgrade (gVisor,
+roadmap 18) needs no KVM at all, so nothing here hangs on that. Everything
+else (TLS termination in front of the plane, secrets
 in an env file with tight permissions, deploy-by-artifact) is standard practice scaled
 down to one machine.
 
@@ -101,7 +103,7 @@ from the internet) is the regression test for this boundary.
     <text x="435" y="101" textAnchor="middle" fontSize="10" fill="#405049">localhost:8080</text>
     <rect x="370" y="140" width="130" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
     <text x="435" y="160" textAnchor="middle" fontSize="12" fill="#18231f">docker sandboxes</text>
-    <text x="435" y="175" textAnchor="middle" fontSize="10" fill="#405049">managed by the plane</text>
+    <text x="435" y="175" textAnchor="middle" fontSize="10" fill="#405049">via registered hostd</text>
     <line x1="120" y1="88" x2="198" y2="88" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow16)" />
     <text x="159" y="78" textAnchor="middle" fontSize="10" fill="#8f3423">https://api...</text>
     <line x1="310" y1="88" x2="368" y2="88" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow16)" />
@@ -162,24 +164,33 @@ flowchart TD
 ## Design and interfaces
 
 ```text
-Host: Hetzner CX-class (x86_64, /dev/kvm — unused until roadmap 17's cutover, but the
-  reason this provider was picked), Ubuntu LTS.
+Host: Hetzner CX-class (x86_64), Ubuntu LTS. (/dev/kvm comes free — only the
+  optional microVM track would ever use it.)
 Provisioning: hack/cloud-init.yaml checked into the repo — creates a deploy user,
   installs Caddy + Docker, writes systemd units, ufw rules. The host must be
   reproducible from this file alone; no hand-configured snowflake.
-Processes: quickspin serve (localhost:8080) <- Caddy (:443, TLS) ; docker-backed
-  sandboxes managed by the plane as in roadmaps 02-04.
-Secrets: /etc/quickspin/env (mode 600) — Neon URL, nothing else in the repo.
+Processes: quickspin serve (localhost:8080) <- Caddy (:443, TLS) ;
+  quickspin-hostd registering with the plane over localhost, exactly the
+  roadmap 13 path; docker-backed sandboxes managed through hostd as in Lima.
+Lifecycle scripts: hack/prod-up.sh (create server from cloud-init, deploy, mint
+  host token, health-gate) and hack/prod-down.sh (destroy the server; Neon state
+  survives, so the next prod-up resumes the same tenant and history).
+Secrets: /etc/quickspin/env (mode 600) — Neon URL, host token, nothing in the repo.
 CLI: --base-url flag + QUICKSPIN_BASE_URL env var (default stays localhost).
-New endpoint: GET /v1/status (unauthenticated) — version, uptime, backend, DB ping.
+New endpoint: GET /v1/status (unauthenticated) — version, uptime, host summary,
+  DB ping.
 ```
 
 Committed decisions: single host, no HA, no CDN, no container packaging (a static Go
 binary makes Docker-for-deploy pure ceremony — Docker on the host is the sandbox
 backend, not a deploy mechanism); deploys are brief-downtime restarts (seconds —
 acceptable and stated); the Lima path keeps working with SQLite so local dev never
-needs the internet; prod launches Docker-backed, with the Firecracker cutover owned
-by roadmap 17's final task rather than blocking this roadmap.
+needs the internet; plane and hostd share the host and talk over localhost — the
+process split and registration path are identical to Lima, only the address is real;
+tear-down is first-class: the roadmap is done when the *cycle* works, not when a
+server happens to be running. gVisor (roadmap 18) on this host is later a config
+change to the same Docker backend — flipping the default runtime handler, reversible,
+with snapshots still working.
 
 <Callout tone="system" title="The host is reproducible from the repo or it doesn't count">
   Every package installed, unit written, and firewall rule added must originate from
@@ -196,8 +207,10 @@ by roadmap 17's final task rather than blocking this roadmap.
     flip from your arm64 Mac).
   </Task>
   <Task title="Write hack/cloud-init.yaml and create the server">
-    Deploy user, Caddy + Docker install, systemd units, ufw rules — then create
-    the Hetzner server from that file via console or CLI.
+    Deploy user, Caddy + Docker install, systemd units for both the plane and
+    hostd, ufw rules — then create the Hetzner server from that file via console
+    or CLI. hostd registers with the plane over localhost at boot, the same
+    roadmap 13 path Lima exercises daily.
   </Task>
   <Task title="DNS record and Caddyfile; confirm TLS">
     Point `api.quickspin.<yourdomain>` at the host's IP, write the Caddyfile reverse
@@ -215,10 +228,16 @@ by roadmap 17's final task rather than blocking this roadmap.
     Over SSH with the admin CLI — the only manual step, and it produces a secret that
     lives on your Mac, not in the repo.
   </Task>
-  <Task title="Write hack/validate-12.sh and accept prod by hand">
+  <Task title="Write hack/validate-14.sh and accept prod by hand">
     The Mac-side validation script from the definition of done, then a hand-driven
     create → exec → files → destroy session against the public domain, recorded in
     the closing note.
+  </Task>
+  <Task title="Wrap the cycle in hack/prod-up.sh and hack/prod-down.sh">
+    prod-up: create the server from cloud-init, deploy, mint the host token,
+    health-gate. prod-down: destroy the server (Neon state survives). Done means
+    running the full cycle twice — the second spin-up proves nothing depended on
+    leftovers from the first.
   </Task>
 </TaskList>
 
@@ -244,9 +263,10 @@ by roadmap 17's final task rather than blocking this roadmap.
     rules (`ufw default deny incoming`, `ufw allow 443/tcp`, `ufw allow OpenSSH`,
     `ufw --force enable`) as `write_files` + `runcmd` entries. Debug a bad boot with
     `cloud-init status --long` and `/var/log/cloud-init-output.log` on the host. Pick
-    a CX line explicitly and verify `/dev/kvm` exists even though nothing uses it
-    yet — it is why Hetzner was chosen, and discovering its absence during roadmap 17's
-    cutover would mean re-provisioning the host.
+    a CX line explicitly; `ls /dev/kvm` is worth one look while you're there — it
+    comes free on Hetzner and is what keeps the optional microVM track (26) a
+    software change rather than a re-provisioning, though nothing in the core arc
+    uses it.
   </Hint>
   <Hint
     title="DNS then Caddy, in that order"
@@ -293,7 +313,7 @@ by roadmap 17's final task rather than blocking this roadmap.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: a port that answers when it shouldn't"
-    check="From the Mac, nc -vz -w3 <host-ip> 8080 and a guest port both fail (refused or timed out), while 443 connects; hack/validate-12.sh asserts exactly this."
+    check="From the Mac, nc -vz -w3 <host-ip> 8080 and a guest port both fail (refused or timed out), while 443 connects; hack/validate-14.sh asserts exactly this."
   >
     If 8080 is reachable from the internet, check three suspects in order. One: the
     plane's listen address — `localhost:8080`, never `:8080`; confirm on the host
@@ -308,13 +328,15 @@ by roadmap 17's final task rather than blocking this roadmap.
 
 ## Definition of done
 
-`hack/validate-12.sh` runs **from the Mac** against the public URL, exits 0, checking:
+`hack/validate-14.sh` runs **from the Mac** against the public URL, exits 0, checking:
 
-- `/v1/status` over valid TLS reports the expected version and `db: ok`.
+- `/v1/status` over valid TLS reports the expected version, `db: ok`, and one
+  ready registered host — proof the roadmap 13 registration path, not a static
+  config, wired this host in.
 - Full lifecycle with `backend: docker`: create → running, exec streams, file
   round-trip, destroy — all via the public API.
 - Save/restore works in prod: `save` a sandbox, create from the snapshot, and verify
-  the restored filesystem (roadmap 10's docker-commit snapshots run natively on this
+  the restored filesystem (roadmap 12's docker-commit snapshots run natively on this
   backend).
 - Auth is enforced (no key ⇒ 401) and the plane's plaintext port and a guest port are
   **not** reachable from the internet (probe and assert connection refused/filtered).
@@ -322,12 +344,14 @@ by roadmap 17's final task rather than blocking this roadmap.
   and a new sandbox can be created (systemd + reconciler did their jobs).
 - Deploy safety: `hack/deploy.sh` with a deliberately broken binary rolls back and the
   API stays serving the old version.
+- The cycle: `hack/prod-down.sh` destroys the server, and a second
+  `hack/prod-up.sh` from nothing reaches a green `validate-12` — spin-up is a
+  capability, not an artifact.
 
 Plus: the manual acceptance session — create, exec, files, destroy driven from the
 Mac against the public domain — recorded in the roadmap's closing note. The SDK-era
 demo harness (roadmap 24) repeats this against prod with only env-var changes at the
-end of the sequence; the backend config switch it will need for Firecracker sandboxes
-belongs to roadmap 17's cutover task.
+end of the sequence.
 
 Deliberately untested: sustained load, disk-full behavior, Hetzner outages, multiple
 concurrent deploys.

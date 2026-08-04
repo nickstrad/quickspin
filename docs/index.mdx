@@ -18,20 +18,42 @@ behavior or authorize implementation by itself.
 
 ### Platform roadmap
 
-Milestones 01–06 are complete. Roadmaps 07–25 describe intended future states rather
-than current behavior; the codebase remains authoritative.
+Milestones 01–06 are complete. Roadmaps 07–27 describe intended future states rather
+than current behavior; the codebase remains authoritative. File numbers match the
+intended execution order (optional deep dives sit at 19, 21, and 25–27).
 
-The ordering is platform-first: 01–08 are the sequential spine ending in the
-three-binary architecture (control plane, host agent, guest agent); 09–16 are the
-production track that takes it to live, multi-host, metered cloud operation — auth,
-snapshots, Postgres, a manually-accepted prod deployment, host registration and
-placement, provisioning and observability, compute pools, and usage metering; 17–19
-add compute backends in order of least invasiveness (Firecracker behind the existing
-seams, cloud-VM providers for it, then Kubernetes + Kata); 20–21 are the
-agent-workflow rails (PR-capable sandboxes with secret injection, brokered per-agent
-storage); 22–24 are the deliberately-last SDK-and-demo tail — TypeScript and Python
-SDKs, then the agent-harness capstone driving the finished platform; 25 is an
-optional isolation deep dive that can slot in any time after 01.
+The ordering is platform-first and **Lima-first**: every roadmap's definition of
+done validates locally in Lima, and the cloud runs the identical paths, so prod is a
+mode the platform can enter at any time rather than a gate the sequence passes
+through. 01–08 are the sequential spine ending in the three-binary architecture
+(control plane, host agent, guest agent). Then the store moves first: 09 ports it to
+Postgres immediately, so every later schema is born on the migration rail and the
+conformance suite. 10 builds the web console — an AI-driven Next.js app
+(better-auth sessions, tRPC, shadcn) that becomes the platform's first standing
+consumer against the pre-auth plane. 11 adds the machine identity boundary
+(tenants, hashed API keys, transactional quotas) and closes the console loop:
+accounts map to tenants and the console starts calling like any other client. 12
+adds snapshots; 13 grows one host to a fleet in two halves (scheduling over two
+static Lima hostds, then registration/heartbeats to n hosts); 14 deploys the
+already-fleet-capable plane to one cloud host as a cheap, repeatable
+spin-up/tear-down; 15's observability half can run right after 13 while its
+provisioning half follows 14; 16 makes capacity first-class and 17 adds metering,
+ending at usage records. 18 is the core isolation upgrade: gVisor as a per-sandbox
+runtime inside the existing Docker backend — no KVM, no cutover, snapshots intact.
+20 is the agent-workflow rail (PR-capable sandboxes with secret injection), placed
+just before the SDKs expose it; 22–24 are the deliberately-last SDK-and-demo tail —
+TypeScript and Python SDKs, then the agent-harness capstone. The optional deep
+dives: 19 (cloud-VM providers for microVM pools), 21 (brokered agent storage —
+snapshots-first for now), 25 (mini container runtime by hand), 26 (Firecracker),
+27 (Kubernetes + Kata).
+
+**Minimum complete arc.** Twenty open roadmaps at this depth is plausibly 1.5–3
+years solo, and value density drops after 18. The finish line short of the full
+tree is **07 → 08 → 09 → 10 → 11 → 12 → 13, then 18, 22, 24** — a multi-host Lima
+platform with a console, one real isolation upgrade, one SDK, and the capstone —
+with 14 available as the on-demand cloud spin-up whenever a live host is wanted.
+Everything else is depth to add by appetite; 20 (depends only on 03/04) and 25
+(independent after 01) are the change-of-pace options.
 
 1. [`01-linux-lab-environment.mdx`](plans/closed/01-linux-lab-environment.mdx) — Lima Linux
    VM, Docker socket, Go cross-compilation, environment validation script.
@@ -51,42 +73,50 @@ optional isolation deep dive that can slot in any time after 01.
 8. [`08-host-agent.mdx`](plans/open/08-host-agent.mdx) — `quickspin-hostd`, the
    host-side control point: the plane's only address on a host, proxying lifecycle to
    the runtime and workload calls to guests.
-9. [`09-auth-tenancy-quotas.mdx`](plans/open/09-auth-tenancy-quotas.mdx) — API keys,
-   tenant scoping, admission-time quotas, written threat model.
-10. [`10-snapshot-save-restore.mdx`](plans/open/10-snapshot-save-restore.mdx) —
+9. [`09-postgres-store.mdx`](plans/open/09-postgres-store.mdx) — pluggable store:
+   Postgres in local Docker for dev, Neon for prod, one conformance suite — run
+   first so every later schema is born on the migration rail.
+10. [`10-web-console.mdx`](plans/open/10-web-console.mdx) — AI-driven Next.js web
+    console (better-auth email/password, tRPC + TanStack Query, shadcn with a
+    strict theme-token contract): sandbox list/create/detail, streaming exec,
+    file browser — the platform's first standing consumer.
+11. [`11-auth-tenancy-quotas.mdx`](plans/open/11-auth-tenancy-quotas.mdx) — API
+    keys, tenant scoping, admission-time quotas, written threat model; console
+    accounts map to tenants and the console gains its API-keys page.
+12. [`12-snapshot-save-restore.mdx`](plans/open/12-snapshot-save-restore.mdx) —
     filesystem snapshots, restore-by-create, warm-start benchmark.
-11. [`11-postgres-store.mdx`](plans/open/11-postgres-store.mdx) — pluggable store:
-    Postgres in local Docker for dev, Neon for prod, one conformance suite.
-12. [`12-prod-single-host.mdx`](plans/open/12-prod-single-host.mdx) — first live
-    deployment: one Hetzner host, Docker-backed, TLS, systemd, deploy script, and a
-    hand-driven acceptance pass (Firecracker arrives via roadmap 17's cutover).
 13. [`13-host-registration-placement.mdx`](plans/open/13-host-registration-placement.mdx)
-    — host registration, heartbeats, capacity-aware placement, dead-host handling;
-    prod grows to two hosts.
-14. [`14-host-provisioning-observability.mdx`](plans/open/14-host-provisioning-observability.mdx)
-    — hosts created/retired via the Hetzner API, Prometheus metrics, Grafana
-    dashboard and alerts, orphan-server cost safety.
-15. [`15-compute-pools-capacity-admin.mdx`](plans/open/15-compute-pools-capacity-admin.mdx)
+    — the fleet in two halves: capacity-aware placement over two
+    statically-configured Lima hostds, then registration, heartbeats, and
+    dead-host handling scale it to n hosts; ends with the failure-injection suite.
+14. [`14-prod-single-host.mdx`](plans/open/14-prod-single-host.mdx) — production
+    spin-up: deploy the multi-host-capable plane to one Hetzner host via
+    registration, TLS, systemd, deploy script, hand-driven acceptance — and
+    tear-down as a first-class script, so prod is an on-demand mode.
+15. [`15-host-provisioning-observability.mdx`](plans/open/15-host-provisioning-observability.mdx)
+    — two separable halves: fleet observability (Prometheus metrics, Grafana
+    dashboard and alerts) runnable against Lima after 13, and Hetzner-API host
+    create/retire with orphan-server cost safety, following 14.
+16. [`16-compute-pools-capacity-admin.mdx`](plans/open/16-compute-pools-capacity-admin.mdx)
     — compute pools as first-class data, the provider registry, `quickspin admin
     pool` scale/adopt verbs, pool-aware placement.
-16. [`16-events-usage-metering.mdx`](plans/open/16-events-usage-metering.mdx) — event
-    enrichment (actor, reason codes, tenant) and the metering pipeline: events →
-    usage processor → usage records → rollups → pricing → invoices.
-17. [`17-firecracker-backend.mdx`](plans/open/17-firecracker-backend.mdx) — deep dive:
-    Firecracker microVM as a second `Runtime` backend behind the same API, ending
-    with the prod cutover from Docker.
-18. [`18-ec2-digitalocean-providers.mdx`](plans/open/18-ec2-digitalocean-providers.mdx)
-    — EC2 and DigitalOcean provider adapters for Firecracker pools, a shared
-    provider conformance suite, the `/dev/kvm` preflight.
-19. [`19-kubernetes-kata-backend.mdx`](plans/open/19-kubernetes-kata-backend.mdx) —
-    deep dive: Kata Containers pods on Kubernetes as a third `Runtime` backend,
-    with capacity delegated to the cluster.
+17. [`17-events-usage-metering.mdx`](plans/open/17-events-usage-metering.mdx) — event
+    enrichment (actor, reason codes, tenant) and the metering pipeline ending at
+    usage records; rollups, pricing, and invoices are a recorded sequel.
+18. [`18-gvisor-backend.mdx`](plans/open/18-gvisor-backend.mdx) — the core
+    isolation upgrade: gVisor (runsc) as a per-sandbox runtime handler inside the
+    existing Docker backend — no KVM needed, snapshots keep working.
+19. [`19-ec2-digitalocean-providers.mdx`](plans/open/19-ec2-digitalocean-providers.mdx)
+    — **optional deep dive**, tied to the microVM track: EC2 and DigitalOcean
+    provider adapters for microVM pools, a shared provider conformance suite, the
+    `/dev/kvm` preflight.
 20. [`20-git-capable-sandboxes-secrets.mdx`](plans/open/20-git-capable-sandboxes-secrets.mdx)
     — dev image with git/gh, file-based secret injection with redaction, and a typed
     git operations layer (clone/commit/push/PR) over `Exec`.
 21. [`21-agent-storage-provisioning.mdx`](plans/open/21-agent-storage-provisioning.mdx)
-    — per-agent persistent databases behind a `StorageProvisioner` interface: Turso
-    and Neon adapters, a shared conformance suite, tenant-scoped keys and quotas.
+    — **removed from the active roadmap (snapshots-first)**: per-agent persistent
+    databases behind a `StorageProvisioner` interface; revisit when an agent's
+    state must outlive snapshots or be shared across sandboxes.
 22. [`22-typescript-sdk.mdx`](plans/open/22-typescript-sdk.mdx) — generated TypeScript
     SDK gated by contract tests; OpenAPI served by the plane.
 23. [`23-python-sdk.mdx`](plans/open/23-python-sdk.mdx) — generated Python SDK; API
@@ -95,24 +125,33 @@ optional isolation deep dive that can slot in any time after 01.
     external repo imports the SDK and an LLM agent develops code in a sandbox.
 25. [`25-mini-container-runtime.mdx`](plans/open/25-mini-container-runtime.mdx) —
     optional deep dive: namespaces, pivot_root, cgroups, capabilities by hand.
+26. [`26-firecracker-backend.mdx`](plans/open/26-firecracker-backend.mdx) —
+    optional deep dive: Firecracker microVM as a second `Runtime` backend behind
+    the same API — the separate-kernel-behind-KVM answer to the threat model 17
+    addresses in userspace.
+27. [`27-kubernetes-kata-backend.mdx`](plans/open/27-kubernetes-kata-backend.mdx) —
+    optional deep dive: Kata Containers pods on Kubernetes as a third `Runtime`
+    backend, with capacity delegated to the cluster.
 
 Ordering: the spine is 01 → 02 → 03 → 04 → 05 → 06 → 07 → 08 and must be sequential
 (each extends the same interfaces; 08 completes the three-binary architecture). The
-production track 09 → 10 → 11 → 12 → 13 → 14 → 15 → 16 is the platform-first core:
-09–11 finish the store and tenancy shape, 12 is the manually-accepted single-host
-prod launch, 13–14 grow it to a monitored multi-host fleet, 15 makes capacity
-first-class, and 16 adds metering on the enriched event log. The compute track
-17 → &#123;18, 19&#125; follows in least-invasive order: 17 slides Firecracker behind
-the roadmap 08 seams and cuts prod over; 18 needs 15 and 17; 19's runtime-backend
-half (tasks 1–4) needs only 07 and can run in parallel, while its pool integration
-needs 15. The agent-workflow rails come next: 20 needs only 03 and 04 but sits here
-so its secret rail and git layer are in place just before the SDKs expose them; 21
-needs 05, 09, and 20. The deliberately-last tail is 22 → 23 → 24: SDKs generated
-against the finished platform contract, then the agent-harness capstone as the first
-external consumer — sequenced last so coding workloads only arrive after prod has
-been accepted by hand. 25 is independent of everything after 01 and can slot anywhere
-as a change of pace. Each roadmap's `Depends on:` header is authoritative where this
-summary is coarse.
+production track executes as 09 → 10 → 11 → 13 → 12 — note the inversion of the
+file numbers: 09–11 finish the tenancy and store shape on one Lima host, 13 builds
+the fleet locally (scheduling on two static hostds, then registration to n hosts),
+and 12 deploys that already-fleet-capable plane to one cloud host as a repeatable
+spin-up. 14's observability half needs only 13; its provisioning half needs 12.
+15 makes capacity first-class and 16 adds metering, ending at usage records. 17
+(gVisor) needs only 08 and is the core arc's isolation upgrade. The agent-workflow
+rail 20 needs only 03 and 04 but sits here so its secret rail and git layer are in
+place just before the SDKs expose them. The deliberately-last tail is 22 → 23 → 24:
+SDKs generated against the finished platform contract, then the agent-harness
+capstone as the first external consumer. A tracer harness (a raw-HTTP agent loop,
+recorded in 11's coda) runs right after 11 to collect API friction long before the
+contract freezes in 22. The optional tail — 18 (needs 15 and 26), 21 (needs 05,
+09, 20), 25 (independent after 01), 26 (microVM deep dive; the KVM-capable
+Hetzner host from 12 suffices), and 27 (needs 07; its pool integration needs 15) —
+slots in by appetite. Each roadmap's `Depends on:` header is authoritative where
+this summary is coarse.
 
 ## Reference
 

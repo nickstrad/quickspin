@@ -1,6 +1,7 @@
-# 09 — API keys, tenants, and quotas
+# 11 — API keys, tenants, and quotas
 
-Depends on: 06 (07 recommended first).
+Depends on: 06, 09 (tenant tables are migrations on the Postgres rail), 10 (the
+console is the tenant model's first customer). 07 assumed.
 
 ## Summary
 
@@ -9,6 +10,15 @@ owned by a tenant, list/inspect/destroy scoped to the caller, and per-tenant quo
 (max concurrent sandboxes, max sandbox TTL). Write down a one-page threat model that
 states what is and is not defended. This is the minimum needed before an SDK in another
 repo can "onboard to the platform" the way you described.
+
+This roadmap also closes the loop roadmap 10 deliberately left open. The console has
+been running session-authed but talking to an unauthenticated plane; now each console
+account maps to a tenant, the console gains its API-keys page (mint, copy-once,
+revoke), and its plane client starts attaching the tenant's key — the one-line change
+the client was built to absorb. The division of labor stays sharp: **better-auth
+authenticates humans at the console; bearer keys authenticate machines at the plane.**
+The plane never learns about sessions, cookies, or better-auth's tables; the console
+never bypasses the key scheme it now depends on like any other client.
 
 ## Industry context
 
@@ -143,12 +153,22 @@ Authorization: Bearer qs_live_<random>       required on all /v1/* routes
 POST /v1/sandboxes → 429 {"error":{"code":"quota_exceeded"}} at the cap
 ```
 
-Admin operations (create tenant, mint/revoke key) are **CLI-only against the DB**
-(`quickspin admin tenant create`, `quickspin admin key mint`), not HTTP — no admin API
-means no admin-API auth problem yet. Keys print once at mint.
+Admin operations (create tenant, mint/revoke key) live in the CLI against the DB
+(`quickspin admin tenant create`, `quickspin admin key mint`) **plus** the minimum
+HTTP admin surface the console's self-serve flow needs: exactly three verbs —
+tenant create, key mint, key revoke — under `/admin/*`, guarded by one static admin
+token held only in the console server's env (never the browser). Everything else
+stays CLI-only; a real admin API with its own authz model is deliberately deferred.
+Keys print/display once at mint — the console shows the raw key in a copy-once
+dialog and then can never render it again, because only the hash exists.
 
 Committed decisions: auth is middleware resolving key→tenant onto the request context;
 handlers below it never see the raw key. Requested TTLs clamp to the tenant cap.
+Tenant mapping is one column: better-auth's user (later org) ID stored on the
+`tenants` row by the console at signup-time tenant creation — the plane treats it as
+an opaque external reference and never joins against better-auth's tables. The
+quota race test runs on roadmap 09's Postgres lane, where `FOR UPDATE` admission can
+actually fail.
 
 <Figure caption="Every /v1/* request passes through the auth middleware; handlers see only a tenant ID, and every store query carries it.">
   <svg viewBox="0 0 640 210" role="img" aria-label="Request path through auth middleware to tenant-scoped store queries, with 401 and 403 exits">
@@ -201,16 +221,24 @@ handlers below it never see the raw key. Requested TTLs clamp to the tenant cap.
     The concurrent-sandbox count check and the row insert commit atomically, so racing
     creates cannot slip under the cap.
   </Task>
-  <Task title="Add the admin CLI verbs">
+  <Task title="Add the admin CLI verbs and the minimal /admin surface">
     `quickspin admin tenant create` and `quickspin admin key mint` (plus revoke)
-    working directly against the DB; keys print once.
+    working directly against the DB; keys print once. Then the same three verbs
+    over HTTP under `/admin/*`, guarded by the static admin token, for the
+    console's self-serve flow.
+  </Task>
+  <Task title="Wire the console onto tenancy (AI-driven, per roadmap 10's exception)">
+    Signup creates a tenant via `/admin/*`; the plane client attaches the tenant's
+    key; the Settings API-keys page mints (copy-once dialog), lists by prefix, and
+    revokes. The roadmap 10 Playwright suite gains the two-account isolation spec:
+    account B never sees account A's sandboxes through the UI.
   </Task>
   <Task title="Write the threat model">
     `docs/reference/threat-model.mdx`, one page: assets, trust boundaries, what roadmaps
     02–09 defend, what they explicitly do not (plane→guest link, host escape, egress).
   </Task>
   <Task title="Write the tests and validation script">
-    The unit and API tests plus `hack/validate-09.sh` from Definition of done.
+    The unit and API tests plus `hack/validate-11.sh` from Definition of done.
   </Task>
 </TaskList>
 
@@ -284,7 +312,7 @@ handlers below it never see the raw key. Requested TTLs clamp to the tenant cap.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: the quota race admits more than the cap"
-    check="TestQuotaRaceOnlyAdmitsCap passes repeatedly (run with go test -race -count=10), and hack/validate-09.sh's log grep finds no raw key."
+    check="TestQuotaRaceOnlyAdmitsCap passes repeatedly (run with go test -race -count=10), and hack/validate-11.sh's log grep finds no raw key."
   >
     If N concurrent creates admit more than M, the count and insert are not atomic:
     the classic causes are counting outside the transaction, a read (deferred)
@@ -292,7 +320,7 @@ handlers below it never see the raw key. Requested TTLs clamp to the tenant cap.
     two transactions both read the old count — or checking quota before the
     middleware/handler retry re-runs the insert. Fix by making the transaction a
     write from the start or using the guarded-insert shape, then re-run the test with
-    `-count=10`; a race that passes once proves nothing. If the `validate-09.sh` grep
+    `-count=10`; a race that passes once proves nothing. If the `validate-11.sh` grep
     finds a raw key in the logs, the usual leak is a request-logging middleware
     printing the `Authorization` header — redact at the logging layer, not by hoping
     handlers stay quiet.
@@ -313,7 +341,7 @@ API tests with fake runtime (`make test`):
 - `TestQuotaExceededIs429WithCode`
 - `TestTTLClampedToTenantMax`
 
-Validation `hack/validate-09.sh`: mints two tenants' keys via the admin CLI, drives the
+Validation `hack/validate-11.sh`: mints two tenants' keys via the admin CLI, drives the
 real service proving isolation (tenant B cannot see or destroy tenant A's sandbox) and
 quota enforcement, and greps the server logs to prove no raw key was ever logged.
 
@@ -322,11 +350,41 @@ per-key rate limiting, key rotation UX, audit of admin actions.
 
 ## Solo-developer tradeoffs
 
-No OAuth, no web console, no RBAC, no billing — one bearer-key scheme done correctly.
-That is the right floor: hashing, scoping, and transactional admission are the parts
-that are hard to retrofit, while console/OAuth are additive later. The threat-model
-document is the durable security artifact here: reviewers and operators need a precise
-answer to "what does your sandbox *not* defend against?" before they can trust the code.
+No OAuth, no RBAC, no orgs, no billing — one bearer-key scheme done correctly, with
+human auth delegated to better-auth at the console boundary rather than rebuilt in
+the plane. That is the right floor: hashing, scoping, and transactional admission are
+the parts that are hard to retrofit, while OAuth providers and org/RBAC are additive
+better-auth configuration later. The static-admin-token `/admin` surface is the
+weakest link and is accepted knowingly: one secret in one server's env, three verbs,
+replaced by a real admin authz model only if a second admin client ever appears. The
+threat-model document is the durable security artifact here: reviewers and operators
+need a precise answer to "what does your sandbox *not* defend against?" before they
+can trust the code.
+
+## Coda: the tracer harness — one raw-HTTP agent loop, run once
+
+After this roadmap, the client-visible surface is complete for the first time:
+workload verbs since 08, and now auth headers plus typed auth/quota errors in the
+taxonomy. Nothing later changes ergonomics — 12 adds endpoints, 13 changes where
+sandboxes land — so this is the earliest honest point for agent-shaped consumer
+feedback, bought years before roadmap 24's friction log and while the API is still
+cheap to change (the OpenAPI contract does not freeze until 22). The console (10)
+is already a standing consumer, but a human-flow-shaped one; the tracer exercises
+what the console doesn't — a machine hammering exec-stream loops and reacting to
+typed errors, the shape the SDKs and roadmap 24 will actually have.
+
+The deliverable is deliberately tiny: a ~100-line raw-HTTP agent loop — no SDK, no
+separate repo, a single script under `hack/` — in which an LLM tool loop drives
+create, exec-stream, files, and destroy against the real plane in Lima, using a
+freshly minted key. Its output is a **friction log**, not a feature: every place the
+streaming shape was awkward to consume, every error that arrived untyped or
+unhelpfully typed, filed as notes against the roadmap that owns the surface. This
+does not violate SDKs-last — there is no SDK involved, which is the point: the raw
+contract is what the generated SDKs will inherit.
+
+The same script then doubles as a reusable acceptance probe: re-run it after 13's
+placement lands and against the 14 cloud spin-up with only a base-URL change. Same
+script, same path — the Lima-first invariant made testable.
 
 ## Go deeper
 

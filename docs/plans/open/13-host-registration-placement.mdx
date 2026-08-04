@@ -1,17 +1,20 @@
 # 13 — Host registration, heartbeats, and placement
 
-Depends on: 08, 11, 12 (07's guest architecture assumed).
+Depends on: 08, 09 (07's guest architecture assumed). Runs *before* 14: prod
+arrives afterward as an on-demand cloud spin-up of the fleet machinery built here.
 
 ## Summary
 
-Turn roadmap 08's single statically-configured host agent into a registered fleet.
-`quickspin-hostd` already owns all host-side execution; this roadmap makes hosts
-*discoverable and mortal*: hostd registers itself with the control plane at boot and
-heartbeats every few seconds, the plane keeps a `hosts` table, places new sandboxes on
-a healthy host with capacity, and (via the reconciler) declares hosts dead when
-heartbeats stop, failing their sandboxes. It ends with prod running two real hosts —
-the "1 or 2 hosts I can watch" milestone — and makes "monitor live cloud hosts" a
-property of the system rather than of your SSH habits.
+Turn roadmap 08's single statically-configured host agent into a fleet, in two halves.
+First, **scheduling**: a second statically-configured Lima hostd joins the first, the
+plane grows a `hosts` table and a pure placement function, and the capacity
+reservation is made race-safe — all the multi-host logic, none of the liveness
+machinery. Second, **registration**: hosts become *discoverable and mortal* — hostd
+registers itself with the control plane at boot and heartbeats every few seconds,
+the reconciler declares hosts dead when heartbeats stop and fails their sandboxes,
+and the static host config from the first half is deleted. It ends with an n-host
+Lima fleet surviving the failure-injection suite; putting the same machinery on a
+cloud host is roadmap 14's job.
 
 It also delivers `hack/failure-suite.sh`: a named failure-injection suite that
 deliberately kills a hostd mid-create, silences heartbeats without killing anything,
@@ -28,7 +31,7 @@ heartbeats with a dead-host threshold, and capacity-aware placement — plus the
 that makes distributed state survivable: the database's desired state is authoritative,
 hosts hold no durable truth, and a dead host's sandboxes are *failed, not
 migrated* (sandboxes are stateful; honest platforms kill them and let clients recreate
-from snapshots — exactly why roadmap 10 exists).
+from snapshots — exactly why roadmap 12 exists).
 
 ## Key concepts
 
@@ -43,7 +46,7 @@ from snapshots — exactly why roadmap 10 exists).
   the pure function only *chooses*; the *reservation* is a check-then-act hazard — two
   concurrent creates can both pick a host's last slot. Committing the placement re-checks
   capacity inside the insert's transaction (`FOR UPDATE` on the host row), the same
-  fold-the-check-into-the-reserve rule as roadmap 09's quota, one layer down.
+  fold-the-check-into-the-reserve rule as roadmap 11's quota, one layer down.
 - The process-boundary error rules from roadmap 08 extend to the new surface:
   registration and heartbeat failures mint typed errors in the plane's host client,
   never fake wraps of errors this process never had.
@@ -128,7 +131,7 @@ least-loaded. Every placement policy question becomes a table test. But the func
 runs on a snapshot of the hosts table, and between "I read that host A has one slot
 left" and "I inserted a sandbox on host A", another request can do the same read.
 Both pass the pure check; the host ends up over capacity. This is the classic
-check-then-act race, and the fix is the same one roadmap 09 used for quotas: fold the
+check-then-act race, and the fix is the same one roadmap 11 used for quotas: fold the
 check into the reservation by re-verifying capacity *inside* the transaction that
 inserts the sandbox row, with the host row locked (`SELECT ... FOR UPDATE`). The pure
 function remains the policy; the transaction is the arbiter.
@@ -171,7 +174,7 @@ process boundary), and takes orders. That is why `kill -9` on hostd is a legitim
 test rather than a catastrophe, and why a dead host's sandboxes are *failed, not
 migrated*: the sandbox's memory and disk lived only on that host, so pretending to
 move it would be lying to the client. Failing fast with an event, and letting the
-client recreate from a roadmap 10 snapshot, is what honest platforms do. The same rule
+client recreate from a roadmap 12 snapshot, is what honest platforms do. The same rule
 explains `no_capacity` as a fast typed error rather than a queue: queueing is durable
 plane-side state with its own fairness and expiry semantics — real future work, not a
 default to back into.
@@ -208,11 +211,14 @@ Control plane:
 
 Committed decisions: the plane never SSHes to hosts — everything flows through the
 two HTTP surfaces; roadmap 08's single shared token is replaced by per-host revocable
-tokens; the plane's static host address config is deleted — the hosts table is the
-only source of hosts; `drain` stops placement but leaves running sandboxes to finish
-or expire (the graceful-maintenance primitive roadmap 14 automates); local dev keeps
-roadmap 08's plane + hostd pair, now connected through registration instead of a
-static address, so the fleet path is exercised daily.
+tokens; the plane's static host config survives only through the first half — the
+scheduling work statically seeds two Lima hostds into the hosts table, and that
+seeding is deliberately throwaway, deleted when registration lands so the hosts
+table's registered rows are the only source of hosts (leaving both paths means
+registration bugs hide behind the fallback); `drain` stops placement but leaves
+running sandboxes to finish or expire (the graceful-maintenance primitive roadmap 15
+automates); local dev keeps roadmap 08's plane + hostd pair, now connected through
+registration instead of a static address, so the fleet path is exercised daily.
 
 <Callout tone="warning" title="Thresholds are compared against the DB clock you wrote, not wall time you remember">
   Every heartbeat handler writes `last_heartbeat_at`; every reconciler pass computes
@@ -225,18 +231,22 @@ static address, so the fleet path is exercised daily.
 ## Tasks
 
 <TaskList>
-  <Task title="Extract quickspin-hostd with token auth">
-    A thin HTTP shell over the existing runtime packages, serving the Runtime surface
-    and checking a static per-host bearer token on every request.
-  </Task>
-  <Task title="Add the hosts table, registration, and heartbeat endpoints">
-    The `hosts` schema and migration, `POST /register` and `POST /heartbeat` on the
-    plane, and `host_id` on sandboxes.
+  <Task title="Add the hosts table and statically seed a second Lima hostd">
+    The `hosts` schema and migration, `host_id` on sandboxes, and config that seeds
+    two Lima hostd rows into the table at boot. The seeding is accepted throwaway:
+    the registration task deletes it.
   </Task>
   <Task title="Implement placement and wire it into async create">
     The pure `place` function, the transactional capacity re-check at insert, and the
     typed `no_capacity` error surfaced through the API (the SDKs pick it up in
-    roadmaps 22–23).
+    roadmaps 22–23). Consecutive creates land on both statically-seeded hostds.
+  </Task>
+  <Task title="Add registration and heartbeats; delete the static seeding">
+    `POST /register` and `POST /heartbeat` on the plane, hostd's boot-time
+    registration call and ticker loop, roadmap 08's shared token replaced by per-host
+    revocable tokens — and the static seeding removed in the same change, so
+    registered rows are the only source of hosts. A third (and nth) hostd now joins
+    by being started, not by being configured.
   </Task>
   <Task title="Extend the reconciler to host state">
     Unready and dead transitions from heartbeat age, failing a dead host's sandboxes,
@@ -244,11 +254,6 @@ static address, so the fleet path is exercised daily.
   </Task>
   <Task title="Add admin verbs and the status host summary">
     `quickspin admin host list|drain|token`, and a host summary in `GET /v1/status`.
-  </Task>
-  <Task title="Move prod to registration, then add a second host by hand">
-    The prod hostd registers at boot instead of being statically configured; then a
-    second Hetzner host is provisioned manually (cloud-init from roadmap 12), given
-    its own token, and placement spreads across both — roadmap 14 automates this.
   </Task>
   <Task title="Write hack/failure-suite.sh — the failure-injection suite">
     Five deliberate injections against a real plane + hostd in Lima, each with an
@@ -265,27 +270,15 @@ static address, so the fleet path is exercised daily.
 
 <HintSteps>
   <Hint
-    title="Registration replaces configuration — delete the static address"
-    check="The plane boots with no host address configured, hostd registers at boot, and a create lands on the registered host."
+    title="Seed two hostds statically — the hosts table before liveness"
+    check="Two Lima hostds serve side by side, the hosts table shows both rows at boot, and sandboxes still work end-to-end on each."
   >
-    Start by removing roadmap 08's static host config from the plane so the hosts
-    table is the only path — leaving both means registration bugs hide behind the
-    fallback. hostd gains a startup call to `POST /register` and a `time.Ticker`
-    heartbeat loop; its token moves from the shared value to a per-host one checked
-    by the same middleware. The plane-side handlers are small: an upsert and a
-    single-row UPDATE (next hint).
-  </Hint>
-  <Hint
-    title="Registration and heartbeat are upserts keyed on host identity"
-    check="Starting hostd twice produces one hosts row, and last_heartbeat_at visibly advances every ~10s while it runs."
-  >
-    Decide the host's stable identity (its name is fine at this scale) and make
-    `/register` an upsert (`INSERT ... ON CONFLICT ... DO UPDATE`) so re-registration
-    after a crash refreshes `addr`, capacity, and state rather than duplicating the
-    row — a hostd restart must be routine. The heartbeat loop in hostd is a
-    `time.Ticker` posting the running count and headroom; on the plane it is a
-    single-row UPDATE of `last_heartbeat_at` plus the reported gauges. Registration
-    should also flip an unready host straight back to ready.
+    Start the second hostd beside the first (distinct ports and per-hostd label
+    namespaces so their orphan sweeps don't collect each other's containers), and
+    seed both into the new hosts table from config at plane boot. No registration,
+    no heartbeats yet — the rows are just data for placement to read. This half is
+    deliberately throwaway wiring; the point is that every scheduling test that
+    follows runs against real multi-host state.
   </Hint>
   <Hint
     title="Write place as a pure function and table-test it before any wiring"
@@ -306,10 +299,33 @@ static address, so the fleet path is exercised daily.
     recount that host's active sandboxes, and abort with `no_capacity` if the slot
     vanished between the pure choice and now. The concurrency test is N goroutines
     calling create against one host of capacity M through the real store (this is
-    what roadmap 11's Postgres is for), asserting exactly M successes and N−M typed
+    what roadmap 09's Postgres is for), asserting exactly M successes and N−M typed
     failures. Run it with `go test -race -count=10` — a race that shows up one run
     in five is still a race. Then do the deletion experiment in the check: a
     concurrency test that cannot fail proves nothing.
+  </Hint>
+  <Hint
+    title="Registration replaces the seeding — delete the static config"
+    check="The plane boots with no hosts configured, both hostds register at boot, a third hostd joins by simply starting, and a create lands on a registered host."
+  >
+    Now make the rows self-reporting: hostd gains a startup call to `POST /register`
+    and a `time.Ticker` heartbeat loop; its token moves from roadmap 08's shared
+    value to a per-host one checked by the same middleware. Delete the static
+    seeding in the same change so the registered rows are the only path — leaving
+    both means registration bugs hide behind the fallback. The plane-side handlers
+    are small: an upsert and a single-row UPDATE (next hint).
+  </Hint>
+  <Hint
+    title="Registration and heartbeat are upserts keyed on host identity"
+    check="Starting hostd twice produces one hosts row, and last_heartbeat_at visibly advances every ~10s while it runs."
+  >
+    Decide the host's stable identity (its name is fine at this scale) and make
+    `/register` an upsert (`INSERT ... ON CONFLICT ... DO UPDATE`) so re-registration
+    after a crash refreshes `addr`, capacity, and state rather than duplicating the
+    row — a hostd restart must be routine. The heartbeat loop in hostd is a
+    `time.Ticker` posting the running count and headroom; on the plane it is a
+    single-row UPDATE of `last_heartbeat_at` plus the reported gauges. Registration
+    should also flip an unready host straight back to ready.
   </Hint>
   <Hint
     title="Drive host state transitions from an injected clock"
@@ -334,18 +350,6 @@ static address, so the fleet path is exercised daily.
     hostd) collects the corpses if the host ever returns. `drain` is the gentler
     sibling: a state that placement filters out while everything running continues —
     `TestDrainStopsPlacementKeepsRunning` pins both halves.
-  </Hint>
-  <Hint
-    title="Prod: registration first, then the second host by hand"
-    check="hack/validate-13.sh boots plane + hostd in Lima and a sandbox lands via registration; in prod, /v1/status shows two ready hosts and consecutive creates land on both."
-  >
-    Local first: the roadmap 08 make target now starts hostd with no address wired
-    into the plane, proving registration daily. In prod, mint a per-host token with
-    `quickspin admin host token` into each host's env file (mode 600, roadmap 12
-    discipline), restart, and confirm one ready host — then clone the cloud-init for
-    a second, hostd-only machine pointing at the plane's address. The health gate in
-    the deploy script now asserts at least one ready host; watching placement spread
-    across two machines is this roadmap's payoff moment.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: the kill -9 scenario misbehaves"
@@ -378,17 +382,21 @@ Unit tests (`make test`, fake clock, fake host client):
   again, nothing was killed.
 - `TestDrainStopsPlacementKeepsRunning`.
 - `TestConcurrentPlacementNeverOverfillsHost` — N concurrent creates against one
-  host with capacity M admit exactly M (the placement twin of roadmap 09's quota-race
+  host with capacity M admit exactly M (the placement twin of roadmap 11's quota-race
   test; must fail if the transactional re-check is removed).
 
-Integration `hack/validate-13.sh` (Lima, real plane + real hostd):
+Integration `hack/validate-13.sh` (Lima, real plane + real hostds):
 
-- Boot both; hostd registers; sandbox lands on it and works end-to-end.
-- `kill -9` hostd: within the thresholds the host goes dead, its sandbox is
-  `failed` with an event, and creates now fail fast with `no_capacity`.
-- Restart hostd: re-registers, placement resumes; the killed sandbox's container
-  is garbage-collected (the runtime-level orphan sweep from roadmap 06 still works
-  through the host agent).
+- Boot the plane with no hosts configured; two hostds register; consecutive creates
+  spread across both and work end-to-end.
+- A third hostd started mid-run joins the fleet with no config change and receives
+  placements — the "n hosts by starting a process" property.
+- `kill -9` one hostd: within the thresholds the host goes dead, its sandbox is
+  `failed` with an event, and placement continues on the surviving hosts (creates
+  fail fast with `no_capacity` only once the survivors are full).
+- Restart the killed hostd: re-registers, placement resumes; the killed sandbox's
+  container is garbage-collected (the runtime-level orphan sweep from roadmap 06
+  still works through the host agent).
 
 Failure-injection suite `hack/failure-suite.sh` (Lima, real plane + hostd) runs
 green end-to-end, covering all five injections:

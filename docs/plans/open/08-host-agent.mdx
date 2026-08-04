@@ -10,7 +10,7 @@ lifecycle calls (the `Runtime` surface: create, inspect, list, destroy) and work
 calls (guest exec and files, proxied through to each sandbox's `quickspin-guest`). On
 today's single host, hostd is deliberately a thin proxy over the existing Docker
 runtime: behavior changes almost nothing, and that is the point. The deliverable is the
-*boundary*. It is the seam where Firecracker (roadmap 17) plugs in, the attachment
+*boundary*. It is the seam where Firecracker (roadmap 26, optional) plugs in, the attachment
 point for remote hosts, registration, and placement (roadmap 13), and it removes the
 last reason the control plane needs a Docker socket — after this roadmap the plane
 could run on a different machine than every sandbox it manages.
@@ -135,7 +135,7 @@ Committed decisions:
   to the hostd passthrough. Workload handlers cannot tell the difference.
 - Auth is a static bearer token checked with a constant-time compare, minted by the
   operator and injected into both processes' env. mTLS is named and deferred to the
-  threat model (roadmap 09).
+  threat model (roadmap 11).
 - Error DTO: hostd serves `api.ErrorResponse` with a `source` field distinguishing
   `runtime`, `guest`, and `hostd` failures; the plane's clients mint typed errors per
   the error reference's process-boundary rule.
@@ -144,7 +144,7 @@ Committed decisions:
 
 <Callout tone="warning" title="This roadmap will feel like pure indirection — that is correct">
   On one host, every request gains a hop and no capability is gained. The payoff is
-  structural: roadmap 17 implements Firecracker *inside hostd* without the plane
+  structural: roadmap 26 implements Firecracker *inside hostd* without the plane
   noticing, and roadmap 13 turns "one static host address" into "a registered fleet"
   without re-plumbing a single workload path. If the hop tempts you to shortcut the
   plane back onto the Docker socket "temporarily," the seam is gone — see the grep
@@ -274,7 +274,7 @@ Integration (`make test-docker` / `hack/validate-08.sh` in Lima):
   addresses; only hostd does.
 
 Deliberately untested: registration, heartbeats, capacity, and placement (roadmap 13);
-more than one host; mTLS and token rotation (threat model in roadmap 09); hostd
+more than one host; mTLS and token rotation (threat model in roadmap 11); hostd
 auto-upgrade — skew beyond a logged `/healthz` version warning.
 
 ## Solo-developer tradeoffs
@@ -282,11 +282,11 @@ auto-upgrade — skew beyond a logged `/healthz` version warning.
 Kubelet is an operating system's worth of agent — pod lifecycle, probes, cgroup and
 image management, device plugins; hostd is a proxy with a token because the seam, not
 the feature set, is this roadmap's deliverable, and every capability added to hostd now
-is one more thing roadmap 17 must reimplement for microVMs. One static host address is
+is one more thing roadmap 26 must reimplement for microVMs. One static host address is
 config-file discovery — honest at one host, replaced by registration in roadmap 13
 rather than half-built here. The plane→hostd link shares the guest link's weakness
 (plaintext bearer on a trusted host) and inherits its resolution path: recorded in
-roadmap 09's threat model, mTLS deferred deliberately. The extra hop costs real
+roadmap 11's threat model, mTLS deferred deliberately. The extra hop costs real
 latency on a single host and buys nothing until there are two hosts or two backends —
 accepted, because both are on the roadmap.
 
