@@ -224,6 +224,19 @@ Committed decisions:
 - Provider selection is per-request (`"provider": "turso"`) with a configured
   default, mirroring the roadmap 16 pool/provider shape.
 
+### Client surfaces
+
+**CLI.** Extend `quickspin sandbox create` with `--storage-key <key>` and optional
+`--storage-provider turso|neon`, sending the nested `storage` request field. Add
+`quickspin storage ls` (key, provider, remote name, and creation time; never the DSN)
+and idempotent `quickspin storage rm <key>`; surface the create-path quota response as
+the typed storage-quota error rather than a generic request failure.
+
+**Web app.** Add an optional storage key and provider selector to the sandbox-create
+form, plus a tenant storage view listing the same non-secret fields with an explicit
+delete action. The sandbox detail may show that storage is attached, but it must never
+render or copy `storage_dsn`; quota validation belongs inline on the create form.
+
 ## Tasks
 
 <TaskList>

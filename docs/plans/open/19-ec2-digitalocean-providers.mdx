@@ -194,6 +194,20 @@ spot/preemptible instances are out of scope (interruption handling is a real
 subsystem, recorded as future work); the DO nested-virt dependency is documented in
 the pool-create warning text itself, not only in this roadmap.
 
+### Client surfaces
+
+**CLI.** Extend `quickspin admin pool create` to accept `ec2` and `digitalocean`
+providers plus their shape-and-region server type, and fail before creation when a
+Firecracker shape cannot provide KVM. `pool list` must distinguish missing cloud
+credentials from a joined host reporting `kvm=false`, since both leave a pool degraded
+for different operator actions.
+
+**Web app.** No EC2 or DigitalOcean pool-create form is added: provider selection,
+shape/region input, and the DigitalOcean nested-virtualization warning stay in the
+CLI-only operator workflow because the console has no platform-operator authorization.
+If read-only operational status exposes them, render provider-unavailable and
+`kvm=false` as distinct degraded states, never as schedulable capacity.
+
 ## Tasks
 
 <TaskList>

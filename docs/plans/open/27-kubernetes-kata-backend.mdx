@@ -291,6 +291,23 @@ and namespace deletion is the disaster-recovery cleanup. Pool creation also prov
 that the cluster's CNI enforces `NetworkPolicy`; accepting the object without dropping
 traffic is not sufficient.
 
+### Client surfaces
+
+**CLI.** Extend `quickspin admin pool create` with the `kubernetes` kind and its
+`--kubeconfig-ref`, `--namespace`, and `--runtime-class` fields; `admin pool list` must
+identify it as elastic, and `admin pool scale` must return the typed refusal rather
+than accept a meaningless target. Add `quickspin sandbox create --backend kata --pool
+<name>` and preserve the typed `no_capacity` and image-missing outcomes from Pod state
+translation.
+
+**Web app.** Kubernetes pool creation and configuration remain CLI-only: the console
+has tenant sessions, not platform-operator authorization, and roadmap 13 keeps fleet
+mutations out of the web surface. If pools are already exposed there, show only their
+read-only elastic or degraded state; the tenant-facing sandbox-create form may choose
+the Kata backend and an eligible pool, and sandbox detail must display translated
+`no_capacity`, image-pull, and reconciled Pod-failure states rather than raw Kubernetes
+phases.
+
 ## Tasks
 
 <TaskList>

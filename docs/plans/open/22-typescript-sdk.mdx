@@ -162,6 +162,16 @@ Sandbox.connect(id)                                  // reattach to an existing 
 Committed decisions: zero runtime dependencies (native `fetch`), works on Node 20+,
 ndjson stream parsing in-house; errors map 1:1 from the API's `error.code` values.
 
+### Client surfaces
+
+**CLI.** No new `quickspin` command is required: this roadmap packages the existing
+HTTP contract for Node callers, while `make test-sdk-ts` continues to mint its test key
+through the already-defined admin CLI surface.
+
+**Web app.** No console view or control is required. The web console remains a
+server-side consumer of the plane API through its BFF; it must not bundle the
+developer-focused Node SDK merely because both clients follow the same OpenAPI contract.
+
 ## Tasks
 
 <TaskList>

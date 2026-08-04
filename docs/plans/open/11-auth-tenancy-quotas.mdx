@@ -206,6 +206,18 @@ actually fail.
   </svg>
 </Figure>
 
+### Client surfaces
+
+**CLI.** Add `quickspin admin tenant create` and `quickspin admin key mint|revoke` as
+the direct-DB operator commands, and make every ordinary `quickspin sandbox` request
+send its configured `qs_live_...` bearer key so the required `/v1/*` auth middleware
+can resolve a tenant.
+
+**Web app.** At sign-up, create and retain the account's tenant through the constrained
+`/admin/*` surface; have `planeClient` attach that tenant key. Add the Settings API-keys
+view that mints into a copy-once dialog, lists only key prefixes, and revokes keys; no
+sandbox view may reveal another tenant's rows or a raw key after minting.
+
 ## Tasks
 
 <TaskList>

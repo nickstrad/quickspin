@@ -171,6 +171,17 @@ only; `PLANE_BASE_URL` is never exposed to the browser. Polling over SSE for v1
 liveness (an SSE/events upgrade is a natural rider on 17). Email/password only;
 OAuth providers are a better-auth config addition later, deliberately deferred.
 
+### Client surfaces
+
+**CLI.** No `quickspin` subcommand changes are required: the console consumes the same
+public plane API as the existing CLI. Add `make console-dev` as the supported local
+launcher for plane, hostd, and the console together.
+
+**Web app.** Create the protected console views for overview, sandbox list and create,
+sandbox detail (events timeline, streaming exec, file browser, and port links), and
+settings, plus `/sign-in` and `/sign-up`. Their tRPC procedures must use the one
+server-side `planeClient`, with `/api/exec` preserving the plane's streaming response.
+
 ## Tasks
 
 <TaskList>

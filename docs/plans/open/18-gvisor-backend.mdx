@@ -200,6 +200,17 @@ arrives there as the same daemon.json change plus a default-isolation config kno
 the plane: flipping the default runtime handler, reversible in one deploy, with
 snapshots still working — a config change, not a migration.
 
+### Client surfaces
+
+**CLI.** Add `quickspin sandbox create --isolation gvisor` while preserving
+`container` as the default, and show the chosen isolation in sandbox responses. An
+unknown value must surface the typed validation error before any hostd or Docker call.
+
+**Web app.** Add a `container`/`gvisor` selector to sandbox creation and display the
+persisted isolation on the sandbox detail view. Disable or clearly reject unknown
+values at the form boundary, while still rendering the API validation error if the
+server rejects a stale client request.
+
 ## Tasks
 
 <TaskList>

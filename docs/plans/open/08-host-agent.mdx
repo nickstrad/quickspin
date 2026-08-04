@@ -151,6 +151,13 @@ Committed decisions:
   test above.
 </Callout>
 
+### Client surfaces
+
+**CLI.** Update `quickspin serve` to take the static hostd address and bearer-token
+configuration used by `hostclient.Runtime`; `quickspin sandbox create|list|inspect|destroy`
+and `sandbox exec` keep their existing plane API contracts because hostd is transparent
+behind the plane.
+
 ## Tasks
 
 <TaskList>

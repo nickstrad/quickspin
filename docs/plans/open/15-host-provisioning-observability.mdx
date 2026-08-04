@@ -235,6 +235,19 @@ revoked on delete.
   the pure `decideFleetAction` — no ad-hoc deletes anywhere else.
 </KeyPoint>
 
+### Client surfaces
+
+**CLI.** Add `quickspin admin host create` and `quickspin admin host delete [--force]`,
+with host ID, provisioning/ready/draining state, and the refusal reason when delete
+would remove a non-empty or undrained host. The metrics and trace endpoints remain
+operator integrations (Grafana and Tempo), not CLI output.
+
+**Web app.** Extend roadmap 13's read-only Hosts view, where the status summary supports
+it, with registration/heartbeat state, sandbox count, and reconcile errors; link out to
+the checked-in Grafana dashboard rather than rendering Prometheus or traces in the
+console. Do not add create, drain, or delete controls: the console has no
+platform-operator authorization for fleet-mutating operations.
+
 ## Tasks
 
 <TaskList>

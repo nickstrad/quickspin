@@ -233,6 +233,19 @@ exactly the knob it would turn.
   suite runs by default cannot catch a backfill bug.
 </Callout>
 
+### Client surfaces
+
+**CLI.** Implement the declared `quickspin admin pool create|list|scale|delete` and
+`quickspin admin host adopt` commands. `pool list` must expose target, ready,
+provisioning, and headroom, while unknown-provider pools report degraded instead of
+silently appearing empty; `pool delete` must name remaining hosts when it refuses.
+
+**Web app.** No Compute pools mutation UI is added in this roadmap: create, scale,
+delete, and adopt remain CLI-only because the console has no platform-operator
+authorization. If the read-only operational status later exposes safe per-pool target,
+ready, provisioning, headroom, and degraded fields, the existing status view may render
+them without exposing provider controls or pool mutation actions.
+
 ## Tasks
 
 <TaskList>

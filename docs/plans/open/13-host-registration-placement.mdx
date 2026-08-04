@@ -228,6 +228,18 @@ registration instead of a static address, so the fleet path is exercised daily.
   of done assume it.
 </Callout>
 
+### Client surfaces
+
+**CLI.** Add `quickspin admin host list`, `quickspin admin host drain <host>`, and
+`quickspin admin host token` so operators can inspect registered capacity, stop new
+placements on a host, and mint or revoke its per-host credential. Surface typed
+`no_capacity` failures from sandbox creation without pretending the request queued.
+
+**Web app.** Add a read-only Hosts view sourced from the `GET /v1/status` host summary,
+showing each host's ready/unready/draining/dead state, capacity or running count, and
+heartbeat age. Keep drain and token controls CLI-only in this roadmap: the console has
+no admin-authz model for those fleet-mutating operations.
+
 ## Tasks
 
 <TaskList>

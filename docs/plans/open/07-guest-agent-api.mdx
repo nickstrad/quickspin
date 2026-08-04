@@ -232,6 +232,13 @@ Committed decisions:
   binary fails as an entrypoint with errors that look like injection bugs.
 </Callout>
 
+### Client surfaces
+
+**CLI.** Update `quickspin sandbox exec <id> -- <cmd...>` to request
+`?stream=true` and render stdout/stderr NDJSON events as they arrive, while retaining
+its existing timeout and cancellation behavior; buffered JSON must not make the command
+appear to hang until the child exits.
+
 ## Tasks
 
 <TaskList>

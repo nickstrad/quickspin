@@ -307,6 +307,20 @@ flowchart TD
 `}
 />
 
+### Client surfaces
+
+**CLI.** Extend `quickspin sandbox create` with `--backend firecracker`; sandbox list
+and inspect output must identify the selected backend so a microVM is not mistaken for
+a Docker sandbox. Preserve the typed `snapshot_unsupported` result from `sandbox save`
+for Firecracker rather than hiding it behind a generic CLI error, and show a reconciled
+`failed` state after an out-of-band VMM crash.
+
+**Web app.** Add a Docker/Firecracker backend selector to the sandbox-create form and
+render the backend on sandbox list and detail views. The detail view must surface a
+reconciled `failed` state and its event history, while its snapshot action explains the
+typed `snapshot_unsupported` outcome for Firecracker instead of offering a broken save
+control.
+
 ## Tasks
 
 <TaskList>

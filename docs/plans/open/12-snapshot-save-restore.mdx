@@ -168,6 +168,17 @@ resume *from*, not a paused thing you resume — E2B-style pause is out of scope
 API name says `save`, not `pause`); snapshots count against a per-tenant total-bytes
 quota; guest binary is re-injected on restore so snapshots never bake in a stale guest.
 
+### Client surfaces
+
+**CLI.** Add `quickspin sandbox save <id>` with the snapshot name, `quickspin snapshot
+list|delete`, and a snapshot selection on `quickspin sandbox create`; creation must send
+exactly one of `image` or `snapshot`, matching the API's mutual-exclusion rule.
+
+**Web app.** Add the snapshots gallery and tenant-scoped delete action, a save action on
+the sandbox detail view, and a restore/create flow that selects a snapshot instead of an
+image. The UI must make clear that save destroys the source sandbox rather than pausing
+it, and must surface the API's byte-quota failure.
+
 ## Tasks
 
 <TaskList>

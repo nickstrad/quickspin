@@ -199,6 +199,18 @@ with snapshots still working.
   unrecoverable exactly when you need to recover it.
 </Callout>
 
+### Client surfaces
+
+**CLI.** Add `--base-url` and `QUICKSPIN_BASE_URL` to the shared client configuration,
+so existing `sandbox create`, `exec`, file, and destroy commands can target
+`https://api.quickspin.<yourdomain>` while retaining localhost as the default. No
+separate status command is required: `/v1/status` is the deploy script's unauthenticated
+health gate, not a tenant-facing operation.
+
+**Web app.** Update the console's API-origin configuration so its existing sandbox views
+can target the public TLS endpoint; no new status view is required because `/v1/status`
+is an operational, unauthenticated probe rather than customer state.
+
 ## Tasks
 
 <TaskList>

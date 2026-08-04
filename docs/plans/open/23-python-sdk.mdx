@@ -141,6 +141,16 @@ roadmap 22's names (`QuotaExceededError`, `SandboxNotFoundError`, `Authenticatio
 key from `QUICKSPIN_API_KEY`; the context manager kills on exit for `create` but not
 for `connect` (attachment ≠ ownership — document this).
 
+### Client surfaces
+
+**CLI.** No new `quickspin` command is required: the Python package exposes the
+existing create/connect, streaming, files, and typed-error contract to Python programs,
+while the shared test harness still obtains `QUICKSPIN_API_KEY` through the admin CLI.
+
+**Web app.** No web-app change is required. Python context-manager ownership and
+snake_case request ergonomics are local SDK behavior, not platform state a console can
+display or control; the console continues to use its existing plane client.
+
 ## Tasks
 
 <TaskList>

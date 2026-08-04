@@ -251,6 +251,13 @@ Committed decisions:
   dialects would trade that readability for symmetry the suite already enforces.
 </KeyPoint>
 
+### Client surfaces
+
+**CLI.** No `quickspin` subcommand change is required: `quickspin serve` selects SQLite
+or Postgres from `QUICKSPIN_DB`, while `quickspin sandbox` commands remain HTTP clients
+of the unchanged plane API. `make test-store-pg` and `hack/testdb.sh` are developer
+validation commands, not a new user-facing CLI surface.
+
 ## Tasks
 
 <TaskList>

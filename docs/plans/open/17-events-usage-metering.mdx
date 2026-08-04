@@ -148,6 +148,18 @@ Committed decisions:
   the usage path.
 </Callout>
 
+### Client surfaces
+
+**CLI.** Add `quickspin events <sandbox>` and `quickspin admin usage show --tenant
+--month`; event rows must include actor, reason, and generation, and the usage command
+must present the recorded metric quantities without inventing prices or invoices.
+
+**Web app.** Extend the sandbox detail view with a lifecycle timeline showing actor,
+reason, and generation, and add the authenticated tenant's usage view with a from/to
+filter and totals grouped by metric. It must present immutable usage records, not infer
+runtime from the sandbox's current state or display billing amounts this roadmap does
+not own.
+
 ## Tasks
 
 <TaskList>

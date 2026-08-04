@@ -163,6 +163,18 @@ sandbox is created per-task and killed in a `finally`; TTL + keepalive is the cr
 safety net; the model verifies its own work by running tests in the sandbox — the
 harness's verdict is only "did the task's check command exit 0".
 
+### Client surfaces
+
+**CLI.** Add the demo repository's `npm run demo -- <task> [--chaos]` entrypoint,
+which prints the transcript, check-command verdict, and sandbox-lost outcome; do not
+add a `quickspin demo` command, because the harness is an external consumer. Its
+cleanup and chaos checks rely on the existing `quickspin sandbox list` and destroy
+commands rather than a parallel lifecycle interface.
+
+**Web app.** No web-app change is required. Agent transcripts, Anthropic credentials,
+and the demo's task prompts stay in the separate demo repository; the console should
+not become a second harness runner or expose those potentially sensitive artifacts.
+
 ## Tasks
 
 <TaskList>

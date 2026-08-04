@@ -207,6 +207,17 @@ new netns left empty, which *is* the `AllowNetwork: false` behavior from roadmap
 image pulling — a `hack/make-rootfs.sh` produces the rootfs via `docker export`; runs
 as root inside the VM (rootless/userns is stretch, noted below).
 
+### Client surfaces
+
+**CLI.** Add the standalone `quickspin-mini run` command shown above, retaining its
+explicit `--rootfs`, `--memory`, `--pids`, `--cpu`, and command boundary. Do not add a
+`quickspin sandbox create --backend mini` option: this is a host-only learning tool,
+not a control-plane `Runtime` implementation.
+
+**Web app.** No web-app change is required. Rootfs paths, namespace flags, and cgroup
+limits are local Lima-host operations with no persisted sandbox resource for the
+console to inspect safely or manage.
+
 ## Tasks
 
 <TaskList>
