@@ -28,7 +28,7 @@ func TestSandboxEventsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSandbox error = %v, want nil", err)
 	}
-	if _, err := st.UpdateSandboxState(t.Context(), created.SandboxID, sandbox.Pending, sandbox.Running, "container observed running"); err != nil {
+	if _, err := st.UpdateSandboxState(t.Context(), created.SandboxID, sandbox.Pending, sandbox.Running, "container observed running", created.VersionID); err != nil {
 		t.Fatalf("UpdateSandboxState(pending, running) error = %v, want nil", err)
 	}
 
@@ -42,6 +42,9 @@ func TestSandboxEventsRoundTrip(t *testing.T) {
 
 	assertEvent(t, got[0], created.SandboxID, "", sandbox.Pending, "sandbox record created")
 	assertEvent(t, got[1], created.SandboxID, sandbox.Pending, sandbox.Running, "container observed running")
+	if got[0].VersionID != 1 || got[1].VersionID != 2 {
+		t.Errorf("event versions = %d then %d, want 1 then 2", got[0].VersionID, got[1].VersionID)
+	}
 	if got[0].At.IsZero() || got[1].At.IsZero() || got[1].At.Before(got[0].At) {
 		t.Errorf("event times = %s then %s, want non-zero chronological timestamps", got[0].At, got[1].At)
 	}
@@ -95,6 +98,7 @@ func TestLeaseAndEventRequestsCrossTheWire(t *testing.T) {
 		if r.Method == http.MethodGet {
 			_ = json.NewEncoder(w).Encode([]map[string]any{{
 				"sandbox_id": "sbx_name/with?segments#part",
+				"version_id": 2,
 				"from_state": "pending",
 				"to_state":   "running",
 				"at":         expiresAt,
@@ -117,7 +121,7 @@ func TestLeaseAndEventRequestsCrossTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandboxEvents error = %v, want nil", err)
 	}
-	if len(evts) != 1 || evts[0].SandboxID != id || !evts[0].At.Equal(expiresAt) {
+	if len(evts) != 1 || evts[0].SandboxID != id || evts[0].VersionID != 2 || !evts[0].At.Equal(expiresAt) {
 		t.Errorf("GetSandboxEvents = %+v, want the wire event intact", evts)
 	}
 	assertRequest(t, <-requests, http.MethodGet,

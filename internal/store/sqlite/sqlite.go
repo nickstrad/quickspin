@@ -28,33 +28,37 @@ type Store struct {
 
 var _ store.Store = (*Store)(nil)
 
-// The `state = ?` predicate is the transition gate: matching the expected
-// current state and writing the new one in a single statement is atomic, so
-// two writers cannot both observe `running` and both move out of it.
+const (
+	sandboxProjection = `id, version_id, platform_id, state, spec, created_at, updated_at, expires_at`
+	eventProjection   = `id, version_id, sandbox_id, from_state, to_state, at, reason`
+)
+
+// The state and version predicates are the transition gate: matching both
+// observations and writing the new state in one statement is atomic.
 const UpdateSandboxStateQuery = `
 UPDATE sandboxes
-SET state = ?, updated_at = CURRENT_TIMESTAMP
-WHERE platform_id = ? AND state = ?
-RETURNING id, platform_id, state, spec, created_at, updated_at, expires_at;`
+SET state = ?, updated_at = CURRENT_TIMESTAMP, version_id = version_id + 1
+WHERE platform_id = ? AND state = ? AND version_id = ?
+RETURNING ` + sandboxProjection + `;`
 
 const UpdateSandboxExpiryQuery = `
 UPDATE sandboxes
 SET expires_at = ?, updated_at = CURRENT_TIMESTAMP
 WHERE platform_id = ? AND state IN (?, ?)
-RETURNING id, platform_id, state, spec, created_at, updated_at, expires_at;`
+RETURNING ` + sandboxProjection + `;`
 
 const InsertSandboxQuery = `
 INSERT INTO sandboxes (state, spec, platform_id, expires_at)
 VALUES (?, ?, ?, ?)
-RETURNING id, platform_id, state, spec, created_at, updated_at, expires_at;`
+RETURNING ` + sandboxProjection + `;`
 
 const GetSandboxQuery = `
-SELECT id, platform_id, state, spec, created_at, updated_at, expires_at
+SELECT ` + sandboxProjection + `
 FROM sandboxes
 WHERE platform_id = ?;`
 
 const GetSandboxesQuery = `
-SELECT id, platform_id, state, spec, created_at, updated_at, expires_at
+SELECT ` + sandboxProjection + `
 FROM sandboxes;`
 
 const InsertIdempotencyKeyQuery = `INSERT INTO idempotency_keys
@@ -70,16 +74,14 @@ WHERE idempotency_key = ?;`
 // `at` is written rather than defaulted so an event carries the same instant as
 // the row it describes.
 const InsertEventQuery = `INSERT INTO events
-(sandbox_id, from_state, to_state, at, reason)
- VALUES (?, ?, ?, ?, ?);`
+(version_id, sandbox_id, from_state, to_state, at, reason)
+ VALUES (?, ?, ?, ?, ?, ?);`
 
-// Ordered by id, not at: the log replays in the order it was appended, and two
-// transitions can share a timestamp at the schema's resolution.
-const GetSandboxEventsQuery = `SELECT
-	id, sandbox_id, from_state, to_state, at, reason
+// Version is the per-sandbox order; timestamps can share the schema's resolution.
+const GetSandboxEventsQuery = `SELECT ` + eventProjection + `
 FROM events
 WHERE sandbox_id = ?
-ORDER BY id;`
+ORDER BY version_id;`
 
 // DSN builds the connection string New opens. foreign_keys is off by default
 // in SQLite, so without it the FKs on idempotency_keys.sandbox_id and
@@ -189,8 +191,8 @@ func (s *Store) UpdateSandboxExpiry(ctx context.Context, sandboxID string, expir
 	return sbx, nil
 }
 
-func (s *Store) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error) {
-	s.logger.DebugContext(ctx, "transitioning sandbox state", "sandboxID", sandboxID, "from", from, "state", to)
+func (s *Store) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string, versionID int) (*sandbox.Sandbox, error) {
+	s.logger.DebugContext(ctx, "transitioning sandbox state", "sandboxID", sandboxID, "versionID", versionID, "from", from, "state", to)
 
 	const op = "sqlite.Store.UpdateSandboxState"
 	msg := fmt.Sprintf("transitioning sandbox %s from %s to %s", sandboxID, from, to)
@@ -205,13 +207,12 @@ func (s *Store) UpdateSandboxState(ctx context.Context, sandboxID string, from, 
 	}
 	defer tx.Rollback()
 
-	sbx, err := scanRow(tx.QueryRowContext(ctx, UpdateSandboxStateQuery, to, sandboxID, from), scanSandbox)
+	sbx, err := scanRow(tx.QueryRowContext(ctx, UpdateSandboxStateQuery, to, sandboxID, from, versionID), scanSandbox)
 	if err != nil {
-		// No row matched (id, from). The row is either absent or no longer in
-		// `from`; one extra read tells which, and because the gate is in the
-		// UPDATE's WHERE, nothing was written either way. The read goes through
-		// tx because the pool holds a single connection, which this
-		// transaction owns until it ends.
+		// No row matched (id, from, version). The row is either absent or one of
+		// the caller's observations is stale; one extra read tells whether the
+		// identity exists. The read goes through tx because the pool holds a
+		// single connection, which this transaction owns until it ends.
 		if errors.Is(err, store.ErrNotFound) {
 			if _, getErr := scanRow(tx.QueryRowContext(ctx, GetSandboxQuery, sandboxID), scanSandbox); getErr != nil {
 				return nil, store.Wrap(op, msg, getErr)
@@ -221,8 +222,9 @@ func (s *Store) UpdateSandboxState(ctx context.Context, sandboxID string, from, 
 		return nil, store.Wrap(op, msg, err)
 	}
 
-	if err := s.appendEvent(ctx, tx, &events.Event{
+	if err := s.appendEvent(ctx, tx, events.Event{
 		SandboxID: sbx.SandboxID,
+		VersionID: sbx.VersionID,
 		FromState: from,
 		ToState:   to,
 		At:        sbx.UpdatedAt,
@@ -235,14 +237,13 @@ func (s *Store) UpdateSandboxState(ctx context.Context, sandboxID string, from, 
 		return nil, store.E(op, msg, err)
 	}
 
-	s.logger.InfoContext(ctx, "sandbox state changed", "sandboxID", sandboxID, "from", from, "state", to, "reason", reason)
+	s.logger.InfoContext(ctx, "sandbox state changed", "sandboxID", sandboxID, "versionID", sbx.VersionID, "from", from, "state", to, "reason", reason)
 
 	return sbx, nil
 }
 
-// appendEvent writes the event for a transition inside the caller's
-// transaction, so the row and its history commit together or neither does.
-func (s *Store) appendEvent(ctx context.Context, tx *sql.Tx, e *events.Event) error {
+// appendEvent uses the caller's transaction so the state and history cannot diverge.
+func (s *Store) appendEvent(ctx context.Context, tx *sql.Tx, e events.Event) error {
 	const op = "sqlite.Store.appendEvent"
 	msg := fmt.Sprintf("appending the %s -> %s event for sandbox %s", e.FromState, e.ToState, e.SandboxID)
 
@@ -251,7 +252,7 @@ func (s *Store) appendEvent(ctx context.Context, tx *sql.Tx, e *events.Event) er
 	}
 
 	if _, err := tx.ExecContext(ctx, InsertEventQuery,
-		e.SandboxID, e.FromState, e.ToState, e.At, e.Reason); err != nil {
+		e.VersionID, e.SandboxID, e.FromState, e.ToState, e.At, e.Reason); err != nil {
 		return store.Wrap(op, msg, err)
 	}
 
@@ -313,8 +314,9 @@ func (s *Store) CreateSandbox(ctx context.Context, idempotencyKey string, spec s
 
 	// The first event has no from state: the sandbox is coming from nothing, and
 	// a replay has to start somewhere.
-	if err := s.appendEvent(ctx, tx, &events.Event{
+	if err := s.appendEvent(ctx, tx, events.Event{
 		SandboxID: sbx.SandboxID,
+		VersionID: sbx.VersionID,
 		ToState:   sbx.State,
 		At:        sbx.CreatedAt,
 		Reason:    "sandbox record created",
@@ -363,12 +365,10 @@ func (s *Store) GetSandboxes(ctx context.Context) ([]*sandbox.Sandbox, error) {
 func (s *Store) GetSandboxEvents(ctx context.Context, sandboxID string) ([]*events.Event, error) {
 	s.logger.DebugContext(ctx, "listing sandbox events", "sandboxID", sandboxID)
 
-	return s.listEvents(ctx, "sqlite.Store.GetSandboxEvents",
-		fmt.Sprintf("listing events for sandbox %s", sandboxID), GetSandboxEventsQuery, sandboxID)
-}
+	const op = "sqlite.Store.GetSandboxEvents"
+	msg := fmt.Sprintf("listing events for sandbox %s", sandboxID)
 
-func (s *Store) listEvents(ctx context.Context, op, msg, query string, args ...any) ([]*events.Event, error) {
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, GetSandboxEventsQuery, sandboxID)
 	if err != nil {
 		return nil, store.E(op, msg, err)
 	}
@@ -419,6 +419,7 @@ func scanSandbox(scanner rowScanner) (*sandbox.Sandbox, error) {
 
 	err := scanner.Scan(
 		&sbx.ID,
+		&sbx.VersionID,
 		&sbx.SandboxID,
 		&sbx.State,
 		&rawSpec,
@@ -442,6 +443,7 @@ func scanEvent(scanner rowScanner) (*events.Event, error) {
 
 	err := scanner.Scan(
 		&e.ID,
+		&e.VersionID,
 		&e.SandboxID,
 		&e.FromState,
 		&e.ToState,

@@ -16,12 +16,14 @@ func lifecycleEvents() []*events.Event {
 	return []*events.Event{
 		{
 			SandboxID: testID,
+			VersionID: 1,
 			ToState:   sandbox.Pending,
 			At:        testTime,
 			Reason:    "sandbox record created",
 		},
 		{
 			SandboxID: testID,
+			VersionID: 2,
 			FromState: sandbox.Pending,
 			ToState:   sandbox.Running,
 			At:        testTime.Add(time.Second),

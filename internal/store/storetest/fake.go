@@ -9,14 +9,8 @@ import (
 	"github.com/nickstrad/quickspin/internal/store"
 )
 
-// Fake answers each call from the matching field, so a test states the answer
-// it needs — including an error — with no database involved.
-//
-// The embedded interface is nil on purpose. It satisfies store.Store without
-// stub methods, so a test that only needs GetSandbox sets only GetSandboxFn,
-// and a consumer that unexpectedly calls CreateSandbox panics instead of
-// receiving a nil row. The tradeoff: adding a method to store.Store no longer
-// breaks this file at compile time, it breaks callers at run time.
+// Fake delegates configured calls. Its nil embedded Store keeps tests focused:
+// any unexpected or unconfigured call panics instead of returning a zero value.
 type Fake struct {
 	store.Store
 
@@ -26,7 +20,7 @@ type Fake struct {
 	GetSandboxFn           func(context.Context, string) (*sandbox.Sandbox, error)
 	GetSandboxesFn         func(context.Context) ([]*sandbox.Sandbox, error)
 	UpdateSandboxExpiryFn  func(context.Context, string, time.Time) (*sandbox.Sandbox, error)
-	UpdateSandboxStateFn   func(context.Context, string, sandbox.TaskState, sandbox.TaskState, string) (*sandbox.Sandbox, error)
+	UpdateSandboxStateFn   func(context.Context, string, sandbox.TaskState, sandbox.TaskState, string, int) (*sandbox.Sandbox, error)
 	GetSandboxEventsFn     func(context.Context, string) ([]*events.Event, error)
 }
 
@@ -56,8 +50,8 @@ func (f Fake) UpdateSandboxExpiry(ctx context.Context, sandboxID string, expires
 	return f.UpdateSandboxExpiryFn(ctx, sandboxID, expiresAt)
 }
 
-func (f Fake) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error) {
-	return f.UpdateSandboxStateFn(ctx, sandboxID, from, to, reason)
+func (f Fake) UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string, versionID int) (*sandbox.Sandbox, error) {
+	return f.UpdateSandboxStateFn(ctx, sandboxID, from, to, reason, versionID)
 }
 
 func (f Fake) GetSandboxEvents(ctx context.Context, sandboxID string) ([]*events.Event, error) {

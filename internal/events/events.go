@@ -12,6 +12,7 @@ import (
 
 type Event struct {
 	ID        int               `json:"-" yaml:"-"`
+	VersionID int               `json:"version_id" yaml:"version_id"`
 	SandboxID string            `json:"sandbox_id" yaml:"sandbox_id"`
 	FromState sandbox.TaskState `json:"from_state" yaml:"from_state"`
 	ToState   sandbox.TaskState `json:"to_state" yaml:"to_state"`
@@ -29,6 +30,9 @@ func (e *Event) Validate() error {
 	}
 	if e.SandboxID == "" {
 		return E(op, "event has no sandbox id", ErrInvalidEvent)
+	}
+	if e.VersionID < 1 {
+		return E(op, "event has no version id", ErrInvalidEvent)
 	}
 	if e.ToState == "" {
 		return E(op, "event has no to state", ErrInvalidEvent)

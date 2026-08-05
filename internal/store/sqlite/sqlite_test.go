@@ -95,7 +95,7 @@ func TestSqliteStoreOperationsHonorCanceledContext(t *testing.T) {
 		{
 			name: "update sandbox state",
 			call: func() error {
-				_, err := st.UpdateSandboxState(ctx, sandboxID, sandbox.Pending, sandbox.Running, "canceled transition")
+				_, err := st.UpdateSandboxState(ctx, sandboxID, sandbox.Pending, sandbox.Running, "canceled transition", sbx.VersionID)
 				return err
 			},
 		},

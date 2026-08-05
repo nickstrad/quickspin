@@ -23,11 +23,11 @@ func TestNewMigratesFreshDatabase(t *testing.T) {
 
 	assertMigrationVersion(t, st.db, currentMigrationVersion)
 	assertSchemaObjects(t, st.db, map[string]string{
-		"sandboxes":         "table",
-		"idempotency_keys":  "table",
-		"events":            "table",
-		"events_sandbox_id": "index",
-		"schema_migrations": "table",
+		"sandboxes":                    "table",
+		"idempotency_keys":             "table",
+		"events":                       "table",
+		"events_sandbox_id_version_id": "index",
+		"schema_migrations":            "table",
 	})
 }
 
@@ -241,7 +241,7 @@ func domainSchemaObjectCount(t *testing.T, db *sql.DB) int {
 	if err := db.QueryRowContext(t.Context(), `
 		SELECT COUNT(*)
 		FROM sqlite_master
-		WHERE name IN ('sandboxes', 'idempotency_keys', 'events', 'events_sandbox_id')`).Scan(&count); err != nil {
+		WHERE name IN ('sandboxes', 'idempotency_keys', 'events', 'events_sandbox_id_version_id')`).Scan(&count); err != nil {
 		t.Fatalf("counting domain schema objects error = %v, want nil", err)
 	}
 	return count

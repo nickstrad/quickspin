@@ -23,17 +23,38 @@ func TestAnEventForAnUnknownSandboxIsRejected(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.db")
 	newTestStore(t, path)
 
-	raw, err := sql.Open(sqlite.DefaultDriverType, sqlite.DSN(path))
-	if err != nil {
-		t.Fatalf("sql.Open(%s) error = %v, want nil", path, err)
-	}
-	t.Cleanup(func() { raw.Close() })
-
-	_, err = raw.ExecContext(context.Background(), sqlite.InsertEventQuery,
-		"sbx_never_existed", sandbox.Pending, sandbox.Running, time.Now(), "started")
+	_, err := openRawDatabase(t, path).ExecContext(context.Background(), sqlite.InsertEventQuery,
+		2, "sbx_never_existed", sandbox.Pending, sandbox.Running, time.Now(), "started")
 	if err == nil {
 		t.Error("appending an event for an unknown sandbox error = nil, want a foreign key violation")
 	}
+}
+
+func TestEventVersionsAreUniqueWithinASandbox(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "event-versions.db")
+	st := newTestStore(t, path)
+
+	sbx, err := st.CreateSandbox(t.Context(), "event-version", sandbox.SpecFile{}, storetest.TestExpiry())
+	if err != nil {
+		t.Fatalf("CreateSandbox() error = %v, want nil", err)
+	}
+
+	_, err = openRawDatabase(t, path).ExecContext(t.Context(), sqlite.InsertEventQuery,
+		sbx.VersionID, sbx.SandboxID, "", sandbox.Pending, time.Now(), "duplicate generation")
+	if err == nil {
+		t.Error("appending a duplicate sandbox version error = nil, want a uniqueness violation")
+	}
+}
+
+func openRawDatabase(t *testing.T, path string) *sql.DB {
+	t.Helper()
+
+	db, err := sql.Open(sqlite.DefaultDriverType, sqlite.DSN(path))
+	if err != nil {
+		t.Fatalf("sql.Open(%s) error = %v, want nil", path, err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 func TestEventReadsHonorCanceledContext(t *testing.T) {

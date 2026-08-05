@@ -255,7 +255,7 @@ func TestReconcileOnceLogsActionFailureAndContinues(t *testing.T) {
 		GetSandboxesFn: func(context.Context) ([]*sandbox.Sandbox, error) {
 			return sandboxes, nil
 		},
-		UpdateSandboxStateFn: func(_ context.Context, sandboxID string, from, to sandbox.TaskState, _ string) (*sandbox.Sandbox, error) {
+		UpdateSandboxStateFn: func(_ context.Context, sandboxID string, from, to sandbox.TaskState, _ string, _ int) (*sandbox.Sandbox, error) {
 			updates = append(updates, transition{sandboxID, from, to})
 			return &sandbox.Sandbox{SandboxID: sandboxID, State: to}, nil
 		},
@@ -343,9 +343,15 @@ func TestReconcileOnceLogsOrphanRepairWithObservedSandboxID(t *testing.T) {
 func TestHandleAction(t *testing.T) {
 	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 	live := now.Add(time.Hour)
+	const observedVersion = 7
 
 	sbx := func(state sandbox.TaskState) *sandbox.Sandbox {
-		return &sandbox.Sandbox{SandboxID: "sbx-1", State: state, ExpiresAt: live}
+		return &sandbox.Sandbox{SandboxID: "sbx-1", VersionID: observedVersion, State: state, ExpiresAt: live}
+	}
+	withMemory := func(memory *string) *sandbox.Sandbox {
+		sbx := sbx(sandbox.Pending)
+		sbx.Spec.Memory = memory
+		return sbx
 	}
 	info := func(state runtime.State) *runtime.Info {
 		return &runtime.Info{ID: "sbx-1", State: state}
@@ -384,19 +390,19 @@ func TestHandleAction(t *testing.T) {
 			// is failed instead of the action being reported as transient.
 			name:       "create with an unresolvable spec fails the row without a runtime call",
 			action:     ActionCreate,
-			desired:    &sandbox.Sandbox{SandboxID: "sbx-1", State: sandbox.Pending, Spec: sandbox.SpecFile{Memory: &badMemory}},
+			desired:    withMemory(&badMemory),
 			wantUpdate: &transition{sandbox.Pending, sandbox.Failed},
 		},
 		{
 			name:       "create with limits below the floor fails the row without a runtime call",
 			action:     ActionCreate,
-			desired:    &sandbox.Sandbox{SandboxID: "sbx-1", State: sandbox.Pending, Spec: sandbox.SpecFile{Memory: &tinyMemory}},
+			desired:    withMemory(&tinyMemory),
 			wantUpdate: &transition{sandbox.Pending, sandbox.Failed},
 		},
 		{
 			name:       "failing an unresolvable row is retried when the write itself fails",
 			action:     ActionCreate,
-			desired:    &sandbox.Sandbox{SandboxID: "sbx-1", State: sandbox.Pending, Spec: sandbox.SpecFile{Memory: &badMemory}},
+			desired:    withMemory(&badMemory),
 			updateErr:  errUpdate,
 			wantErrIs:  []error{errUpdate},
 			wantUpdate: &transition{sandbox.Pending, sandbox.Failed},
@@ -521,7 +527,7 @@ func TestHandleAction(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var created, destroyed bool
 			var gotUpdate *transition
-
+			var gotVersion int
 			rt := runtimetest.Fake{
 				CreateFn: func(_ context.Context, id string, _ runtime.Spec) (runtime.Info, error) {
 					created = true
@@ -533,15 +539,16 @@ func TestHandleAction(t *testing.T) {
 				},
 			}
 			st := storetest.Fake{
-				UpdateSandboxStateFn: func(_ context.Context, id string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error) {
+				UpdateSandboxStateFn: func(_ context.Context, id string, from, to sandbox.TaskState, reason string, versionID int) (*sandbox.Sandbox, error) {
 					gotUpdate = &transition{from, to}
+					gotVersion = versionID
 					if reason == "" {
 						t.Error("UpdateSandboxState called with an empty reason; every event needs one")
 					}
 					if tt.updateErr != nil {
 						return nil, tt.updateErr
 					}
-					return &sandbox.Sandbox{SandboxID: id, State: to}, nil
+					return &sandbox.Sandbox{SandboxID: id, VersionID: versionID + 1, State: to}, nil
 				},
 			}
 			r := &Reconciler{
@@ -575,6 +582,9 @@ func TestHandleAction(t *testing.T) {
 				t.Errorf("UpdateSandboxState not called, want %+v", *tt.wantUpdate)
 			case tt.wantUpdate != nil && *gotUpdate != *tt.wantUpdate:
 				t.Errorf("UpdateSandboxState transition = %+v, want %+v", *gotUpdate, *tt.wantUpdate)
+			}
+			if tt.wantUpdate != nil && gotVersion != observedVersion {
+				t.Errorf("UpdateSandboxState version = %d, want observed %d", gotVersion, observedVersion)
 			}
 		})
 	}
@@ -717,7 +727,11 @@ func TestReconcilerDoesNotResurrectDestroyedSandbox(t *testing.T) {
 			// delete is reachable only once the row is running.
 			name: "api destroy during create leaves the row stopping",
 			duringCreate: func(t *testing.T, ctx context.Context, st store.Store, c *control.Control, sandboxID string) {
-				if _, err := st.UpdateSandboxState(ctx, sandboxID, sandbox.Pending, sandbox.Running, "raced write-back"); err != nil {
+				pending, err := st.GetSandbox(ctx, sandboxID)
+				if err != nil {
+					t.Fatalf("GetSandbox() error = %v, want nil", err)
+				}
+				if _, err := st.UpdateSandboxState(ctx, sandboxID, sandbox.Pending, sandbox.Running, "raced write-back", pending.VersionID); err != nil {
 					t.Fatalf("UpdateSandboxState(pending, running) error = %v, want nil", err)
 				}
 				if err := c.DestroySandbox(ctx, sandboxID); err != nil {
@@ -729,7 +743,11 @@ func TestReconcilerDoesNotResurrectDestroyedSandbox(t *testing.T) {
 		{
 			name: "row failed during create stays failed",
 			duringCreate: func(t *testing.T, ctx context.Context, st store.Store, c *control.Control, sandboxID string) {
-				if _, err := st.UpdateSandboxState(ctx, sandboxID, sandbox.Pending, sandbox.Failed, "failed during create"); err != nil {
+				pending, err := st.GetSandbox(ctx, sandboxID)
+				if err != nil {
+					t.Fatalf("GetSandbox() error = %v, want nil", err)
+				}
+				if _, err := st.UpdateSandboxState(ctx, sandboxID, sandbox.Pending, sandbox.Failed, "failed during create", pending.VersionID); err != nil {
 					t.Fatalf("UpdateSandboxState(pending, failed) error = %v, want nil", err)
 				}
 			},

@@ -60,7 +60,7 @@ func runningSandbox(t *testing.T, c *client.Client, st store.Store) string {
 		t.Fatalf("CreateSandbox state = %q, want %q", sbx.State, sandbox.Pending)
 	}
 
-	if _, err := st.UpdateSandboxState(t.Context(), sbx.SandboxID, sandbox.Pending, sandbox.Running, "test"); err != nil {
+	if _, err := st.UpdateSandboxState(t.Context(), sbx.SandboxID, sandbox.Pending, sandbox.Running, "test", sbx.VersionID); err != nil {
 		t.Fatalf("UpdateSandboxState(pending, running) error = %v, want nil", err)
 	}
 	return sbx.SandboxID
@@ -81,6 +81,9 @@ func TestCreateAndListRoundTrip(t *testing.T) {
 	}
 	if len(sbxs) != 1 || sbxs[0].SandboxID != id {
 		t.Fatalf("ListSandboxes = %+v, want the one sandbox just created", sbxs)
+	}
+	if sbxs[0].VersionID != 2 {
+		t.Errorf("VersionID = %d, want 2 after pending -> running", sbxs[0].VersionID)
 	}
 	// The spec has to survive the round trip through the store's JSON column,
 	// since it is what a later reconcile would rebuild the sandbox from.

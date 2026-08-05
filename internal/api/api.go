@@ -62,6 +62,7 @@ func (r KeepaliveSandboxRequest) TTL() time.Duration {
 // that CreateSandbox accepts. The store's integer row id never travels.
 type SandboxResponse struct {
 	SandboxID string           `json:"sandbox_id"`
+	VersionID int              `json:"version_id"`
 	State     string           `json:"state"`
 	Spec      sandbox.SpecFile `json:"spec"`
 	ExpiresAt time.Time        `json:"expires_at"`
@@ -72,6 +73,7 @@ type SandboxResponse struct {
 func NewSandboxResponse(sbx *sandbox.Sandbox) SandboxResponse {
 	return SandboxResponse{
 		SandboxID: sbx.SandboxID,
+		VersionID: sbx.VersionID,
 		State:     string(sbx.State),
 		Spec:      sbx.Spec,
 		ExpiresAt: sbx.ExpiresAt,
@@ -83,6 +85,7 @@ func NewSandboxResponse(sbx *sandbox.Sandbox) SandboxResponse {
 func (s SandboxResponse) Sandbox() *sandbox.Sandbox {
 	return &sandbox.Sandbox{
 		SandboxID: s.SandboxID,
+		VersionID: s.VersionID,
 		State:     sandbox.TaskState(s.State),
 		Spec:      s.Spec,
 		ExpiresAt: s.ExpiresAt,
@@ -91,10 +94,11 @@ func (s SandboxResponse) Sandbox() *sandbox.Sandbox {
 	}
 }
 
-// SandboxEventResponse is the wire form of events.Event. The store's
-// append-order id stays internal: array order is the public history contract.
+// SandboxEventResponse is the wire form of events.Event. The store's global id
+// stays internal; version is the per-sandbox history order.
 type SandboxEventResponse struct {
 	SandboxID string    `json:"sandbox_id"`
+	VersionID int       `json:"version_id"`
 	FromState string    `json:"from_state"`
 	ToState   string    `json:"to_state"`
 	At        time.Time `json:"at"`
@@ -104,6 +108,7 @@ type SandboxEventResponse struct {
 func NewSandboxEventResponse(event *events.Event) SandboxEventResponse {
 	return SandboxEventResponse{
 		SandboxID: event.SandboxID,
+		VersionID: event.VersionID,
 		FromState: string(event.FromState),
 		ToState:   string(event.ToState),
 		At:        event.At,
@@ -114,6 +119,7 @@ func NewSandboxEventResponse(event *events.Event) SandboxEventResponse {
 func (e SandboxEventResponse) Event() *events.Event {
 	return &events.Event{
 		SandboxID: e.SandboxID,
+		VersionID: e.VersionID,
 		FromState: sandbox.TaskState(e.FromState),
 		ToState:   sandbox.TaskState(e.ToState),
 		At:        e.At,

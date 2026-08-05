@@ -86,11 +86,19 @@ func (c *Control) KeepaliveSandbox(ctx context.Context, sandboxID string, ttl ti
 func (c *Control) DestroySandbox(ctx context.Context, sandboxID string) error {
 	const op = "control.Control.DestroySandbox"
 
-	// Running is the only state Stopping is reachable from, so naming it beats
-	// reading the row to feed its own state back in: the store's WHERE gate
-	// rejects every other case and says whether the id was absent or the state
-	// was wrong.
-	if _, err := c.store.UpdateSandboxState(ctx, sandboxID, sandbox.Running, sandbox.Stopping, "destroy requested"); err != nil {
+	// Load the generation immediately before the guarded transition; a missing
+	// row already satisfies DELETE's idempotent outcome.
+	sbx, err := c.store.GetSandbox(ctx, sandboxID)
+	if errors.Is(err, store.ErrNotFound) {
+		c.logger.InfoContext(ctx, "destroy found nothing to stop",
+			"sandboxID", sandboxID, "err", err)
+		return nil
+	}
+	if err != nil {
+		return Wrap(op, "loading the sandbox", err)
+	}
+
+	if _, err := c.store.UpdateSandboxState(ctx, sandboxID, sandbox.Running, sandbox.Stopping, "destroy requested", sbx.VersionID); err != nil {
 		// An absent row or one already past Running means the sandbox is not
 		// running, which is the outcome the caller asked for — DELETE is
 		// idempotent, so that is a success, not an error.

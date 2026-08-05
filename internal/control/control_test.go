@@ -272,7 +272,7 @@ func TestDestroySandboxMarksStoppingAndStartsNoRuntime(t *testing.T) {
 		t.Fatalf("CreateSandbox() error = %v, want nil", err)
 	}
 	// Stands in for the reconciler, which is what moves a sandbox to running.
-	if _, err := st.UpdateSandboxState(context.Background(), sbx.SandboxID, sandbox.Pending, sandbox.Running, "test"); err != nil {
+	if _, err := st.UpdateSandboxState(context.Background(), sbx.SandboxID, sandbox.Pending, sandbox.Running, "test", sbx.VersionID); err != nil {
 		t.Fatalf("UpdateSandboxState(pending, running) error = %v, want nil", err)
 	}
 
@@ -295,12 +295,16 @@ func TestDestroySandboxWritesOnlyTheStoppingTransition(t *testing.T) {
 	type write struct {
 		from, to sandbox.TaskState
 		reason   string
+		version  int
 	}
 	var writes []write
 
 	c := New(discardLogger(), storetest.Fake{
-		UpdateSandboxStateFn: func(_ context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error) {
-			writes = append(writes, write{from: from, to: to, reason: reason})
+		GetSandboxFn: func(context.Context, string) (*sandbox.Sandbox, error) {
+			return &sandbox.Sandbox{SandboxID: "sbx_1", VersionID: 7}, nil
+		},
+		UpdateSandboxStateFn: func(_ context.Context, sandboxID string, from, to sandbox.TaskState, reason string, versionID int) (*sandbox.Sandbox, error) {
+			writes = append(writes, write{from: from, to: to, reason: reason, version: versionID})
 			return &sandbox.Sandbox{SandboxID: sandboxID, State: to}, nil
 		},
 	})
@@ -309,7 +313,7 @@ func TestDestroySandboxWritesOnlyTheStoppingTransition(t *testing.T) {
 		t.Fatalf("DestroySandbox() error = %v, want nil", err)
 	}
 
-	want := []write{{from: sandbox.Running, to: sandbox.Stopping, reason: "destroy requested"}}
+	want := []write{{from: sandbox.Running, to: sandbox.Stopping, reason: "destroy requested", version: 7}}
 	if len(writes) != len(want) || writes[0] != want[0] {
 		t.Errorf("store writes = %+v, want %+v", writes, want)
 	}
@@ -320,25 +324,34 @@ func TestDestroySandboxWritesOnlyTheStoppingTransition(t *testing.T) {
 func TestDestroySandboxIsASuccessWhenNothingIsRunning(t *testing.T) {
 	tests := []struct {
 		name      string
-		storeErr  error
+		getErr    error
+		updateErr error
 		wantError bool
 	}{
-		{name: "no such row", storeErr: store.ErrNotFound},
-		{name: "already past running", storeErr: sandbox.ErrInvalidStateTransition},
-		{name: "store failure", storeErr: errors.New("database is on fire"), wantError: true},
+		{name: "no such row", getErr: store.ErrNotFound},
+		{name: "already past running", updateErr: sandbox.ErrInvalidStateTransition},
+		{name: "read failure", getErr: errors.New("database is on fire"), wantError: true},
+		{name: "write failure", updateErr: errors.New("database is on fire"), wantError: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := New(discardLogger(), storetest.Fake{
-				UpdateSandboxStateFn: func(context.Context, string, sandbox.TaskState, sandbox.TaskState, string) (*sandbox.Sandbox, error) {
-					return nil, tt.storeErr
+				GetSandboxFn: func(context.Context, string) (*sandbox.Sandbox, error) {
+					return &sandbox.Sandbox{SandboxID: "sbx_1", VersionID: 1}, tt.getErr
+				},
+				UpdateSandboxStateFn: func(context.Context, string, sandbox.TaskState, sandbox.TaskState, string, int) (*sandbox.Sandbox, error) {
+					return nil, tt.updateErr
 				},
 			})
 
 			err := c.DestroySandbox(context.Background(), "sbx_1")
-			if tt.wantError && !errors.Is(err, tt.storeErr) {
-				t.Fatalf("DestroySandbox() error = %v, want %v", err, tt.storeErr)
+			wantErr := tt.getErr
+			if wantErr == nil {
+				wantErr = tt.updateErr
+			}
+			if tt.wantError && !errors.Is(err, wantErr) {
+				t.Fatalf("DestroySandbox() error = %v, want %v", err, wantErr)
 			}
 			if !tt.wantError && err != nil {
 				t.Fatalf("DestroySandbox() error = %v, want nil", err)

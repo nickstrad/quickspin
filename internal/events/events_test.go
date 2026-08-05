@@ -8,13 +8,12 @@ import (
 )
 
 func TestValidateRejectsAnIncompleteEvent(t *testing.T) {
-	complete := func() *Event {
-		return &Event{
-			SandboxID: "sbx_a1b2c3",
-			FromState: sandbox.Pending,
-			ToState:   sandbox.Running,
-			Reason:    "reconciler started the container",
-		}
+	complete := Event{
+		SandboxID: "sbx_a1b2c3",
+		VersionID: 2,
+		FromState: sandbox.Pending,
+		ToState:   sandbox.Running,
+		Reason:    "reconciler started the container",
 	}
 
 	tests := []struct {
@@ -24,6 +23,7 @@ func TestValidateRejectsAnIncompleteEvent(t *testing.T) {
 	}{
 		{name: "complete event", mutate: func(*Event) {}},
 		{name: "missing sandbox id", mutate: func(e *Event) { e.SandboxID = "" }, wantErr: true},
+		{name: "missing version id", mutate: func(e *Event) { e.VersionID = 0 }, wantErr: true},
 		{name: "missing to state", mutate: func(e *Event) { e.ToState = "" }, wantErr: true},
 		{name: "missing reason", mutate: func(e *Event) { e.Reason = "" }, wantErr: true},
 		{name: "missing from state records a creation", mutate: func(e *Event) { e.FromState = "" }},
@@ -31,8 +31,8 @@ func TestValidateRejectsAnIncompleteEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			e := complete()
-			tt.mutate(e)
+			e := complete
+			tt.mutate(&e)
 
 			err := e.Validate()
 			if tt.wantErr && !errors.Is(err, ErrInvalidEvent) {

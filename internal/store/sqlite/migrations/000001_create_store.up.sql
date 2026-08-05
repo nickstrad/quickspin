@@ -1,5 +1,6 @@
 CREATE TABLE sandboxes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_id INTEGER NOT NULL DEFAULT 1,
     platform_id TEXT NOT NULL UNIQUE,
     state TEXT NOT NULL,
     spec TEXT NOT NULL CHECK(json_valid(spec)),
@@ -19,6 +20,7 @@ CREATE TABLE idempotency_keys (
 
 CREATE TABLE events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_id INTEGER NOT NULL,
     sandbox_id TEXT NOT NULL,
     from_state TEXT NOT NULL,
     to_state TEXT NOT NULL,
@@ -27,4 +29,4 @@ CREATE TABLE events (
     FOREIGN KEY(sandbox_id) REFERENCES sandboxes(platform_id)
 );
 
-CREATE INDEX events_sandbox_id ON events(sandbox_id);
+CREATE UNIQUE INDEX events_sandbox_id_version_id ON events(sandbox_id, version_id);

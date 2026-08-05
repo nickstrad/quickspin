@@ -26,6 +26,9 @@ func Run(t *testing.T, factory Factory) {
 		if created.State != sandbox.Pending {
 			t.Errorf("CreateSandbox State = %q, want %q", created.State, sandbox.Pending)
 		}
+		if created.VersionID != 1 {
+			t.Errorf("CreateSandbox VersionID = %d, want 1", created.VersionID)
+		}
 		if created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
 			t.Errorf(
 				"CreateSandbox timestamps = (%v, %v), want both populated",
@@ -38,7 +41,7 @@ func Run(t *testing.T, factory Factory) {
 		if err != nil {
 			t.Fatalf("GetSandbox(%s) error = %v, want nil", created.SandboxID, err)
 		}
-		if got.SandboxID != created.SandboxID || got.State != created.State {
+		if got.SandboxID != created.SandboxID || got.VersionID != created.VersionID || got.State != created.State {
 			t.Errorf("GetSandbox(%s) = %#v, want persisted identity and state from %#v", created.SandboxID, got, created)
 		}
 		if got.Spec.Image == nil || *got.Spec.Image != "alpine:3.20" {
@@ -65,7 +68,7 @@ func Run(t *testing.T, factory Factory) {
 			t.Errorf("GetSandbox ExpiresAt = %v, want %v", got.ExpiresAt, TestExpiry())
 		}
 
-		running := transition(t, ctx, st, created.SandboxID, sandbox.Pending, sandbox.Running)
+		running := transition(t, ctx, st, created, sandbox.Running)
 		if !running.ExpiresAt.Equal(TestExpiry()) {
 			t.Errorf("UpdateSandboxState ExpiresAt = %v, want %v", running.ExpiresAt, TestExpiry())
 		}
@@ -91,7 +94,7 @@ func Run(t *testing.T, factory Factory) {
 				st := factory(t)
 				sbx := createSandbox(t, ctx, st, "renew-"+string(tt.state), specFor("alpine:3.20"))
 				for _, to := range tt.transitions {
-					sbx = transition(t, ctx, st, sbx.SandboxID, sbx.State, to)
+					sbx = transition(t, ctx, st, sbx, to)
 				}
 				expiresAt := TestExpiry().Add(time.Hour)
 
@@ -105,6 +108,9 @@ func Run(t *testing.T, factory Factory) {
 					}
 					if renewed.State != tt.state || !renewed.ExpiresAt.Equal(expiresAt) {
 						t.Errorf("UpdateSandboxExpiry(%s) = %#v, want state %q and expiry %v", tt.state, renewed, tt.state, expiresAt)
+					}
+					if renewed.VersionID != sbx.VersionID {
+						t.Errorf("UpdateSandboxExpiry(%s) VersionID = %d, want unchanged %d", tt.state, renewed.VersionID, sbx.VersionID)
 					}
 				} else if !errors.Is(err, sandbox.ErrInvalidStateTransition) {
 					t.Fatalf("UpdateSandboxExpiry(%s) error = %v, want ErrInvalidStateTransition", tt.state, err)
@@ -120,6 +126,9 @@ func Run(t *testing.T, factory Factory) {
 				}
 				if persisted.State != tt.state || !persisted.ExpiresAt.Equal(wantExpiry) {
 					t.Errorf("persisted sandbox = %#v, want state %q and expiry %v", persisted, tt.state, wantExpiry)
+				}
+				if persisted.VersionID != sbx.VersionID {
+					t.Errorf("persisted VersionID = %d, want unchanged %d", persisted.VersionID, sbx.VersionID)
 				}
 			})
 		}
@@ -232,7 +241,7 @@ func Run(t *testing.T, factory Factory) {
 			want[created.SandboxID] = expectedSandbox{image: image, state: sandbox.Pending}
 		}
 		transitioned := createSandbox(t, ctx, st, "list-running", specFor("alpine:3.20"))
-		transition(t, ctx, st, transitioned.SandboxID, sandbox.Pending, sandbox.Running)
+		transitioned = transition(t, ctx, st, transitioned, sandbox.Running)
 		want[transitioned.SandboxID] = expectedSandbox{image: "alpine:3.20", state: sandbox.Running}
 
 		got, err := st.GetSandboxes(ctx)
@@ -322,11 +331,11 @@ func Run(t *testing.T, factory Factory) {
 		sbx := createSandbox(t, ctx, st, "illegal-transition", specFor("alpine:3.20"))
 		id := sbx.SandboxID
 
-		transition(t, ctx, st, id, sandbox.Pending, sandbox.Running)
-		transition(t, ctx, st, id, sandbox.Running, sandbox.Stopping)
-		transition(t, ctx, st, id, sandbox.Stopping, sandbox.Stopped)
+		current := transition(t, ctx, st, sbx, sandbox.Running)
+		current = transition(t, ctx, st, current, sandbox.Stopping)
+		stopped := transition(t, ctx, st, current, sandbox.Stopped)
 
-		if _, err := st.UpdateSandboxState(ctx, id, sandbox.Stopped, sandbox.Running, "illegal"); !errors.Is(err, sandbox.ErrInvalidStateTransition) {
+		if _, err := st.UpdateSandboxState(ctx, id, sandbox.Stopped, sandbox.Running, "illegal", stopped.VersionID); !errors.Is(err, sandbox.ErrInvalidStateTransition) {
 			t.Fatalf("UpdateSandboxState(stopped, running) error = %v, want ErrInvalidStateTransition", err)
 		}
 
@@ -347,9 +356,9 @@ func Run(t *testing.T, factory Factory) {
 
 		sbx := createSandbox(t, ctx, st, "events", specFor("alpine:3.20"))
 		id := sbx.SandboxID
-		transition(t, ctx, st, id, sandbox.Pending, sandbox.Running)
-		transition(t, ctx, st, id, sandbox.Running, sandbox.Stopping)
-		final := transition(t, ctx, st, id, sandbox.Stopping, sandbox.Stopped)
+		sbx = transition(t, ctx, st, sbx, sandbox.Running)
+		sbx = transition(t, ctx, st, sbx, sandbox.Stopping)
+		final := transition(t, ctx, st, sbx, sandbox.Stopped)
 
 		got, err := st.GetSandboxEvents(ctx, id)
 		if err != nil {
@@ -370,6 +379,9 @@ func Run(t *testing.T, factory Factory) {
 			if e.At.IsZero() {
 				t.Errorf("event %d At is zero, want the instant of the transition", i)
 			}
+			if e.VersionID != i+1 {
+				t.Errorf("event %d VersionID = %d, want %d", i, e.VersionID, i+1)
+			}
 			if e.FromState != replayed {
 				t.Fatalf("event %d from state = %q, want the previous event's to state %q", i, e.FromState, replayed)
 			}
@@ -378,24 +390,27 @@ func Run(t *testing.T, factory Factory) {
 		if replayed != final.State {
 			t.Errorf("replayed state = %q, want the sandbox's current %q", replayed, final.State)
 		}
+		if final.VersionID != len(got) {
+			t.Errorf("sandbox VersionID = %d, want final event version %d", final.VersionID, len(got))
+		}
 	})
 
 	t.Run("RejectedTransitionEmitsNoEvent", func(t *testing.T) {
 		ctx := context.Background()
 		st := factory(t)
 
-		id := createSandbox(t, ctx, st, "no-event", specFor("alpine:3.20")).SandboxID
+		created := createSandbox(t, ctx, st, "no-event", specFor("alpine:3.20"))
 
-		if _, err := st.UpdateSandboxState(ctx, id, sandbox.Running, sandbox.Stopping, "never happened"); err == nil {
+		if _, err := st.UpdateSandboxState(ctx, created.SandboxID, sandbox.Running, sandbox.Stopping, "never happened", created.VersionID); err == nil {
 			t.Fatal("UpdateSandboxState(running, stopping) on a pending row error = nil, want a rejection")
 		}
 
-		got, err := st.GetSandboxEvents(ctx, id)
+		got, err := st.GetSandboxEvents(ctx, created.SandboxID)
 		if err != nil {
-			t.Fatalf("GetSandboxEvents(%s) error = %v, want nil", id, err)
+			t.Fatalf("GetSandboxEvents(%s) error = %v, want nil", created.SandboxID, err)
 		}
 		if len(got) != 1 {
-			t.Errorf("GetSandboxEvents(%s) returned %d events, want only the create", id, len(got))
+			t.Errorf("GetSandboxEvents(%s) returned %d events, want only the create", created.SandboxID, len(got))
 		}
 	})
 
@@ -403,9 +418,9 @@ func Run(t *testing.T, factory Factory) {
 		ctx := context.Background()
 		st := factory(t)
 
-		first := createSandbox(t, ctx, st, "first", specFor("alpine:3.20")).SandboxID
+		first := createSandbox(t, ctx, st, "first", specFor("alpine:3.20"))
 		second := createSandbox(t, ctx, st, "second", specFor("debian:12")).SandboxID
-		transition(t, ctx, st, first, sandbox.Pending, sandbox.Running)
+		transition(t, ctx, st, first, sandbox.Running)
 
 		got, err := st.GetSandboxEvents(ctx, second)
 		if err != nil {
@@ -435,7 +450,7 @@ func Run(t *testing.T, factory Factory) {
 		sbx := createSandbox(t, ctx, st, "stale-transition", specFor("alpine:3.20"))
 		id := sbx.SandboxID
 
-		if _, err := st.UpdateSandboxState(ctx, id, sandbox.Running, sandbox.Stopping, "stale"); !errors.Is(err, sandbox.ErrInvalidStateTransition) {
+		if _, err := st.UpdateSandboxState(ctx, id, sandbox.Running, sandbox.Stopping, "stale", sbx.VersionID); !errors.Is(err, sandbox.ErrInvalidStateTransition) {
 			t.Fatalf(
 				"UpdateSandboxState(running, stopping) for a pending row error = %v, want ErrInvalidStateTransition",
 				err,
@@ -448,6 +463,34 @@ func Run(t *testing.T, factory Factory) {
 		}
 		if got.State != sandbox.Pending {
 			t.Errorf("State after stale transition = %q, want %q", got.State, sandbox.Pending)
+		}
+	})
+
+	t.Run("TransitionRequiresCurrentVersion", func(t *testing.T) {
+		ctx := context.Background()
+		st := factory(t)
+		created := createSandbox(t, ctx, st, "stale-version", specFor("alpine:3.20"))
+		running := transition(t, ctx, st, created, sandbox.Running)
+
+		_, err := st.UpdateSandboxState(ctx, created.SandboxID, sandbox.Running, sandbox.Stopping, "stale generation", created.VersionID)
+		if !errors.Is(err, sandbox.ErrInvalidStateTransition) {
+			t.Fatalf("UpdateSandboxState with version %d error = %v, want ErrInvalidStateTransition", created.VersionID, err)
+		}
+
+		persisted, err := st.GetSandbox(ctx, created.SandboxID)
+		if err != nil {
+			t.Fatalf("GetSandbox(%s) error = %v, want nil", created.SandboxID, err)
+		}
+		if persisted.State != sandbox.Running || persisted.VersionID != running.VersionID {
+			t.Errorf("sandbox after stale version = %#v, want running at version %d", persisted, running.VersionID)
+		}
+
+		events, err := st.GetSandboxEvents(ctx, created.SandboxID)
+		if err != nil {
+			t.Fatalf("GetSandboxEvents(%s) error = %v, want nil", created.SandboxID, err)
+		}
+		if len(events) != 2 {
+			t.Errorf("events after stale version = %d, want create plus successful transition", len(events))
 		}
 	})
 }
@@ -482,18 +525,23 @@ func transition(
 	t *testing.T,
 	ctx context.Context,
 	st store.Store,
-	id string,
-	from sandbox.TaskState,
+	before *sandbox.Sandbox,
 	to sandbox.TaskState,
 ) *sandbox.Sandbox {
 	t.Helper()
 
-	sbx, err := st.UpdateSandboxState(ctx, id, from, to, "storetest transition")
+	sbx, err := st.UpdateSandboxState(ctx, before.SandboxID, before.State, to, "storetest transition", before.VersionID)
 	if err != nil {
-		t.Fatalf("UpdateSandboxState(%q, %q, %q) error = %v, want nil", from, to, id, err)
+		t.Fatalf("UpdateSandboxState(%q, %q, %q) error = %v, want nil", before.SandboxID, before.State, to, err)
+	}
+	if sbx == nil {
+		t.Fatalf("UpdateSandboxState(%q, %q, %q) = nil, want a sandbox", before.SandboxID, before.State, to)
 	}
 	if sbx.State != to {
-		t.Fatalf("UpdateSandboxState(%q, %q, %q) State = %q, want %q", from, to, id, sbx.State, to)
+		t.Fatalf("UpdateSandboxState(%q, %q, %q) State = %q, want %q", before.SandboxID, before.State, to, sbx.State, to)
+	}
+	if sbx.VersionID != before.VersionID+1 {
+		t.Fatalf("UpdateSandboxState(%q, %q, %q) VersionID = %d, want %d", before.SandboxID, before.State, to, sbx.VersionID, before.VersionID+1)
 	}
 	return sbx
 }

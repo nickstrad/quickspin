@@ -196,14 +196,14 @@ func (r *Reconciler) handleAction(ctx context.Context, action ReconcileAction, s
 			// error itself is logged here or it is lost.
 			r.logger.WarnContext(ctx, "sandbox spec does not resolve; failing the row",
 				"sandboxID", sbxID, "err", err)
-			return r.mark(ctx, sbxID, sandbox.Pending, sandbox.Failed,
+			return r.mark(ctx, sbx, sandbox.Failed,
 				"reconciler failed sandbox: spec does not resolve",
 				fmt.Sprintf("recording sandbox %s as failed after its spec did not resolve", sbxID))
 		}
 		if _, err := r.runtime.Create(ctx, sbxID, resolved); err != nil {
 			return Wrap(op, fmt.Sprintf("creating sandbox %s", sbxID), err)
 		}
-		_, err = r.store.UpdateSandboxState(ctx, sbxID, sandbox.Pending, sandbox.Running, "reconciler created container")
+		_, err = r.store.UpdateSandboxState(ctx, sbxID, sandbox.Pending, sandbox.Running, "reconciler created container", sbx.VersionID)
 		if err == nil {
 			return nil
 		}
@@ -222,7 +222,7 @@ func (r *Reconciler) handleAction(ctx context.Context, action ReconcileAction, s
 		// A terminal row is already recorded; only a stopping row's destroy
 		// completes a transition.
 		if sbx.State == sandbox.Stopping {
-			return r.mark(ctx, sbxID, sandbox.Stopping, sandbox.Stopped,
+			return r.mark(ctx, sbx, sandbox.Stopped,
 				"reconciler destroyed container",
 				fmt.Sprintf("recording sandbox %s as stopped", sbxID))
 		}
@@ -244,19 +244,19 @@ func (r *Reconciler) handleAction(ctx context.Context, action ReconcileAction, s
 		if sbx.State == sandbox.Stopping {
 			to = sandbox.Stopped
 		}
-		return r.mark(ctx, sbxID, sbx.State, to,
+		return r.mark(ctx, sbx, to,
 			"reconciler reaped expired sandbox",
 			fmt.Sprintf("recording reaped sandbox %s as %s", sbxID, to))
 	case ActionMarkFailed:
-		return r.mark(ctx, sbxID, sbx.State, sandbox.Failed,
+		return r.mark(ctx, sbx, sandbox.Failed,
 			"reconciler marked sandbox failed",
 			fmt.Sprintf("recording sandbox %s as failed", sbxID))
 	case ActionMarkStopped:
-		return r.mark(ctx, sbxID, sandbox.Stopping, sandbox.Stopped,
+		return r.mark(ctx, sbx, sandbox.Stopped,
 			"reconciler marked sandbox stopped",
 			fmt.Sprintf("recording sandbox %s as stopped", sbxID))
 	case ActionMarkRunning:
-		return r.mark(ctx, sbxID, sandbox.Pending, sandbox.Running,
+		return r.mark(ctx, sbx, sandbox.Running,
 			"reconciler adopted existing container",
 			fmt.Sprintf("recording sandbox %s as running", sbxID))
 
@@ -269,10 +269,10 @@ func (r *Reconciler) handleAction(ctx context.Context, action ReconcileAction, s
 // is recorded on the event, describing names the write in the wrapped error.
 // It reports handleAction as the op so a failure points at the dispatch site
 // rather than at this helper.
-func (r *Reconciler) mark(ctx context.Context, sbxID string, from, to sandbox.TaskState, reason, describing string) error {
+func (r *Reconciler) mark(ctx context.Context, sbx *sandbox.Sandbox, to sandbox.TaskState, reason, describing string) error {
 	const op = "reconciler.Reconciler.handleAction"
 
-	if _, err := r.store.UpdateSandboxState(ctx, sbxID, from, to, reason); err != nil {
+	if _, err := r.store.UpdateSandboxState(ctx, sbx.SandboxID, sbx.State, to, reason, sbx.VersionID); err != nil {
 		return Wrap(op, describing, err)
 	}
 	return nil

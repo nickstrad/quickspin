@@ -97,6 +97,7 @@ func ResolveTTL(requested time.Duration) (time.Duration, error) {
 
 type Sandbox struct {
 	ID        int       `json:"-" yaml:"-"`
+	VersionID int       `json:"version_id" yaml:"version_id"`
 	SandboxID string    `json:"sandbox_id" yaml:"sandbox_id"`
 	State     TaskState `json:"state" yaml:"state"`
 	Spec      SpecFile  `json:"spec" yaml:"spec"`

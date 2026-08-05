@@ -113,7 +113,11 @@ func markRunning(t *testing.T, srv *API, id string) {
 func transitionSandbox(t *testing.T, srv *API, id string, from, to sandbox.TaskState) *sandbox.Sandbox {
 	t.Helper()
 
-	updated, err := srv.store.UpdateSandboxState(t.Context(), id, from, to, "test")
+	current, err := srv.store.GetSandbox(t.Context(), id)
+	if err != nil {
+		t.Fatalf("GetSandbox(%s) before transition error = %v, want nil", id, err)
+	}
+	updated, err := srv.store.UpdateSandboxState(t.Context(), id, from, to, "test", current.VersionID)
 	if err != nil {
 		t.Fatalf("UpdateSandboxState(%s, %s, %s) error = %v, want nil", id, from, to, err)
 	}
@@ -217,6 +221,9 @@ func TestCreateSandboxAcceptsAndReturnsAPendingRecord(t *testing.T) {
 	}
 	if got["state"] != string(sandbox.Pending) {
 		t.Errorf("state = %v, want %q", got["state"], sandbox.Pending)
+	}
+	if got["version_id"] != float64(1) {
+		t.Errorf("version_id = %v, want 1", got["version_id"])
 	}
 	spec, ok := got["spec"].(map[string]any)
 	if !ok || spec["image"] != "alpine:3.20" {

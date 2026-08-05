@@ -22,8 +22,8 @@ type Store interface {
 	// UpdateSandboxExpiry renews only pending or running rows and rejects a
 	// zero expiry.
 	UpdateSandboxExpiry(ctx context.Context, sandboxID string, expiresAt time.Time) (*sandbox.Sandbox, error)
-	// reason is recorded on the event this transition appends; the row and its
-	// event commit together or not at all.
-	UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string) (*sandbox.Sandbox, error)
+	// UpdateSandboxState requires the caller's observed version. A successful
+	// transition increments it and atomically appends its event.
+	UpdateSandboxState(ctx context.Context, sandboxID string, from, to sandbox.TaskState, reason string, versionID int) (*sandbox.Sandbox, error)
 	GetSandboxEvents(ctx context.Context, sandboxID string) ([]*events.Event, error)
 }
