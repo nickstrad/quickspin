@@ -168,7 +168,7 @@ answers:
 | Gate | The environment variable and Make target that opt into cost or host requirements. |
 | Native ownership query | How resources owned by Quickspin are found without trusting `Runtime.List`. |
 | Teardown | What is registered immediately after allocation and what the final mop catches. |
-| Special positive proof | The backend property core conformance cannot see, such as guest health or kernel isolation. |
+| Special positive proof | The backend property core conformance cannot see, such as `sbxd` health or kernel isolation. |
 | Special negative proof | A characteristic failure such as start rollback, no capacity, dead VMM, or missing RuntimeClass. |
 | Deliberate gap | What remains untested and why. |
 
@@ -183,7 +183,7 @@ that can be done cheaply.
 | Backend | Daemon-free seam | What it can prove | What still needs live infrastructure |
 | --- | --- | --- | --- |
 | Docker | Real Moby client pointed at `httptest.Server` | Request options and bodies, pull stream handling, response classification, partial-create cleanup | Daemon state, Unix socket, real pull/start/list/remove |
-| Firecracker | HTTP server on a temporary Unix socket plus a controllable process launcher | API sequence, socket readiness timeout, rollback order, joined cleanup failures | KVM boot, tap networking, guest health, process death |
+| Firecracker | HTTP server on a temporary Unix socket plus a controllable process launcher | API sequence, socket readiness timeout, rollback order, joined cleanup failures | KVM boot, tap networking, `sbxd` health, process death |
 | Kubernetes/Kata | Pure Pod builders plus client-go fake/reactors | Object shape, labels/selectors, requested verbs, fabricated status mapping | API validation/defaulting, scheduler, RuntimeClass, Kata VMM, pod networking |
 | Cloud-hosted worker | Provider SDK client pointed at a fake HTTP endpoint | Request encoding, pagination, provider error mapping | Cloud-init, host join, KVM, runtime operation |
 
@@ -315,7 +315,7 @@ to the child test process, not mutable developer-wide state.
 Use bounded polling only for genuinely asynchronous observations:
 
 - Kubernetes scheduling and deletion
-- guest health after VM boot
+- `sbxd` health after VM boot
 - cloud instance visibility
 - reconciler convergence
 

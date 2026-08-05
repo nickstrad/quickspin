@@ -41,8 +41,8 @@ If you copy the raw connection into one buffer, you get both streams shredded to
 *with header bytes embedded in the output* — the corruption is subtle because short
 ASCII output can look almost right. The Docker SDK's `stdcopy.StdCopy(stdout, stderr,
 reader)` decodes the framing into two writers; your job is to hand it two capped
-buffers and to know why it exists, because roadmap 07 rebuilds this split natively in the
-guest agent. With `Tty: true` there is no framing and no separation — which is exactly
+buffers and to know why it exists, because roadmap 07 rebuilds this split natively in
+`sbxd`. With `Tty: true` there is no framing and no separation — which is exactly
 why this roadmap's exec is TTY-less.
 
 ### Concept: Docker's limit flags are cgroup writes
@@ -104,12 +104,12 @@ timeout path is the same machinery with `context.WithTimeout` upstream, translat
 
 That machinery has a Docker-shaped lifetime; the behavior it produces does not. The
 kill-by-second-exec dance exists because Docker's API offers no handle on the exec'd
-process — roadmap 07's guest agent supervises its own children in their own pid namespace
+process — roadmap 07's `sbxd` supervises its own children in their own pid namespace
 and kills them directly, and roadmaps 18 and 21 inherit that path rather than rebuilding
 this one. What is permanent is the contract: cancellation kills the process, the call
 does not return before the reap, and a deadline is distinguishable from a plain cancel
 via `errors.Is`. Build the Docker version knowing it is scaffolding for the contract,
-the same way this roadmap's `stdcopy` demux is scaffolding for the guest agent's native
+the same way this roadmap's `stdcopy` demux is scaffolding for `sbxd`'s native
 stream split.
 
 <Figure caption="The exec request path. Cancellation closes the attach connection for free, but killing the remote process is a separate, deliberate step.">
@@ -186,7 +186,7 @@ type Spec struct {
     MemoryLimit  int64   // bytes
     PidsLimit    int64
     AllowNetwork bool    // false => no outbound network; see the note below on what
-                         // that means once the guest agent needs the network
+                         // that means once sbxd needs the network
 }
 
 type ExecResult struct {
@@ -219,8 +219,8 @@ roadmap (07) so it is built once, in the right place.
 Committed decision: `AllowNetwork: false` means **no egress**, not "no network
 interface" — even though this roadmap implements it with Docker's `none` network, which
 happens to deliver both. The distinction matters one roadmap later. Roadmap 07 moves exec and
-files onto a guest agent the plane reaches over the network, and roadmap 27's Kata pods
-always receive a pod IP; an interface-less sandbox and a reachable guest agent are
+files onto `sbxd`, which the plane reaches over the network, and roadmap 27's Kata pods
+always receive a pod IP; an interface-less sandbox and a reachable `sbxd` are
 mutually exclusive there. Fixing the *meaning* now keeps three backends from
 implementing three different flags: later backends satisfy it with a filter — firewall
 rules, a Kubernetes `NetworkPolicy` — while control-plane traffic still reaches the

@@ -14,10 +14,10 @@ roadmap 14's Hetzner Cloud VMs qualify (their ordinary instances expose `/dev/kv
 ## Summary
 
 The capstone taste of how the leaders actually run untrusted code: boot Firecracker
-microVMs inside the Lima VM (nested virtualization), get the `quickspin-guest` binary
+microVMs inside the Lima VM (nested virtualization), get the `sbxd` binary
 running inside them, and implement enough of a second `Runtime` backend
 (`firecracker`) that a sandbox created with `--backend firecracker` supports create /
-exec-via-guest / files / destroy through the same control plane and CLI. The backend
+exec through `sbxd` / files / destroy through the same control plane and CLI. The backend
 also carries roadmap 03's binary egress contract across the VM boundary: every guest keeps
 its network device so the plane can reach it, while host firewall policy decides
 whether workload-initiated traffic may leave. Snapshots, warm pools, and production
@@ -36,8 +36,8 @@ touching a workload code path.
 Firecracker is the reference answer to "containers share the host kernel" — AWS built
 it for Lambda; E2B, and Vercel Sandbox run on it; Fly runs microVMs for the same
 reason. The architectural payoff of roadmap 07 lands here: because workload operations go
-through the guest agent over the network rather than through `docker exec`, a VM that
-merely (a) boots and (b) has a reachable guest is already a full Quickspin sandbox.
+through `sbxd` over the network rather than through `docker exec`, a VM that
+merely (a) boots and (b) has a reachable daemon is already a full Quickspin sandbox.
 What changes underneath is everything roadmap 25 made visible: instead of namespaces
 sharing your kernel, each sandbox gets its own kernel behind KVM, and the isolation
 boundary moves from "syscall filtering" to "virtual hardware."
@@ -65,9 +65,9 @@ boundary moves from "syscall filtering" to "virtual hardware."
   network; `InstanceStart` — driven from Go via its API (the SDK or plain HTTP).
 - Building a guest world: an uncompressed kernel image, a rootfs ext4 built from the
   same alpine export as roadmap 25, and a tiny init that brings up networking and execs
-  `quickspin-guest` — closing the loop on why the guest is a static binary.
+  `sbxd` — closing the loop on why the daemon is a static binary.
 - MicroVM networking: one tap device per VM, addresses, and why platforms obsess over
-  this part; stateful host filtering that separates plane-to-guest management traffic
+  this part; stateful host filtering that separates plane-to-sbxd management traffic
   from guest-initiated egress.
 - An honest boot-time measurement to place next to roadmap 12's numbers.
 
@@ -97,7 +97,7 @@ conversation *before* the guest exists: `PUT /boot-source` (kernel image path pl
 `PUT /network-interfaces/eth0` (the tap device and a guest MAC), and finally
 `PUT /actions` with `InstanceStart`. Ordering is strict — configuration calls after
 start fail — so your `Create` is a small state machine: spawn the process, wait for
-the socket file to appear, issue the PUTs, start, then poll the guest's `/healthz`.
+the socket file to appear, issue the PUTs, start, then poll `sbxd`'s `/healthz`.
 From there the boot is the classic Linux sequence with nothing hidden: kernel
 decompresses nothing (you feed it an uncompressed image), mounts the virtio drive as
 `/` because `boot_args` says `root=/dev/vda`, and execs `/sbin/init` — which in your
@@ -105,8 +105,8 @@ rootfs is a shell script you wrote. Every stage that can fail reports on the ser
 console, which is why capturing the firecracker process's stdout to a per-VM log file
 is not optional plumbing but your only debugger.
 
-<Figure caption="Create walks the whole path: spawn the VMM, configure over its API socket, InstanceStart, kernel boot, your init, and finally the guest agent answering /healthz — the same readiness signal roadmap 07 defined.">
-  <svg viewBox="0 0 640 300" role="img" aria-label="Firecracker boot path from spawning the process through API configuration, kernel boot, init, to the guest agent serving healthz">
+<Figure caption="Create walks the whole path: spawn the VMM, configure over its API socket, InstanceStart, kernel boot, your init, and finally sbxd answering /healthz — the same readiness signal roadmap 07 defined.">
+  <svg viewBox="0 0 640 300" role="img" aria-label="Firecracker boot path from spawning the process through API configuration, kernel boot, init, to sbxd serving healthz">
     <defs>
       <marker id="arrow14" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
         <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
@@ -134,9 +134,9 @@ is not optional plumbing but your only debugger.
     <text x="275" y="168" textAnchor="middle" fontSize="10" fill="#405049">root=/dev/vda</text>
     <rect x="370" y="130" width="110" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
     <text x="425" y="151" textAnchor="middle" fontSize="12" fill="#18231f">/sbin/init</text>
-    <text x="425" y="168" textAnchor="middle" fontSize="10" fill="#405049">ip up, exec guest</text>
+    <text x="425" y="168" textAnchor="middle" fontSize="10" fill="#405049">ip up, exec sbxd</text>
     <rect x="500" y="130" width="110" height="48" fill="none" stroke="#18231f" strokeWidth="1.5" />
-    <text x="555" y="151" textAnchor="middle" fontSize="12" fill="#18231f">quickspin-guest</text>
+    <text x="555" y="151" textAnchor="middle" fontSize="12" fill="#18231f">sbxd</text>
     <text x="555" y="168" textAnchor="middle" fontSize="10" fill="#405049">static binary</text>
     <path d="M 550 68 C 550 90 275 90 275 128" fill="none" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow14)" />
     <line x1="330" y1="154" x2="368" y2="154" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow14)" />
@@ -154,12 +154,12 @@ artifacts and each teaches something. The **kernel** is a plain uncompressed ima
 (the Firecracker CI kernels work) — there is no distro, no initramfs, no modules; if
 virtio-net is not compiled in, networking silently does not exist. The **rootfs** is
 an ext4 *file*, not a directory: `dd` an empty file, `mkfs.ext4`, loop-mount, untar
-the same alpine export roadmap 25 used, drop in `quickspin-guest`. This is why the guest
-agent had to be a static binary all along — there is no glibc contract with a distro
+the same alpine export roadmap 25 used, drop in `sbxd`. This is why `sbxd`
+had to be a static binary all along — there is no glibc contract with a distro
 you control, and alpine is musl anyway. The **init** is the part most people have
 never written: the kernel execs exactly one program as PID 1, and until your shell
-script brings up `lo`, assigns the guest address on `eth0`, and execs the guest,
-nothing in the VM can speak. When the guest answers `/healthz`, you have personally
+script brings up `lo`, assigns the guest address on `eth0`, and execs `sbxd`,
+nothing in the VM can speak. When `sbxd` answers `/healthz`, you have personally
 crossed every layer between "a process with a KVM fd" and "a serving HTTP endpoint
 on a machine that did not exist a second ago."
 
@@ -193,14 +193,14 @@ flowchart LR
         T2["tap-sbxB<br/>host addr 10.0.0.5/30"]
     end
     subgraph vma["microVM A (own kernel)"]
-        G1["eth0 10.0.0.2<br/>quickspin-guest"]
+        G1["eth0 10.0.0.2<br/>sbxd"]
     end
     subgraph vmb["microVM B (own kernel)"]
-        G2["eth0 10.0.0.6<br/>quickspin-guest"]
+        G2["eth0 10.0.0.6<br/>sbxd"]
     end
     AL -. "assigns one /30 per VM" .- T1
     AL -. "assigns one /30 per VM" .- T2
-    CP -->|"curl guest addr directly"| T1
+    CP -->|"curl sbxd via guest addr"| T1
     CP --> T2
     T1 -->|"fd handed to the<br/>firecracker process"| G1
     T2 --> G2
@@ -214,17 +214,17 @@ switch. Both values therefore boot the same virtio-net device, TAP, and /30. Rem
 them for `false` would also remove the path roadmap 07 uses for health, exec, and files.
 The host instead distinguishes connections by direction and state:
 
-| `AllowNetwork` | Plane starts a connection to the guest | Guest replies to that connection | Guest starts a new connection |
+| `AllowNetwork` | Plane starts a connection to `sbxd` | Guest replies to that connection | Guest starts a new connection |
 |---|---|---|---|
 | `false` | allowed | allowed as established traffic | denied, whether the destination is the host or a forwarded network |
 | `true` | allowed | allowed | allowed through host forwarding and NAT, except for host resources denied by the backend's baseline isolation rules |
 
 This is why a rule cannot literally drop every packet emitted by the guest: an HTTP
-response from `quickspin-guest` is emitted by the guest too. The filter must be
+response from `sbxd` is emitted by the guest VM too. The filter must be
 stateful. For `false`, it accepts established/related return traffic and rejects new
 connections arriving from that TAP in both the host-input and forwarding paths. For
 `true`, it permits forwarding and installs masquerading for that VM's source subnet.
-Restrictions protecting the host's control-plane database, metadata endpoints, and
+  Restrictions protecting the host's control-plane database, metadata endpoints, and
 other internal services apply under both values; `true` permits ordinary workload
 egress, not access to platform internals.
 
@@ -246,12 +246,12 @@ ordinary egress.
 ## Design and interfaces
 
 `Spec` gains `Backend string` (`"docker"` default, `"firecracker"`); the control plane
-routes create/destroy to the chosen backend and the guest client needs only an address
+routes create/destroy to the chosen backend and the `sbxd` client needs only an address
 — unchanged from roadmap 07.
 
 ```go
 // internal/runtime/firecracker — implements the same Runtime interface for
-// lifecycle; workload ops arrive via the guest as with Docker.
+// lifecycle; workload ops arrive via sbxd as with Docker.
 // Per-VM artifacts: api socket, tap device, egress-policy handle, rootfs copy,
 // firecracker process. Destroy kills the process and removes all five;
 // idempotent like roadmap 02.
@@ -262,7 +262,7 @@ Committed decisions: the control plane runs **inside** the Lima VM for this road
 rootfs is copied per-VM (no CoW — slow and honest); a fixed /30 per VM from a small
 allocator — the allocator is the concurrency reference's category-3 shape (allocate and
 mark in one locked helper, never check-then-take) with its own race test, since
-concurrent creates are the norm once the reconciler drives this backend; exec/files/limits inside the VM are whatever the guest + kernel defaults do
+concurrent creates are the norm once the reconciler drives this backend; exec/files/limits inside the VM are whatever `sbxd` + kernel defaults do
 — cgroup-equivalent limits inside the VM are out of scope (the VM's memory size is the
 real limit and the interesting difference to write up).
 
@@ -282,10 +282,10 @@ enabled once during environment setup, but per-VM forwarding and NAT remain expl
 policy so two sandboxes with opposite flag values can coexist.
 
 <KeyPoint label="The boundary that makes this roadmap small">
-  The `Runtime` interface from roadmap 02 plus the guest agent from roadmap 07 mean this
+  The `Runtime` interface from roadmap 02 plus `sbxd` from roadmap 07 mean this
   backend only has to answer lifecycle questions: create, inspect, list, destroy, and
-  "what is the guest's address". Exec, files, and limits arrive over the network
-  exactly as they do for Docker — no second implementation of the workload API.
+  "what is the guest's address". Exec, files, and limits arrive through `sbxd` over
+  the network exactly as they do for Docker — no second implementation of the workload API.
 </KeyPoint>
 
 The shape of the two lifecycle operations follows from the five-artifact footprint:
@@ -300,7 +300,7 @@ flowchart TD
     D --> E["poll for the API socket file<br/>(created asynchronously)"]
     E --> F["3 PUTs: boot-source,<br/>drive, network-interface"]
     F --> G["PUT /actions InstanceStart"]
-    G --> H["poll guest /healthz<br/>with a context deadline"]
+    G --> H["poll sbxd /healthz<br/>with a context deadline"]
     H --> I["sandbox running"]
     H -. "any step fails or times out" .-> U["unwind in safe order:<br/>kill process, del tap,<br/>remove policy + dir, free /30"]
     X["Destroy (or reconciler cleanup<br/>after kill -9 of the VMM)"] --> U
@@ -326,7 +326,7 @@ control.
 <TaskList>
   <Task title="Write hack/setup-firecracker.sh">
     Verify `/dev/kvm` in Lima, fetch the firecracker binary and a CI kernel image,
-    verify `nft`, enable host forwarding, and build the rootfs (with guest + init) via
+    verify `nft`, enable host forwarding, and build the rootfs (with `sbxd` + init) via
     script. All artifact scripts take `ARCH` (per roadmap 01's convention) even though
     Lima only exercises arm64 — the prod registration task reruns them for amd64
     unchanged.
@@ -335,8 +335,8 @@ control.
     Script only, no Go — configure over the API socket with curl and reach a serial
     console shell. This is the "hello kernel" moment.
   </Task>
-  <Task title="Wire init and the guest">
-    The VM boots straight into a serving `quickspin-guest`; curl its `/healthz` from
+  <Task title="Wire init and sbxd">
+    The VM boots straight into a serving `sbxd`; curl its `/healthz` from
     inside the Lima VM.
   </Task>
   <Task title="Implement per-VM egress policy">
@@ -357,7 +357,7 @@ control.
     `docs/reference/demo-latency.mdx` under roadmap 12's benchmark rules (p50/p95,
     per-phase timestamps, stated method) — that document is the single durable
     benchmark table: cold docker create, snapshot create, and Firecracker
-    boot-to-guest-healthy, side by side.
+    boot-to-sbxd-healthy, side by side.
   </Task>
   <Task title="Register the backend in prod">
     Rerun the artifact scripts with ARCH=amd64, extend roadmap 14's cloud-init to
@@ -403,11 +403,11 @@ control.
     check="A hand-booted VM comes up with no interaction and curl http://<guest-ip>:<port>/healthz from the Lima VM returns 200."
   >
     `dd if=/dev/zero of=rootfs.ext4 bs=1M count=300`, `mkfs.ext4`, `sudo mount -o
-    loop`, untar the alpine export, copy the statically linked `quickspin-guest`
+    loop`, untar the alpine export, copy the statically linked `sbxd`
     (this is why roadmap 07 built it static — alpine is musl, and there is no distro
     contract inside a microVM), and write `/sbin/init` as a small executable shell
     script: mount `/proc`, `ip link set lo up`, `ip addr add` the guest /30 address
-    on `eth0`, `ip route add default`, `exec /usr/local/bin/quickspin-guest`. The
+    on `eth0`, `ip route add default`, `exec /usr/local/bin/sbxd`. The
     guest address must come from outside — kernel `boot_args` are the simplest
     channel (append `quickspin.ip=...` and parse `/proc/cmdline` in init).
   </Hint>
@@ -424,7 +424,7 @@ control.
     `tcpdump -i tap-<id>`. NAT is added separately for an egress-enabled VM.
   </Hint>
   <Hint
-    title="Install policy before the guest can run"
+    title="Install policy before sbxd can run"
     check="TestEgressPolicyTable distinguishes false from true without starting Firecracker; the live false case still answers /healthz but cannot open a new external connection."
   >
     First model the policy as data: TAP name, guest subnet, protected host
@@ -446,7 +446,7 @@ control.
     call, never check-then-take), make a per-VM dir, copy the rootfs, `exec.Command`
     firecracker with its stdout/stderr to a log file, wait for the socket file to
     appear (poll with a deadline — it is created asynchronously), issue the PUTs,
-    `InstanceStart`, then poll guest `/healthz` with a context deadline. Any failure
+    `InstanceStart`, then poll `sbxd` `/healthz` with a context deadline. Any failure
     unwinds everything so far — same create-gap discipline as roadmap 02. `Destroy`
     first SIGKILLs and reaps the process, then deletes the tap, policy rules, and
     directory and frees the /30; each step tolerates "already gone" so destroy stays
@@ -465,10 +465,10 @@ control.
     rewrite during later refactoring.
   </Hint>
   <Hint
-    title="Diagnosing the two likely failures: a guest that never gets healthy, and the crash check"
+    title="Diagnosing the two likely failures: sbxd never gets healthy, and the crash check"
     check="hack/validate-26.sh's crash check passes: after kill -9 of a firecracker process the reconciler marks the sandbox failed and the tap, socket, and rootfs copy are gone."
   >
-    A never-healthy guest is debugged from the serial log file, bottom-up: no output
+    A never-healthy `sbxd` is debugged from the serial log file, bottom-up: no output
     at all means kernel path or missing `console=ttyS0`; kernel panic about VFS means
     the rootfs drive or `root=/dev/vda`; boot completes but no init output means
     `/sbin/init` is not executable or has a bad interpreter line; init runs but curl
@@ -494,7 +494,7 @@ Unit tests (`make test`, no Firecracker process):
 
 - Environment: `/dev/kvm` present; firecracker binary runs.
 - Via the control plane API with `"backend": "firecracker"`: create reaches `running`
-  (meaning guest `/healthz` answered from inside the microVM); exec returns correct
+  (meaning `sbxd` `/healthz` answered from inside the microVM); exec returns correct
   streams/exit code; file round-trip works; destroy removes the VM process, tap
   device, policy rules, socket, and rootfs copy; destroy twice succeeds.
 - Network contract: with `AllowNetwork: false`, plane-driven health/exec/files still
@@ -507,7 +507,7 @@ Unit tests (`make test`, no Firecracker process):
   unreachable from inside.
 - Crash check: `kill -9` the firecracker process; the reconciler marks the sandbox
   `failed` and cleans up the leftovers.
-- Boot-to-guest-healthy time is measured and recorded in
+- Boot-to-sbxd-healthy time is measured and recorded in
   `docs/reference/demo-latency.mdx` alongside roadmap 12's cold-vs-snapshot numbers,
   with the method stated (target: observe the order of magnitude, not hit a number).
 - Once the SDK-and-demo tail lands, the roadmap 24 harness completes one task with

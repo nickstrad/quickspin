@@ -16,7 +16,7 @@ Add a third `Runtime` backend, `internal/runtime/kata`: a sandbox becomes a
 Kubernetes **Pod** whose `runtimeClassName` selects Kata Containers, so the pod's
 containers run inside a microVM instead of sharing the node's kernel. The backend
 talks to the cluster's API server via client-go — create pod, poll ready, delete pod
-— and the guest agent from roadmap 07 runs as the pod's single container, so exec and
+— and `sbxd` from roadmap 07 runs as the pod's single container, so exec and
 files arrive over the pod IP exactly as they do for Docker and Firecracker. On the
 network side, the pod always keeps that IP: `AllowNetwork: false` creates an
 egress-isolating `NetworkPolicy`, while `true` leaves workload egress permitted. On the
@@ -71,7 +71,7 @@ roadmap's pool kind *delegates* instead of pretending to manage.
 - Mapping a foreign state machine onto your contract: Pod phases and conditions →
   `State`, Unschedulable events → `no_capacity`, image pull failures →
   `ErrImageMissing` — sentinel translation at a boundary you don't control.
-- Packaging the guest agent as an OCI image for the first time: a scratch/distroless
+- Packaging `sbxd` as an OCI image for the first time: a scratch/distroless
   image around the static binary, pushed to a registry the cluster can pull from.
 - Kubernetes `NetworkPolicy` as the Kata implementation of roadmap 03's backend-neutral
   egress contract: pod IP and plane reachability stay intact while new
@@ -92,12 +92,12 @@ binaries on each node and registers the handler. The lesson worth extracting: th
 field does, and the cluster owner controls which classes exist — the same
 two-party split as your pool admin versus sandbox creator.
 
-### Concept: the pod is running when *your* guest answers, not when Kubernetes says Ready
+### Concept: the pod is running when *your* `sbxd` answers, not when Kubernetes says Ready
 
 Kubernetes has its own opinion of readiness, and you should wire it — a
 `readinessProbe` on `/healthz` makes `kubectl get pods` honest — but your backend's
-`Create` must hold to the roadmap 07 contract: the sandbox is `running` when the guest
-agent answers over the network. Deriving "running" from pod phase alone recreates
+`Create` must hold to the roadmap 07 contract: the sandbox is `running` when `sbxd`
+answers over the network. Deriving "running" from pod phase alone recreates
 the bug roadmap 02 warned about with Docker states: a foreign state machine's
 vocabulary silently becoming your public contract. The mapping is a pure function,
 `stateFromPod(pod) State`, with the same table-test treatment as
@@ -106,8 +106,8 @@ with an `Unschedulable` condition is your typed `no_capacity` (the cluster's
 version of roadmap 13's full host); `ImagePullBackOff` inside container statuses is
 `ErrImageMissing`; a pod that vanishes between polls is `ErrNotFound`.
 
-<Figure caption="The kata path: the plane submits a labeled Pod with runtimeClassName kata; the cluster schedules it onto a kata-capable node where the shim boots a microVM; readiness is still the roadmap 07 guest answering /healthz over the pod IP.">
-  <svg viewBox="0 0 640 240" role="img" aria-label="Control plane creates a pod via the API server; kubelet dispatches through containerd to the kata shim which boots a microVM running quickspin-guest; the plane polls the guest healthz over the pod IP">
+<Figure caption="The kata path: the plane submits a labeled Pod with runtimeClassName kata; the cluster schedules it onto a kata-capable node where the shim boots a microVM; readiness is still roadmap 07's sbxd answering /healthz over the pod IP.">
+  <svg viewBox="0 0 640 240" role="img" aria-label="Control plane creates a pod via the API server; kubelet dispatches through containerd to the kata shim which boots a microVM running sbxd; the plane polls sbxd healthz over the pod IP">
     <defs>
       <marker id="arrow21" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
         <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf5436" />
@@ -134,23 +134,23 @@ version of roadmap 13's full host); `ImagePullBackOff` inside container statuses
     <text x="330" y="156" textAnchor="middle" fontSize="12" fill="#18231f">containerd → kata shim</text>
     <text x="330" y="172" textAnchor="middle" fontSize="10" fill="#405049">boots VMM + guest kernel</text>
     <rect x="450" y="136" width="160" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
-    <text x="530" y="156" textAnchor="middle" fontSize="12" fill="#18231f">quickspin-guest</text>
+    <text x="530" y="156" textAnchor="middle" fontSize="12" fill="#18231f">sbxd</text>
     <text x="530" y="172" textAnchor="middle" fontSize="10" fill="#405049">the roadmap 07 image</text>
     <line x1="540" y1="72" x2="430" y2="118" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow21)" />
     <line x1="410" y1="158" x2="448" y2="158" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow21)" />
     <path d="M 530 196 L 530 222 L 85 222 L 85 76" fill="none" stroke="#caa552" strokeWidth="1.5" strokeDasharray="5 4" markerEnd="url(#arrow21g)" />
-    <text x="300" y="214" textAnchor="middle" fontSize="10" fill="#7f5d43">GET /healthz on the pod IP — running means the guest answered, same as roadmaps 07/26</text>
+    <text x="300" y="214" textAnchor="middle" fontSize="10" fill="#7f5d43">GET /healthz on the pod IP — running means sbxd answered, same as roadmaps 07/26</text>
   </svg>
 </Figure>
 
 ### Concept: the pod IP is plumbing; egress permission is policy
 
-Kubernetes assigns networking to the pod before `quickspin-guest` can serve. That pod
+Kubernetes assigns networking to the pod before `sbxd` can serve. That pod
 IP is the route used for health, exec, and files, so `AllowNetwork: false` cannot mean
 "remove the interface" here. It means that Quickspin creates an egress-only
 `NetworkPolicy` selecting the sandbox's immutable `quickspin.id` label:
 
-| `AllowNetwork` | Pod IP | Plane → guest | Guest reply | New workload connection |
+| `AllowNetwork` | Pod IP | Plane → `sbxd` | `sbxd` reply | New workload connection |
 |---|---|---|---|---|
 | `false` | retained | allowed | allowed as reply traffic | denied by `policyTypes: [Egress]` with an empty egress list |
 | `true` | retained | allowed | allowed | not restricted by a Quickspin egress-deny policy |
@@ -197,7 +197,7 @@ sequenceDiagram
     P->>K: reachability probe
     P->>K: create smoke pod<br/>(runtimeClassName kata, distinctive label)
     K-->>P: pod scheduled, pod IP
-    P->>P: poll guest /healthz within a short deadline
+    P->>P: poll sbxd /healthz within a short deadline
     alt smoke pod turns healthy
         P->>K: delete smoke pod
         P->>P: insert pool row
@@ -238,12 +238,12 @@ the headline. New surface and commitments:
 
 ```text
 Backend: Spec.Backend gains "kata". Pod template: one container running the
-  quickspin-guest image; labels quickspin.id / quickspin.managed as pod labels;
+  sbxd image; labels quickspin.id / quickspin.managed as pod labels;
   runtimeClassName from pool config (default "kata"); readinessProbe on /healthz;
   restartPolicy Never (a dead sandbox is dead — roadmap 13's no-migration rule; the
   reconciler observes the failure, nothing silently restarts it).
 Lifecycle mapping (pure, table-tested):
-  stateFromPod: PodRunning+guest-healthy → running; Succeeded/Failed → stopped;
+  stateFromPod: PodRunning+sbxd-healthy → running; Succeeded/Failed → stopped;
   Pending+Unschedulable past window → no_capacity; ImagePullBackOff →
   ErrImageMissing; absent → ErrNotFound.
   Destroy: delete the label-resolved Pod and wait for absence, then delete its
@@ -253,7 +253,7 @@ Egress policy (pure builder + live enforcement test):
   empty egress list; create policy before Pod.
   AllowNetwork true → no Quickspin egress-deny policy; the roadmap-owned namespace's
   ordinary cluster networking applies.
-Guest image: build/quickspin-guest.Dockerfile — FROM scratch + the static binary
+sbxd image: build/sbxd.Dockerfile — FROM scratch + the static binary
   (roadmap 07's static build paying off a third time); pushed to a registry the
   cluster pulls from; tag pinned in pool config, never :latest.
 Pool integration (needs 19):
@@ -273,7 +273,7 @@ The lifecycle mapping above, as the pure function the tests pin down:
   caption="stateFromPod pins the foreign state machine: every observation on the left resolves to exactly one contract outcome, each arrow is a table-test row, and the failure rows are the ones that earn the table."
   code={`
 flowchart LR
-    A["PodRunning and the<br/>guest answers /healthz"] --> R["running"]
+    A["PodRunning and<br/>sbxd answers /healthz"] --> R["running"]
     B["Succeeded or Failed"] --> S["stopped"]
     C["Pending + Unschedulable<br/>past the pending window"] --> N["typed no_capacity"]
     D["ContainerStatuses waiting:<br/>ImagePullBackOff"] --> I["ErrImageMissing"]
@@ -317,8 +317,8 @@ phases.
     own kernel, and a live default-deny probe proving the CNI enforces
     `NetworkPolicy`.
   </Task>
-  <Task title="Package and push the guest image">
-    `build/quickspin-guest.Dockerfile` from scratch + static binary; a make target
+  <Task title="Package and push the sbxd image">
+    `build/sbxd.Dockerfile` from scratch + static binary; a make target
     builds and pushes; a hand-written kata pod running it answers /healthz.
   </Task>
   <Task title="Write the pure mapping layer">
@@ -332,7 +332,7 @@ phases.
   </Task>
   <Task title="Add the kubernetes pool kind">
     Roadmap 16 schema variant, scale refusal, reachability probe, and the smoke pod on
-    pool create; the smoke must reach its guest while its outbound probe is denied.
+    pool create; the smoke must reach `sbxd` while its outbound probe is denied.
   </Task>
   <Task title="Route backend kata through the stack and validate">
     Spec validation, placement's elastic-pool path, one SDK field value, and
@@ -359,10 +359,10 @@ phases.
     reject that pool.
   </Hint>
   <Hint
-    title="The guest image is FROM scratch and two lines"
+    title="The sbxd image is FROM scratch and two lines"
     check="A kata pod running your pushed image answers /healthz on its pod IP from the node."
   >
-    `FROM scratch`, `COPY quickspin-guest /`, `ENTRYPOINT ["/quickspin-guest"]` —
+    `FROM scratch`, `COPY sbxd /`, `ENTRYPOINT ["/sbxd"]` —
     static linking means no base image, which also means no shell inside, so debug
     via pod logs, not exec. Push to any registry the cluster can pull from
     (Docker Hub or GHCR are fine); imagePullSecrets if private. Pin by tag or
@@ -397,7 +397,7 @@ phases.
   </Hint>
   <Hint
     title="client-go's boilerplate is front-loaded; the verbs are small"
-    check="TestCreateThenInspect (gated on a live cluster env var) creates a kata pod, reports running after the guest answers, and destroy twice returns nil."
+    check="TestCreateThenInspect (gated on a live cluster env var) creates a kata pod, reports running after sbxd answers, and destroy twice returns nil."
   >
     `clientcmd.BuildConfigFromFlags("", kubeconfigPath)` →
     `kubernetes.NewForConfig` → `client.CoreV1().Pods(ns)`. List and inspect use
@@ -416,7 +416,7 @@ phases.
     exercise the real path, not a parallel one. Run it with a short deadline and a
     distinctive label so a crashed smoke test and its policy are reaped by the
     ordinary orphan sweep. Use `AllowNetwork: false`, reach `/healthz`, then execute
-    an outbound probe through the guest and require that it fail; this proves guest
+    an outbound probe through `sbxd` and require that it fail; this proves management
     reachability and egress isolation coexist. Order matters for crash-safety: smoke
     resources first, pool row only on success — the inverse of roadmap 15's row-first
     ordering, because here the external resources are disposable and the row is the
@@ -432,8 +432,8 @@ phases.
     firing — log the parsed conditions each poll. If the pod schedules but never
     turns ready, split the failure with pod logs: no log output means the image or
     entrypoint (wrong arch is the classic — the droplet is amd64, roadmap 01's
-    cross-compile habit finally flips direction); guest logs but probe failing
-    means the readinessProbe port disagrees with the guest's listen address. If
+    cross-compile habit finally flips direction); `sbxd` logs but probe failing
+    means the readinessProbe port disagrees with `sbxd`'s listen address. If
     `/healthz` fails only under `AllowNetwork: false`, inspect the policy: it probably
     isolated ingress as well as egress. If outbound traffic still succeeds, inspect
     the CNI rather than the Pod—the API server storing a policy does not prove the
@@ -456,7 +456,7 @@ Unit tests (`make test`, no cluster):
 Gated live tests + `hack/validate-27.sh` against the lab cluster:
 
 - Isolation proof: `uname -r` in a sandbox differs from the node kernel.
-- Via the control plane with `"backend": "kata"`: create reaches running (guest
+- Via the control plane with `"backend": "kata"`: create reaches running (`sbxd`
   answered), exec streams and exit codes work, file round-trip works, destroy is
   idempotent, and `kubectl get pods` plus `kubectl get networkpolicies` show no
   sandbox resources after.

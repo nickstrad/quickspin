@@ -15,7 +15,7 @@ pass, so container and microVM isolation sit behind the same API.
 > and Docker, plus a CLI client for creating, inspecting, listing, executing in, copying
 > files to and from, and destroying sandboxes. Sandboxes have cgroup v2
 > CPU/memory/pids limits and network off by default; file operations enforce
-> absolute-path validation and bounded transfers. The guest agent, SDKs, and the
+> absolute-path validation and bounded transfers. `sbxd`, SDKs, and the
 > Firecracker/Kata backends are future roadmap work. See the
 > [platform roadmap](docs/plans/) for the intended sequence.
 

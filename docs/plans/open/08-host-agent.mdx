@@ -7,7 +7,7 @@ Depends on: 07.
 Build `quickspin-hostd`: a daemon that runs on every sandbox host and becomes the only
 thing the control plane talks to on that host. Both traffic classes converge on it —
 lifecycle calls (the `Runtime` surface: create, inspect, list, destroy) and workload
-calls (guest exec and files, proxied through to each sandbox's `quickspin-guest`). On
+calls (`sbxd` exec and files, proxied through to each sandbox's `sbxd`). On
 today's single host, hostd is deliberately a thin proxy over the existing Docker
 runtime: behavior changes almost nothing, and that is the point. The deliverable is the
 *boundary*. It is the seam where Firecracker (roadmap 26, optional) plugs in, the attachment
@@ -45,15 +45,15 @@ rewriting those features.
 - Streaming through a second hop: roadmap 07's flush discipline now applies at every
   proxy in the chain, and one buffering hop silently defeats all the others.
 - Failure domains: "plane cannot reach hostd," "hostd cannot reach Docker," and
-  "hostd cannot reach the guest" are three different facts that need three
+  "hostd cannot reach `sbxd`" are three different facts that need three
   distinguishable errors.
 - Statelessness as a design constraint: hostd persists nothing, so `kill -9` is a
   legitimate test rather than a catastrophe.
-- Version skew across three binaries: plane, hostd, and guest now ship separately.
+- Version skew across three binaries: plane, hostd, and `sbxd` now ship separately.
 
 ### Concept: the boundary is measured by what the plane can no longer do
 
-Before this roadmap the plane holds a Docker client and a per-sandbox guest address;
+Before this roadmap the plane holds a Docker client and a per-sandbox `sbxd` address;
 after it, the plane holds one hostd address and a token. That is a *removal* of
 capability, and it is verifiable: the plane's binary no longer imports the Docker SDK,
 and nothing in its store records a container port. Removals like this are how a
@@ -69,26 +69,26 @@ the far side serializes the shared `api.ErrorResponse` DTO and the near side min
 fresh, typed error. With hostd in the middle there are two boundaries, and a new
 failure ambiguity: when an exec fails, was the *host agent* unreachable (host down,
 token wrong — placement-relevant, roadmap 13 will care) or did hostd reach the sandbox
-and find the *guest* dead (sandbox-relevant — the reconciler should consider `failed`)?
-The DTO gains a `source` field (`runtime`, `guest`, `hostd`) so the plane can tell.
+and find *`sbxd`* dead (sandbox-relevant — the reconciler should consider `failed`)?
+The DTO gains a `source` field (`runtime`, `sbxd`, `hostd`) so the plane can tell.
 Collapsing these into one opaque 502 is the classic proxy sin; debugging multi-host
 systems later depends on the distinction existing now.
 
 <Mermaid
-  caption="Both traffic classes converge on hostd. Lifecycle terminates at the runtime; workload passes through to the guest. The plane knows one address per host and zero addresses per sandbox."
+  caption="Both traffic classes converge on hostd. Lifecycle terminates at the runtime; workload passes through to sbxd. The plane knows one address per host and zero addresses per sandbox."
   code={`
 sequenceDiagram
     participant P as control plane
     participant H as quickspin-hostd
     participant D as Docker runtime
-    participant G as quickspin-guest
+    participant S as sbxd
     P->>H: POST /v1/runtime/sandboxes (create)
-    H->>D: Runtime.Create — bind-mount guest, entrypoint, labels
-    D-->>H: container ID, guest address (host-local)
+    H->>D: Runtime.Create — bind-mount sbxd, entrypoint, labels
+    D-->>H: container ID, sbxd address (host-local)
     H-->>P: Info DTO — no port, no socket path
-    P->>H: POST /v1/guest/{id}/exec?stream=true
-    H->>G: proxied request, host-local dial
-    G-->>H: ndjson events
+    P->>H: POST /v1/sbxd/{id}/exec?stream=true
+    H->>S: proxied request, host-local dial
+    S-->>H: ndjson events
     H-->>P: same events, flushed per line
 `}
 />
@@ -96,7 +96,7 @@ sequenceDiagram
 ### Concept: cancellation must survive the extra hop
 
 Roadmap 07's kill-on-disconnect contract — caller goes away, child process dies — now
-has three links: caller→plane, plane→hostd, hostd→guest. Each link propagates
+has three links: caller→plane, plane→hostd, hostd→sbxd. Each link propagates
 cancellation the same way (the outbound request carries the inbound request's context,
 so a closed connection cancels the next hop), but the chain is only as good as its
 weakest link: one hop that uses `context.Background()` for its outbound call turns an
@@ -115,7 +115,7 @@ POST   /v1/runtime/sandboxes          Runtime.Create
 GET    /v1/runtime/sandboxes          Runtime.List
 GET    /v1/runtime/sandboxes/{id}     Runtime.Inspect
 DELETE /v1/runtime/sandboxes/{id}     Runtime.Destroy
-ANY    /v1/guest/{id}/*               passthrough to that sandbox's guest API
+ANY    /v1/sbxd/{id}/*                passthrough to that sandbox's sbxd API
 ```
 
 Committed decisions:
@@ -127,17 +127,17 @@ Committed decisions:
   surface, asserted at compile time. The plane's handlers and reconciler are untouched
   — swapping the concrete `Runtime` is the whole proof that roadmap 02's interface was
   drawn correctly.
-- Guest addresses move out of the plane entirely. hostd resolves sandbox ID → guest
+- `sbxd` addresses move out of the plane entirely. hostd resolves sandbox ID → `sbxd`
   address per request (from `ContainerInspect`, cached in memory, rebuilt from labels
-  after a restart). The plane's store drops its guest-address column: host-local
+  after a restart). The plane's store drops its stored `sbxd` address: host-local
   detail now lives host-side.
-- `guest.Client`'s interface from roadmap 07 is unchanged; only its transport changes,
+- `sbxd.Client`'s interface from roadmap 07 is unchanged; only its transport changes,
   to the hostd passthrough. Workload handlers cannot tell the difference.
 - Auth is a static bearer token checked with a constant-time compare, minted by the
   operator and injected into both processes' env. mTLS is named and deferred to the
   threat model (roadmap 11).
 - Error DTO: hostd serves `api.ErrorResponse` with a `source` field distinguishing
-  `runtime`, `guest`, and `hostd` failures; the plane's clients mint typed errors per
+  `runtime`, `sbxd`, and `hostd` failures; the plane's clients mint typed errors per
   the error reference's process-boundary rule.
 - Local dev runs the split every day: a make target boots plane + hostd as two
   processes in Lima, and the roadmap 05 validate script runs against that pair.
@@ -165,18 +165,18 @@ behind the plane.
     A thin HTTP shell over the existing runtime packages: decode request DTO, call
     `Runtime`, encode `Info` or `api.ErrorResponse`. Token middleware on every route.
   </Task>
-  <Task title="Add the guest passthrough">
-    `ANY /v1/guest/{id}/*` resolves the sandbox's guest address and proxies with
+  <Task title="Add the sbxd passthrough">
+    `ANY /v1/sbxd/{id}/*` resolves the sandbox's `sbxd` address and proxies with
     per-line flushing and context propagation, so streams stay live and disconnects
     still kill.
   </Task>
-  <Task title="Move guest-address resolution into hostd">
+  <Task title="Move sbxd-address resolution into hostd">
     Resolve from the runtime per request with an in-memory cache rebuilt from labels;
-    drop the plane's stored guest address in a migration.
+    drop the plane's stored `sbxd` address in a migration.
   </Task>
   <Task title="Introduce hostclient in the plane">
     `hostclient.Runtime` (compile-time asserted against `Runtime`) and the hostd-backed
-    guest transport; delete the plane's direct Docker and guest dialing.
+    `sbxd` transport; delete the plane's direct Docker and `sbxd` dialing.
   </Task>
   <Task title="Wire the two-process dev flow">
     Make target booting plane + hostd with a dev token in Lima; `hack/validate-08.sh`
@@ -203,17 +203,17 @@ behind the plane.
   </Hint>
   <Hint
     title="The passthrough is a ReverseProxy with flushing turned on"
-    check="An exec streamed through plane → hostd → guest delivers its first event before the command finishes."
+    check="An exec streamed through plane → hostd → sbxd delivers its first event before the command finishes."
   >
     `httputil.ReverseProxy` with `FlushInterval` set to a negative value flushes
     immediately and handles chunked bodies; its `Rewrite` hook is where the sandbox ID
-    becomes a guest address. If you hand-roll instead: copy with a per-line flush and
+    becomes an `sbxd` address. If you hand-roll instead: copy with a per-line flush and
     make the outbound request with `r.Context()` so a caller disconnect cancels the
-    guest-side exec — roadmap 07's kill-on-disconnect test should still pass with the
+    exec inside `sbxd` — roadmap 07's kill-on-disconnect test should still pass with the
     extra hop in place.
   </Hint>
   <Hint
-    title="Resolve guest addresses from the runtime, not from a file"
+    title="Resolve sbxd addresses from the runtime, not from a file"
     check="Restarting hostd mid-session loses nothing: the next exec against an existing sandbox works without any re-registration step."
   >
     The address is derivable state: `ContainerInspect` gives the mapped port for any
@@ -249,7 +249,7 @@ behind the plane.
     outbound requests lack deadlines — but do not reach for `http.Client.Timeout`,
     which also kills healthy long streams; use `context.WithTimeout` on lifecycle
     calls and rely on connection errors plus context cancellation on streaming ones.
-    If disconnects stop killing guest-side processes: some hop switched to
+    If disconnects stop killing processes launched by `sbxd`: some hop switched to
     `context.Background()` for its outbound call and broke the cancellation chain —
     check the proxy first.
   </Hint>
@@ -257,15 +257,15 @@ behind the plane.
 
 ## Definition of done
 
-Unit tests (`make test`, httptest servers, fake runtime and guest):
+Unit tests (`make test`, httptest servers, fake runtime and `sbxd`):
 
 - `TestHostdServesRuntimeConformance` — the existing runtime conformance suite passes
   against `hostclient → hostd → fake runtime`.
-- `TestGuestPassthroughStreamsLive` — first ndjson event crosses both hops before the
+- `TestSbxdPassthroughStreamsLive` — first ndjson event crosses both hops before the
   command completes.
 - `TestPassthroughKillsOnCallerDisconnect` — canceling the top-level request
-  propagates through hostd; the fake guest observes the cancellation.
-- `TestHostdUnreachableIsTypedError` and `TestGuestDownIsDistinguishableFromHostDown`
+  propagates through hostd; the fake `sbxd` observes the cancellation.
+- `TestHostdUnreachableIsTypedError` and `TestSbxdDownIsDistinguishableFromHostDown`
   — the three failure domains map to distinct typed errors via the DTO's `source`.
 - `TestHostdRejectsBadToken` — constant-time compare, 401 on mismatch.
 
@@ -277,7 +277,7 @@ Integration (`make test-docker` / `hack/validate-08.sh` in Lima):
 - `kill -9` hostd mid-exec: the caller gets a typed error in bounded time (no hang);
   restarting hostd makes existing sandboxes usable again with no re-registration —
   statelessness demonstrated, not asserted.
-- Grep gate: the plane's packages no longer import the Docker SDK or dial guest
+- Grep gate: the plane's packages no longer import the Docker SDK or dial `sbxd`
   addresses; only hostd does.
 
 Deliberately untested: registration, heartbeats, capacity, and placement (roadmap 13);
@@ -291,7 +291,7 @@ image management, device plugins; hostd is a proxy with a token because the seam
 the feature set, is this roadmap's deliverable, and every capability added to hostd now
 is one more thing roadmap 26 must reimplement for microVMs. One static host address is
 config-file discovery — honest at one host, replaced by registration in roadmap 13
-rather than half-built here. The plane→hostd link shares the guest link's weakness
+rather than half-built here. The plane→hostd link shares the `sbxd` link's weakness
 (plaintext bearer on a trusted host) and inherits its resolution path: recorded in
 roadmap 11's threat model, mTLS deferred deliberately. The extra hop costs real
 latency on a single host and buys nothing until there are two hosts or two backends —
@@ -333,7 +333,7 @@ accepted, because both are on the roadmap.
     href="https://pkg.go.dev/net/http/httputil#ReverseProxy"
   >
     The passthrough's engine: `Rewrite`, `FlushInterval` semantics (negative flushes
-    immediately), and the streaming caveats the guest proxy depends on.
+    immediately), and the streaming caveats the `sbxd` proxy depends on.
   </Resource>
   <Resource
     kind="docs"
@@ -341,7 +341,7 @@ accepted, because both are on the roadmap.
     href="https://github.com/e2b-dev/infra"
   >
     E2B's open control plane: orchestrator-per-node talking to envd in each sandbox —
-    the commercial system whose shape (plane → node agent → guest agent) this roadmap
+    the commercial system whose shape (plane → node agent → sandbox daemon) this roadmap
     adopts at teaching scale.
   </Resource>
 </Resources>

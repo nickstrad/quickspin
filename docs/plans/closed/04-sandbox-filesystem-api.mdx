@@ -18,7 +18,7 @@ equivalents. Under the hood most container platforms use tar streams — Docker'
 copy API (`CopyToContainer`/`CopyFromContainer`) speaks tar because it predates any
 nicer transport, and tar preserves permissions and directory structure in one stream.
 You'll wrap that oddity behind a clean interface, which is precisely what the
-commercial SDKs do. In roadmap 07 these operations move into the guest agent (files served
+commercial SDKs do. In roadmap 07 these operations move into `sbxd` (files served
 from inside the sandbox), but this interface — the seam callers depend on — survives
 that move unchanged. That continuity is the lesson.
 
@@ -86,14 +86,14 @@ and pure: `path.IsAbs` to require absolute paths, `path.Clean` to collapse `.` a
 `..` segments, and the rule that a path which *changes meaning* under cleaning (or
 still escapes after it) is rejected before any I/O happens. Centralizing this in one
 validation helper — called by all four methods — is what makes the property testable
-in a table and durable when the implementation moves into the guest agent. Symlinks
+in a table and durable when the implementation moves into `sbxd`. Symlinks
 are the deeper version of the same attack (a link inside the sandbox pointing at a
 host path); this roadmap records them as deliberately untested rather than silently
 ignored, because with Docker's copy API the extraction happens inside the container's
 filesystem, not the host's.
 
 <Mermaid
-  caption="One pure helper, called first by all four methods. Rejection happens before any I/O, and every check below the Clean step is table-testable without Docker — which is what lets the same rules survive unchanged when roadmap 07 moves the implementation into the guest agent."
+  caption="One pure helper, called first by all four methods. Rejection happens before any I/O, and every check below the Clean step is table-testable without Docker — which is what lets the same rules survive unchanged when roadmap 07 moves the implementation into sbxd."
   code={`
 flowchart TD
     P["incoming path"] --> E1{"empty?"}

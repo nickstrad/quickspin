@@ -21,7 +21,7 @@ into a registered, heartbeating worker with no manual steps; `drain` + `delete`
 retire one just as cleanly. Monitoring becomes real observability: Prometheus-format
 `/metrics` on the plane and workers, scraped into Grafana Cloud's free tier, with a
 small dashboard and two alerts — plus OpenTelemetry traces on the create path, so
-one trace shows a request crossing API → placement → worker → guest-ready. A
+one trace shows a request crossing API → placement → worker → sbxd-ready. A
 cost-safety reconciler guarantees no forgotten server ever bills you silently.
 
 The roadmap closes with operations as writing, not just wiring: a runbook, a game day
@@ -274,7 +274,7 @@ platform-operator authorization for fleet-mutating operations.
   </Task>
   <Task title="Trace the create path with OpenTelemetry">
     `go.opentelemetry.io/otel` spans from API accept through placement, the worker
-    create call, and guest-ready, with W3C traceparent propagated over the
+    create call, and sbxd-ready, with W3C traceparent propagated over the
     plane→hostd HTTP hop; export to Grafana Cloud Tempo. One create, one trace,
     every hop visible — resist instrumenting anything beyond the create path.
   </Task>
@@ -421,7 +421,7 @@ Live validation `hack/validate-15.sh` (spends real money — cents — and says 
 - Metrics: `/metrics` on plane and worker include the required series; the
   create-to-ready histogram observed the new host's sandbox.
 - Traces: a create issued during the run appears in Tempo as one trace whose spans
-  cover API accept → placement → worker create → guest-ready, across both processes.
+  cover API accept → placement → worker create → sbxd-ready, across both processes.
 - Alert check (once, manually acknowledged in closing notes): stop all hostds and
   confirm the zero-ready-hosts alert fires in Grafana.
 

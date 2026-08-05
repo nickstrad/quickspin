@@ -33,7 +33,7 @@ is precisely the boundary where microVMs earn their keep, which sets up the opti
   writable-layer growth matters.
 - Lifecycle design when states multiply: what is `saved`? (This roadmap: a snapshot is an
   artifact, and the sandbox that produced it is destroyed on save — no paused state.)
-- Benchmarking honestly: percentiles over means, measuring from API call to guest
+- Benchmarking honestly: percentiles over means, measuring from API call to `sbxd`
   `/healthz`, separating pull/create/start/ready phases.
 - Cleanliness of restored state: what leaks through a snapshot (files in `/tmp`,
   credentials the agent wrote) — a small threat-model addendum.
@@ -106,7 +106,7 @@ deletion is retried until it succeeds rather than trusted to one HTTP handler.
     <text x="444" y="122" textAnchor="middle" fontSize="10" fill="#7f5d43">crash here → reconciler finishes the destroy</text>
     <rect x="250" y="185" width="150" height="44" fill="none" stroke="#18231f" strokeWidth="1.5" />
     <text x="325" y="205" textAnchor="middle" fontSize="12" fill="#18231f">sandbox B</text>
-    <text x="325" y="221" textAnchor="middle" fontSize="10" fill="#405049">fresh guest re-injected</text>
+    <text x="325" y="221" textAnchor="middle" fontSize="10" fill="#405049">fresh sbxd re-injected</text>
     <path d="M 560 74 C 620 130 560 190 402 207" fill="none" stroke="#cf5436" strokeWidth="1.5" markerEnd="url(#arrow11)" />
     <text x="560" y="180" textAnchor="middle" fontSize="10" fill="#8f3423">POST /v1/sandboxes</text>
     <text x="560" y="194" textAnchor="middle" fontSize="10" fill="#8f3423">spec.snapshot = name</text>
@@ -116,9 +116,9 @@ deletion is retried until it succeeds rather than trusted to one HTTP handler.
 ### Concept: a benchmark you can defend
 
 "Snapshots make startup faster" is only meaningful as a measured claim with a stated
-method. The honest shape: measure from the API call to the guest reporting healthy
+method. The honest shape: measure from the API call to `sbxd` reporting healthy
 (the latency an agent actually feels), record per-phase timestamps (pull, create,
-start, guest-ready) so you can say *where* time went, run enough iterations that a
+start, sbxd-ready) so you can say *where* time went, run enough iterations that a
 percentile means something, and report p50/p95 rather than a mean that one slow pull
 can poison. The comparison must also be fair: cold create *plus the setup step the
 snapshot amortizes* (the `pip install`) versus snapshot create — comparing bare cold
@@ -131,10 +131,10 @@ month is a number you don't have.
   code={`
 flowchart LR
     subgraph cold["cold arm - 20 iterations, interleaved"]
-        A1["API call<br/>returns"] --> A2["state reaches<br/>running"] --> A3["guest /healthz<br/>first succeeds"] --> A4["pip install completes<br/>(the work the snapshot amortizes)"]
+        A1["API call<br/>returns"] --> A2["state reaches<br/>running"] --> A3["sbxd /healthz<br/>first succeeds"] --> A4["pip install completes<br/>(the work the snapshot amortizes)"]
     end
     subgraph warm["snapshot arm - 20 iterations, interleaved"]
-        B1["API call<br/>returns"] --> B2["state reaches<br/>running (no pull:<br/>image is local)"] --> B3["guest /healthz<br/>first succeeds"]
+        B1["API call<br/>returns"] --> B2["state reaches<br/>running (no pull:<br/>image is local)"] --> B3["sbxd /healthz<br/>first succeeds"]
     end
 `}
 />
@@ -166,7 +166,7 @@ standing rule 09 established. Runtime interface gains
 Committed decisions: save destroys the source sandbox (a snapshot is a checkpoint you
 resume *from*, not a paused thing you resume — E2B-style pause is out of scope and the
 API name says `save`, not `pause`); snapshots count against a per-tenant total-bytes
-quota; guest binary is re-injected on restore so snapshots never bake in a stale guest.
+quota; `sbxd` is re-injected on restore so snapshots never bake in a stale daemon.
 
 ### Client surfaces
 
@@ -259,14 +259,14 @@ it, and must surface the API's byte-quota failure.
     treated as "no images exist".
   </Hint>
   <Hint
-    title="Re-inject the guest on restore rather than trusting the snapshot"
-    check="TestRestoredSandboxHasFreshGuest passes: after bumping the guest version and restoring an old snapshot, the guest health endpoint reports the new version."
+    title="Re-inject sbxd on restore rather than trusting the snapshot"
+    check="TestRestoredSandboxHasFreshSbxd passes: after bumping the sbxd version and restoring an old snapshot, the sbxd health endpoint reports the new version."
   >
-    Whatever mechanism roadmap 07 used to place the guest binary into a fresh sandbox
-    must run on the snapshot-create path too — restore is just create, so if guest
+    Whatever mechanism roadmap 07 used to place `sbxd` into a fresh sandbox
+    must run on the snapshot-create path too — restore is just create, so if `sbxd`
     injection lives in the create flow (not baked into base images) you may already
     be done; the test is what proves it. The failure mode being prevented: a
-    six-week-old snapshot resurrecting a six-week-old guest API.
+    six-week-old snapshot resurrecting a six-week-old `sbxd` API.
   </Hint>
   <Hint
     title="Instrument phases in the benchmark, then aggregate percentiles"
@@ -274,7 +274,7 @@ it, and must surface the API's byte-quota failure.
   >
     Timestamp with `date +%s%N` (or do the whole loop in Go — roadmap 03 already fought
     shell timing precision) around each phase: create request returns, state reaches
-    running, guest `/healthz` first succeeds, and for the cold arm, the `pip install`
+    running, `sbxd` `/healthz` first succeeds, and for the cold arm, the `pip install`
     exec completes. 20 iterations each arm; sort each column and take index 10 and 19
     for p50/p95 (`sort -n | awk` is enough). Alternate arms rather than running 20
     then 20, so daemon warmup doesn't bias one side.
@@ -300,7 +300,7 @@ Integration tests (`make test-docker`):
 
 - `TestSaveThenRestorePreservesFiles` — write file, install a package, save, create
   from snapshot, both survive; source sandbox is gone.
-- `TestRestoredSandboxHasFreshGuest` — guest healthy and version-current after restore.
+- `TestRestoredSandboxHasFreshSbxd` — `sbxd` healthy and version-current after restore.
 - `TestSaveIsRecordedBeforeDestroy` — kill the plane between commit and destroy;
   reconciler converges without losing the snapshot (crash point in `validate-06`
   style).

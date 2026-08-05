@@ -131,7 +131,7 @@ sequenceDiagram
 The deliverable is one page that names the assets (host, other tenants' sandboxes and
 data, API keys), the trust boundaries (untrusted workload code, semi-trusted SDK
 callers, trusted host and operator), and — the honest part — the attacks roadmaps 02–08
-explicitly do *not* defend: the unauthenticated plane→guest link from roadmap 07, host
+explicitly do *not* defend: the unauthenticated plane→sbxd link from roadmap 07, host
 escape from a container, unrestricted egress. Writing "not defended" next to a real
 gap converts it from an accident into a decision with a recorded rationale, gives
 later roadmaps a checklist of debts, and is the difference between a security posture and
@@ -247,7 +247,7 @@ sandbox view may reveal another tenant's rows or a raw key after minting.
   </Task>
   <Task title="Write the threat model">
     `docs/reference/threat-model.mdx`, one page: assets, trust boundaries, what roadmaps
-    02–09 defend, what they explicitly do not (plane→guest link, host escape, egress).
+    02–09 defend, what they explicitly do not (plane→sbxd link, host escape, egress).
   </Task>
   <Task title="Write the tests and validation script">
     The unit and API tests plus `hack/validate-11.sh` from Definition of done.
@@ -318,7 +318,7 @@ sandbox view may reveal another tenant's rows or a raw key after minting.
   >
     Structure it as three lists: assets, trust boundaries, and two columns of
     defenses — enforced (each line citing its test: cross-tenant 404s, hashed keys,
-    quota admission) and explicitly not defended (plane→guest auth from roadmap 07's
+    quota admission) and explicitly not defended (plane→sbxd auth from roadmap 07's
     tradeoffs, container escape, egress, per-key rate limiting). If a claim has no
     test and is not in the undefended list, either write the test or move the claim.
   </Hint>
@@ -357,7 +357,7 @@ Validation `hack/validate-11.sh`: mints two tenants' keys via the admin CLI, dri
 real service proving isolation (tenant B cannot see or destroy tenant A's sandbox) and
 quota enforcement, and greps the server logs to prove no raw key was ever logged.
 
-Deliberately untested/undefended (recorded in the threat model): plane→guest auth,
+Deliberately untested/undefended (recorded in the threat model): plane→sbxd auth,
 per-key rate limiting, key rotation UX, audit of admin actions.
 
 ## Solo-developer tradeoffs

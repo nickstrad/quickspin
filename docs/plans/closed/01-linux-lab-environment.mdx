@@ -101,14 +101,14 @@ build` on your Mac emits an ELF binary the VM can run directly — no toolchain 
 the VM, no CI round-trip. The catch is dynamic linking: with cgo enabled, the binary
 expects the *build* machine's libc, which Linux doesn't have. `CGO_ENABLED=0` forces a
 static binary that depends on nothing but the kernel's syscall ABI. That property is
-why the roadmap bothers: from roadmap 07 onward you will drop a guest-agent binary into
+why the roadmap bothers: from roadmap 07 onward you will drop `sbxd` into
 minimal containers and (later) Firecracker rootfs images that contain no libraries at
 all. A binary that runs when copied to an empty Alpine container is the standard to
 hold `make build-linux` to.
 
 <StudyPrompt question="Why parameterize ARCH now, when the only target is arm64?">
   Roadmap 14's production host is x86_64. Every artifact-producing script written between
-  now and then (guest binary, rootfs, Firecracker kernel) will copy this Makefile's
+  now and then (`sbxd`, rootfs, Firecracker kernel) will copy this Makefile's
   pattern. If the arch is a variable from birth, roadmap 14 is `ARCH=amd64 make
   build-linux`; if it is hardcoded, roadmap 14 starts with an archaeology dig through
   every script under deadline pressure.
@@ -124,7 +124,7 @@ No Go interfaces. The contracts are environmental:
 - New Makefile targets:
   - `make build-linux` — cross-compiles `cmd/...` to `bin/linux-$(ARCH)/`, with
     `ARCH ?= arm64`. Parameterizing the arch now is deliberate: the production host in
-    roadmap 14 is x86_64, and every artifact script written later (guest binary, rootfs,
+    roadmap 14 is x86_64, and every artifact script written later (`sbxd`, rootfs,
     Firecracker kernel) should take the arch as a variable from birth rather than being
     un-hardcoded under deadline pressure.
   - `make validate-env` — runs `hack/validate-01.sh`.

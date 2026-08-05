@@ -26,7 +26,7 @@ The ordering is platform-first and **Lima-first**: every roadmap's definition of
 done validates locally in Lima, and the cloud runs the identical paths, so prod is a
 mode the platform can enter at any time rather than a gate the sequence passes
 through. 01–08 are the sequential spine ending in the three-binary architecture
-(control plane, host agent, guest agent). Then the store moves first: 09 ports it to
+(control plane, host agent, `sbxd`). Then the store moves first: 09 ports it to
 Postgres immediately, so every later schema is born on the migration rail and the
 conformance suite. 10 builds the web console — an AI-driven Next.js app
 (better-auth sessions, tRPC, shadcn) that becomes the platform's first standing
@@ -67,8 +67,8 @@ Everything else is depth to add by appetite; 20 (depends only on 03/04) and 25
    plane, SQLite state machine, idempotency keys.
 6. [`06-reconciler-leases-events.mdx`](plans/closed/06-reconciler-leases-events.mdx) —
    reconcile loop, TTL reaping, event log, async create, crash convergence.
-7. [`07-guest-agent-api.mdx`](plans/open/07-guest-agent-api.mdx) — the in-sandbox
-   `quickspin-guest` binary serving exec (streaming) and files, E2B-envd style;
+7. [`07-sbxd-api.mdx`](plans/open/07-sbxd-api.mdx) — the in-sandbox `sbxd` binary
+   serving exec (streaming) and files, E2B-envd style;
    preserves the existing per-sandbox `version_id` ordering as readiness adds a
    transition writer.
 8. [`08-host-agent.mdx`](plans/open/08-host-agent.mdx) — `quickspin-hostd`, the
