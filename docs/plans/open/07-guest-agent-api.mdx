@@ -10,10 +10,12 @@ output), file read/write/list, and health. The control plane proxies
 `/v1/sandboxes/{id}/...` workload calls to the guest instead of using Docker exec and
 the tar copy API. The `Runtime` interface keeps lifecycle (create/destroy); workload
 operations move to the guest client. This is the architectural move that makes a microVM backend
-(roadmap 26, optional) possible, because a microVM has no `docker exec`. A small schema rider
-comes along: sandboxes gain a `generation` counter incremented on every state
-transition and stamped onto each event row, which gives the event log a total order per
-sandbox even within one clock second — the ordering roadmap 17's consumers read.
+(roadmap 26, optional) possible, because a microVM has no `docker exec`. The store's
+existing `version_id` sequence already gives lifecycle events a total order per sandbox,
+even within one clock second. This roadmap preserves that invariant as readiness adds a
+new state-transition writer: every readiness transition goes through the shared
+version-fenced update and stamps its post-transition `version_id` onto the event that
+roadmap 17's consumers will read.
 
 ## Industry context
 
@@ -43,8 +45,9 @@ is a real design constraint from here on.
 - Readiness semantics: "container running" vs "guest answering" are different states —
   the control plane's `running` now means the latter.
 - Static binaries and injection via bind-mount.
-- Event ordering: a per-sandbox `generation` that counts transitions, giving the event
-  log a gapless sequence and a total order that timestamps alone cannot provide.
+- Event ordering: the existing per-sandbox `version_id` counts recorded lifecycle
+  changes, giving the event log a gapless sequence and a total order that timestamps
+  alone cannot provide.
 
 ### Concept: streaming HTTP is fighting three buffers
 
@@ -113,21 +116,22 @@ stateDiagram-v2
 `}
 />
 
-### Concept: the generation column counts change
+### Concept: `version_id` already counts recorded change
 
 Roadmap 06's events carry timestamps, and timestamps are a bad sort key: two transitions
 inside the same clock second are indistinguishable, and a reader cannot tell whether it
-has seen every fact or only most of them. A `generation` column — an integer incremented
-inside every successful transition and stamped onto the event row written in the same
-transaction — fixes both. It gives each sandbox's events a total order independent of
-the clock, and it makes completeness checkable: if the generations in a sandbox's
-ordered events ever skip a number, some code path mutated state without recording a
-fact, which is roadmap 06's replay invariant made numeric. Roadmap 17's usage processor
-is the consumer that depends on this, and it is added now because this roadmap
-introduces a second writer path (the readiness probe's pending→running transition), so
-the increment has to be built into the shared guarded update rather than retrofitted
-across scattered ones. A possible future use, not planned by any roadmap here:
-compare-and-swap on generation as a fencing primitive for remote writers.
+has seen every fact or only most of them. Quickspin already solves both with
+`version_id`: a sandbox and its creation event begin at version 1, then every successful
+state transition increments the sandbox value and stamps the post-transition value onto
+the event in the same transaction. That gives each sandbox's events a total order
+independent of the clock and makes completeness checkable: if ordered event version IDs
+ever skip a number, some code path changed lifecycle state without recording a fact.
+
+This roadmap therefore adds no second counter. It introduces a second writer path — the
+readiness probe's pending→running or pending→failed transition — and that path must use
+the shared guarded update with the `version_id` it observed. The same predicate already
+provides compare-and-swap fencing: a stale writer matches no row instead of overwriting a
+newer transition.
 
 ### Concept: errors do not cross process boundaries — DTOs do
 
@@ -220,10 +224,12 @@ Committed decisions:
   ndjson stream; the buffered mode remains for SDK simplicity.
 - `/healthz` reports the guest's version; the control plane logs a warning on skew with
   itself.
-- Schema: `sandboxes` gains `generation INTEGER NOT NULL DEFAULT 0`; every guarded
-  transition folds `generation = generation + 1` into its existing `SET` clause (the
-  `WHERE state = ?` validation stays). `events` gains a `generation` column recording
-  the post-transition value, written in the same transaction as the state change.
+- Versioning: `sandboxes.version_id` and `events.version_id` already form one gapless
+  per-sandbox lifecycle sequence. Roadmap 07 adds no version column or migration;
+  readiness transitions pass their observed version into the existing guarded update,
+  which increments it and records the post-transition value on the event in the same
+  transaction. Expiry-only updates remain outside this sequence because they do not
+  emit lifecycle events.
 
 <Callout tone="warning" title="Cross-compile for the sandbox, not for your laptop">
   The guest runs inside a Linux container on Lima's VM, so it must be built with
@@ -254,10 +260,10 @@ appear to hang until the child exits.
     After container start, the reconciler polls `/healthz` before marking `running`,
     with a bounded window before the sandbox goes to `failed`.
   </Task>
-  <Task title="Add the generation column to sandboxes and events">
-    A migration adding `generation` to both tables, the increment folded into every
-    transition's guarded UPDATE, and the post-transition value stamped on the event row
-    in the same transaction.
+  <Task title="Preserve versioned transitions through readiness">
+    Route pending→running and pending→failed through the existing state-update path with
+    the reconciler's observed `version_id`; do not add another counter or write either
+    lifecycle state or its event separately.
   </Task>
   <Task title="Introduce guest.Client in the control plane">
     Define the interface mirroring the guest surface and switch workload handlers to
@@ -331,14 +337,14 @@ appear to hang until the child exits.
     is that the reconciler owns convergence.
   </Hint>
   <Hint
-    title="Generations ride the transitions you already have"
-    check="TestEventGenerationsAreGapless passes: a sandbox's ordered events carry generations 1..N with no gaps or repeats."
+    title="Version IDs ride the readiness transitions"
+    check="TestEventVersionIDsRemainGapless passes: a sandbox's ordered events still carry version IDs 1..N after readiness becomes a reconciler decision."
   >
-    Do not read-increment-write: `SET generation = generation + 1` inside the guarded
-    UPDATE keeps the increment atomic with the transition, and SQLite's `RETURNING
-    generation` hands back the value to stamp on the event row without a second query.
-    If the gapless test ever fails, some transition path is writing state outside the
-    shared guarded-update helper — that path is the bug, not the test.
+    Do not create or increment a second field. Load the sandbox's current `VersionID`
+    with the state observation and pass both into `UpdateSandboxState`; its guarded SQL
+    already increments `version_id`, returns the new value, and stamps that value onto
+    the event in the same transaction. If the gapless test fails, a readiness path wrote
+    state outside the shared update — that path is the bug, not the version sequence.
   </Hint>
   <Hint
     title="guest.Client mints fresh errors from the DTO"
@@ -377,11 +383,11 @@ Guest tests, no Docker needed — run the guest as a local process against `http
   ending with an exit event.
 - `TestGuestExecKillsOnClientDisconnect` — closing the response body kills the child.
 - `TestGuestFilesRoundTrip`, `TestGuestRejectsTraversal` (reused table).
-- `TestTransitionIncrementsGeneration` — every successful transition bumps
-  `generation` by exactly one; a transition whose `WHERE state = ?` guard misses
-  leaves it unchanged.
-- `TestEventGenerationsAreGapless` — a sandbox's ordered events carry generations
-  1..N with no gaps or repeats.
+- `TestReadinessTransitionAdvancesVersionID` — each successful readiness transition
+  advances `version_id` exactly once; a stale observed state or version leaves it
+  unchanged and emits no event.
+- `TestEventVersionIDsRemainGapless` — a sandbox's ordered lifecycle events still carry
+  version IDs 1..N with no gaps or repeats after the readiness writer is added.
 
 Integration (`make test-docker`):
 

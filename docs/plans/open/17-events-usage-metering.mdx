@@ -1,19 +1,19 @@
 # 17 — Event enrichment and usage metering
 
 Depends on: 11 (tenants on every record); 13 recommended first (the `actor` field and
-host attribution earn their place once placement exists). 07's `generation` column
-assumed.
+host attribution earn their place once placement exists). The existing per-sandbox
+`events.version_id` sequence, preserved through roadmap 07, is assumed.
 
 ## Summary
 
 Make the event log carry its full story, then build the pipeline that turns it into
 measured quantities. Part one enriches the `events` table roadmap 06 created:
 structured reason codes, an `actor` column (api, reconciler, reaper, scheduler,
-admin), `tenant_id`, and the roadmap 07 `generation` — plus API and CLI surfaces for
-reading a sandbox's lifecycle history. Part two builds `internal/usage`: a usage
-processor that consumes lifecycle events through a checkpointed cursor and derives
-usage records (runtime seconds from Running→terminal intervals, billable API
-operations), exposed per tenant over the API and CLI. The roadmap ends at
+admin), and `tenant_id`, while retaining the existing `version_id` as each sandbox's
+event order — plus API and CLI surfaces for reading lifecycle history. Part two builds
+`internal/usage`: a usage processor that consumes lifecycle events through a
+checkpointed cursor and derives usage records (runtime seconds from Running→terminal
+intervals, billable API operations), exposed per tenant over the API and CLI. The roadmap ends at
 `usage_records`; rollups, pricing, and invoices are recorded as the sequel below. The
 controller never computes a quantity — it emits facts; everything downstream is
 derived, deletable, and rebuildable from the events.
@@ -64,9 +64,10 @@ emit the partial usage record with a marker so the next processor run extends ra
 than duplicates it. A sandbox whose host died (roadmap 13) has a `failed` event
 written by the reconciler — the customer's meter stops at that event's timestamp, not
 at whenever the plane noticed; the event log is precisely what makes that fair. And
-ordering comes from the roadmap 07 generation, not from timestamps: two events in the
-same clock second still have a total order, which is why the generation column was
-worth adding before the billing code that needs it.
+ordering comes from the existing per-sandbox `version_id`, not from timestamps: two
+events in the same clock second still have a total order. Roadmap 07 preserves that
+sequence when readiness adds another lifecycle writer, so the billing code can consume
+one ordering contract rather than introduce its own.
 
 <Mermaid
   caption="The pipeline as data flow, ending where this roadmap ends. The controller only appends events; each downstream stage reads the previous one and is idempotent, so any stage can be wiped and re-derived. The dashed stages are the recorded sequel."
@@ -88,30 +89,30 @@ resources. Its correctness rule is idempotence: it may crash after writing usage
 records but before advancing its checkpoint, so the same events will be processed
 twice, and the write path must tolerate that. The mechanical answer is deterministic
 record identity — a usage record's unique key derives from what it measures (sandbox,
-interval start generation, metric), so the second processing attempt upserts the same
+interval-start `version_id`, metric), so the second processing attempt upserts the same
 row instead of inserting a sibling. `TestUsageProcessorIsIdempotent` reprocesses the
-whole log from generation zero and asserts totals do not change; if that test needs
+whole log from an empty checkpoint and asserts totals do not change; if that test needs
 special-case code to pass, the record keys are wrong.
 
 ## Design and interfaces
 
 ```text
-events additions (roadmap 06 schema +):
-  actor      TEXT NOT NULL      -- api | reconciler | reaper | scheduler | admin
+events (existing ordering field + roadmap 17 additions):
+  version_id INTEGER NOT NULL   -- existing per-sandbox event order
+  actor      TEXT NOT NULL      -- new: api | reconciler | reaper | scheduler | admin
   reason     TEXT NOT NULL      -- structured code: user_requested, ttl_expired,
                                 --   readiness_timeout, host_dead, quota_denied, ...
-  tenant_id  TEXT NOT NULL      -- denormalized at write time; events are self-contained
-  generation INTEGER NOT NULL   -- exists since roadmap 07
+  tenant_id  TEXT NOT NULL      -- new: denormalized; events are self-contained
 
 usage schema (new, internal/usage owns it):
   usage_records(id, tenant_id, sandbox_id, metric{runtime_seconds, sandbox_create,
                 exec_call, file_upload, file_download}, quantity, period_start,
-                period_end, source_generation, UNIQUE(sandbox_id, metric,
-                source_generation))
+                period_end, source_version_id, UNIQUE(sandbox_id, metric,
+                source_version_id))
   usage_checkpoints(consumer, last_event_id)
 
 API / CLI:
-  GET /v1/sandboxes/{id}/events           now returns actor, reason, generation
+  GET /v1/sandboxes/{id}/events           returns version_id plus new actor/reason fields
   GET /v1/usage?from=&to=                 tenant-scoped usage records, summed by metric
   quickspin events <sandbox>              lifecycle history, human-readable
   quickspin admin usage show --tenant --month
@@ -131,6 +132,10 @@ Committed decisions:
 - Billable API operations (create, exec, upload, download) are metered from events,
   which means those operations must emit events where they do not yet — the audit
   that closes that gap is part one's real work, not a side effect.
+- Every appended sandbox event, including a new operation event, consumes the next
+  `version_id` and records it in the same transaction. Non-event row mutations do not
+  advance the sequence; otherwise event IDs would develop gaps and cease to prove log
+  completeness.
 - The pipeline stops at `usage_records`: no rollup tables, no price list, no invoice
   document. With one tenant, aggregation is a query-shape optimization for volume that
   does not exist and pricing is a rate nobody charges — both are recorded as the sequel
@@ -151,11 +156,11 @@ Committed decisions:
 ### Client surfaces
 
 **CLI.** Add `quickspin events <sandbox>` and `quickspin admin usage show --tenant
---month`; event rows must include actor, reason, and generation, and the usage command
+--month`; event rows must include `version_id`, actor, and reason, and the usage command
 must present the recorded metric quantities without inventing prices or invoices.
 
 **Web app.** Extend the sandbox detail view with a lifecycle timeline showing actor,
-reason, and generation, and add the authenticated tenant's usage view with a from/to
+reason, and `version_id`, and add the authenticated tenant's usage view with a from/to
 filter and totals grouped by metric. It must present immutable usage records, not infer
 runtime from the sandbox's current state or display billing amounts this roadmap does
 not own.
@@ -166,7 +171,8 @@ not own.
   <Task title="Enrich the events schema and close emission gaps">
     Migration for actor/reason/tenant_id, structured reason codes as typed constants,
     and an audit that every billable operation (create, exec, upload, download) emits
-    an event — adding the missing ones.
+    an event — adding the missing ones through an append path that atomically advances
+    the sandbox's existing `version_id`.
   </Task>
   <Task title="Expose lifecycle history">
     Extend `GET /v1/sandboxes/{id}/events` with the new fields and add the
@@ -205,7 +211,7 @@ not own.
     check="TestRuntimeSecondsFromEvents passes its table: clean stop, crash truncation, still-running open interval, and a stop-start-stop restart pattern each produce the expected seconds."
   >
     `runtimeSeconds(events []Event, now time.Time) []Span` — no store, no clock
-    reads inside. Order by generation, not timestamp. The open-interval case returns
+    reads inside. Order by `version_id`, not timestamp. The open-interval case returns
     a span ending at `now` with an open marker; the caller (the processor) is what
     turns open spans into extendable records. Table-test this to death before wiring
     the processor — every billing bug you cannot have later is one this table
@@ -219,11 +225,11 @@ not own.
     deterministic key), advance `usage_checkpoints.last_event_id`, commit. Crash
     before commit ⇒ full replay of the batch ⇒ the upserts land on the same rows.
     The deterministic key is the design decision: `(sandbox_id, metric,
-    source_generation)` pins a record to the event that opened it.
+    source_version_id)` pins a record to the event that opened it.
   </Hint>
   <Hint
     title="Diagnosing the likely failure: totals drift on replay"
-    check="hack/validate-17.sh wipes usage_records and the checkpoint, reruns the processor from generation zero, and the per-metric totals match the originals exactly."
+    check="hack/validate-17.sh wipes usage_records and the checkpoint, reruns the processor from an empty checkpoint, and the per-metric totals match the originals exactly."
   >
     If replay changes totals, the bug is usually one of two: a record key that includes
     something non-deterministic (a timestamp taken at processing time), or an open
@@ -250,7 +256,7 @@ Integration (`hack/validate-17.sh`, Lima):
   quantity matches the slept duration within one rounding unit and whose operation
   quantities match the exact call counts.
 - Wipe-and-replay: usage_records and checkpoint deleted, processor rerun from
-  generation zero, `GET /v1/usage` returns identical totals.
+  an empty checkpoint, `GET /v1/usage` returns identical totals.
 
 Deliberately untested and deliberately absent: rollups, pricing, and invoices (the
 recorded sequel below); payment processing; resource-seconds (CPU-seconds,

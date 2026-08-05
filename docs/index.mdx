@@ -68,8 +68,9 @@ Everything else is depth to add by appetite; 20 (depends only on 03/04) and 25
 6. [`06-reconciler-leases-events.mdx`](plans/closed/06-reconciler-leases-events.mdx) —
    reconcile loop, TTL reaping, event log, async create, crash convergence.
 7. [`07-guest-agent-api.mdx`](plans/open/07-guest-agent-api.mdx) — the in-sandbox
-   `quickspin-guest` binary serving exec (streaming) and files, E2B-envd style; adds
-   the per-sandbox `generation` counter on transitions and events.
+   `quickspin-guest` binary serving exec (streaming) and files, E2B-envd style;
+   preserves the existing per-sandbox `version_id` ordering as readiness adds a
+   transition writer.
 8. [`08-host-agent.mdx`](plans/open/08-host-agent.mdx) — `quickspin-hostd`, the
    host-side control point: the plane's only address on a host, proxying lifecycle to
    the runtime and workload calls to guests.
