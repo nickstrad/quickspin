@@ -167,8 +167,39 @@ POST /exec                       body: {cmd, env, workdir, timeout_s}
                                  response: ndjson stream of stdout/stderr/exit events
 PUT  /files?path=&mode=          write (body = content)
 GET  /files?path=                read
+DELETE /files?path=              remove a file or directory
 GET  /dir?path=                  list
 ```
+
+The Go interfaces make the same ownership split explicit. `Runtime` loses every
+workload method and retains only host lifecycle; `sbxd.Client` takes the sandbox ID and
+owns health, exec, and all four filesystem operations. Returning the exec response as a
+stream lets the public handler either copy its NDJSON events live or collect them for
+the existing buffered response.
+
+```go
+// internal/runtime
+type Runtime interface {
+    Create(ctx context.Context, sandboxID string, spec Spec) (Info, error)
+    Inspect(ctx context.Context, sandboxID string) (Info, error)
+    List(ctx context.Context) ([]Info, error)
+    Destroy(ctx context.Context, sandboxID string) error
+}
+
+// Next to its control-plane consumer, for example in internal/sbxd.
+type Client interface {
+    Health(ctx context.Context, sandboxID string) (version string, err error)
+    Exec(ctx context.Context, sandboxID string, cmd []string, opts runtime.ExecOpts) (io.ReadCloser, error)
+    WriteFile(ctx context.Context, sandboxID, path string, content []byte, mode fs.FileMode) error
+    ReadFile(ctx context.Context, sandboxID, path string) ([]byte, error)
+    ListDir(ctx context.Context, sandboxID, path string) ([]runtime.FileInfo, error)
+    RemovePath(ctx context.Context, sandboxID, path string) error
+}
+```
+
+The client accepts a sandbox ID rather than a raw `sbxd` address so roadmap 08 can
+replace direct dialing with hostd's `/v1/sbxd/{id}/*` passthrough without changing
+these consumers.
 
 <Figure caption="The workload request path after this roadmap: the plane proxies to sbxd inside the sandbox; lifecycle calls still go to the runtime.">
   <svg viewBox="0 0 640 210" role="img" aria-label="Request path from caller through control plane and sbxd.Client to sbxd and the child process inside the sandbox">
@@ -249,8 +280,9 @@ appear to hang until the child exits.
 
 <TaskList>
   <Task title="Build cmd/sbxd">
-    HTTP server with exec (streaming + kill-on-disconnect), the files endpoints
-    reusing roadmap 04's path-validation helpers, and `/healthz` with the version.
+    HTTP server with exec (streaming + kill-on-disconnect), file read/write/list/remove
+    endpoints reusing roadmap 04's path-validation helpers, and `/healthz` with the
+    version.
   </Task>
   <Task title="Change the runtime to inject sbxd">
     Bind-mount the binary read-only, make it the entrypoint, add the port mapping, and
@@ -351,7 +383,7 @@ appear to hang until the child exits.
     check="TestEndToEndStillPassesWithSbxdBackend passes: roadmap 05's validate script runs unmodified, and a failure reported by sbxd surfaces to the API caller with the plane's error shape, not a doubly wrapped remote error."
   >
     Define the interface next to its consumer (`internal/sbxd` or similar) with
-    methods mirroring the five endpoints; the HTTP implementation decodes
+    methods mirroring the six endpoints; the HTTP implementation decodes
     `api.ErrorResponse` on non-2xx, logs its fields, and returns its own error
     values that handlers can map to status codes. Swap handlers over one at a time,
     keeping roadmap 05's tests green after each swap — the public contract is the
@@ -382,7 +414,8 @@ appear to hang until the child exits.
 - `TestSbxdExecStreamsInOrder` — interleaved stdout/stderr arrive as ordered events
   ending with an exit event.
 - `TestSbxdExecKillsOnClientDisconnect` — closing the response body kills the child.
-- `TestSbxdFilesRoundTrip`, `TestSbxdRejectsTraversal` (reused table).
+- `TestSbxdFilesRoundTrip`, `TestSbxdRemovePath`, `TestSbxdRejectsTraversal` (reused
+  table).
 - `TestReadinessTransitionAdvancesVersionID` — each successful readiness transition
   advances `version_id` exactly once; a stale observed state or version leaves it
   unchanged and emits no event.
